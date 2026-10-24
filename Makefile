@@ -92,10 +92,20 @@ $(B)/test_batch_gen: tests/test_batch.c $(HDRS) $(B)/fastparse_pgo.h $(B)/pico.o
 $(B)/test_batch_spec: tests/test_batch_spec.c $(HDRS) $(B)/check_toy_spec.h
 	$(CC_T) -I$(B) -DBP_CANON_ONLY '-DBP_HTTP_H="check_toy_spec.h"' $< -o $@
 
+# the README's usage example must build and parse
+$(B)/read_loop: examples/read_loop.c $(HDRS)
+	$(CC_T) $< -o $@
+example-check: $(B)/read_loop
+	@printf 'GET /posts/42 HTTP/1.1\r\nHost: x\r\n\r\n' | ./$(B)/read_loop | grep -q "route GETPOST, id 42" && \
+	  printf 'GET /feed HTTP/1.0\r\nHost: x\r\n\r\n' | ./$(B)/read_loop | grep -q "route FEED" && \
+	  printf 'POST /posts HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n' | ./$(B)/read_loop 2>&1 | grep -q "400" && \
+	  printf 'POST /posts HTTP/1.1\r\nAuthorization: Bearer t.o.k\r\nContent-Length: 2\r\n\r\n{}' | ./$(B)/read_loop | grep -q "route CREATE, bearer token t.o.k, body 2" && \
+	  echo "example: OK"
+
 GENVECTORS ?= 200000
 FBMODE ?=
 RUN := ./scripts/run_test.sh
-test: all gencheck
+test: all gencheck example-check
 	@set -e; for t in $(FP_BINS); do $(RUN) 1 $$t nobench; done
 	@set -e; $(RUN) 2 $(B)/test_fbparse $(FBMODE); \
 	  for t in test_fbparse_scalar test_fbparse_emu512 test_fbparse_emuzmm; do $(RUN) 1 $(B)/$$t quick; done
@@ -183,4 +193,4 @@ mutants:
 
 clean:
 	rm -rf $(B)
-.PHONY: all gen gencheck test test-quick asan bench avx512 avx512-run mutants fetch compare-all conformance extras-check clean
+.PHONY: all gen gencheck test test-quick asan bench avx512 avx512-run mutants example-check fetch compare-all conformance extras-check clean

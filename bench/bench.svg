@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="386" viewBox="0 0 760 386" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13">
+<rect width="760" height="386" fill="#ffffff"/>
+<text x="16" y="26" font-size="15" font-weight="600" fill="#1f2328">ns per request, lower is better · Xeon Platinum 8260, gcc 13.3 -O3 -march=native</text>
+<text x="16" y="62" font-weight="600" fill="#1f2328">API traffic, read-heavy mix (fastparse.h's job)</text>
+<text x="182" y="87" text-anchor="end" fill="#1f2328" font-weight="600">fastparse.h (AVX2)</text>
+<rect x="190" y="74" width="89.8" height="18" rx="3" fill="#2f81f7"/>
+<text x="285.8" y="87" fill="#1f2328">47.5</text>
+<text x="182" y="113" text-anchor="end" fill="#1f2328">picohttpparser</text>
+<rect x="190" y="100" width="205.4" height="18" rx="3" fill="#8c959f"/>
+<text x="401.4" y="113" fill="#1f2328">108.6</text>
+<text x="182" y="139" text-anchor="end" fill="#1f2328">hparse (Zig)</text>
+<rect x="190" y="126" width="232.4" height="18" rx="3" fill="#8c959f"/>
+<text x="428.4" y="139" fill="#1f2328">122.9</text>
+<text x="182" y="165" text-anchor="end" fill="#1f2328">uWebSockets</text>
+<rect x="190" y="152" width="232.4" height="18" rx="3" fill="#8c959f"/>
+<text x="428.4" y="165" fill="#1f2328">122.9</text>
+<text x="182" y="191" text-anchor="end" fill="#1f2328">llhttp</text>
+<rect x="190" y="178" width="470.0" height="18" rx="3" fill="#8c959f"/>
+<text x="666.0" y="191" fill="#1f2328">248.5</text>
+<text x="16" y="238" font-weight="600" fill="#1f2328">General traffic: a Chrome request, 1 KB (fbparse.h's job)</text>
+<text x="182" y="263" text-anchor="end" fill="#1f2328" font-weight="600">fbparse.h (AVX2)</text>
+<rect x="190" y="250" width="153.6" height="18" rx="3" fill="#2f81f7"/>
+<text x="349.6" y="263" fill="#1f2328">345.2</text>
+<text x="182" y="289" text-anchor="end" fill="#1f2328">picohttpparser</text>
+<rect x="190" y="276" width="199.7" height="18" rx="3" fill="#8c959f"/>
+<text x="395.7" y="289" fill="#1f2328">448.9</text>
+<text x="182" y="315" text-anchor="end" fill="#1f2328">hparse (Zig)</text>
+<rect x="190" y="302" width="318.8" height="18" rx="3" fill="#8c959f"/>
+<text x="514.8" y="315" fill="#1f2328">716.6</text>
+<text x="182" y="341" text-anchor="end" fill="#1f2328">llhttp</text>
+<rect x="190" y="328" width="470.0" height="18" rx="3" fill="#8c959f"/>
+<text x="666.0" y="341" fill="#1f2328">1056.6</text>
+</svg>

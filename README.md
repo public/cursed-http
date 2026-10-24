@@ -1,56 +1,157 @@
 # cursed-http-parser
 
-Three single-header C parsers for HTTP/1.1 requests, built to be fast on x86-64 (AVX2, AVX-512) and
-ARM64 (NEON), with a portable scalar fallback:
+![CI](https://github.com/public/cursed-http-parser/actions/workflows/ci.yml/badge.svg)
+![License: MIT](https://img.shields.io/badge/license-MIT-orange)
 
-| header | what it is | typical cost |
-|---|---|---|
-| [`include/fastparse.h`](include/fastparse.h) | **Fast path for one known API.** Its routes are generated from a JSON spec. It returns the route, a numeric path id, the `Bearer` token and the body framing, and says `FP_FALLBACK` for anything unusual | 2.3× faster than picohttpparser doing the same job |
-| ↳ `fast_parse_learn()` (in fastparse.h) | **A learning parser.** It learns each route's most common header layout at runtime (majority vote, caller-owned 5.6 KB table) and checks later requests against it with independent compares instead of a scan. Results are identical to `fast_parse` (390k layout-claimed test inputs, all equal) | −2 to −3 ns per request in pipelined batches on ARM; no gain for single calls on Cascade Lake |
-| [`include/fbparse.h`](include/fbparse.h) | **A general parser that matches picohttpparser exactly.** It has pico's `phr_parse_request` API and gives the same result on every input, including every -1/-2 | 16–47% faster than pico on a Xeon |
-| [`include/batchparse.h`](include/batchparse.h) | **A lane-parallel batch parser.** It parses N requests from N connections in one call, and gives exactly `fast_parse`'s result per lane | 4–13% faster than N `fast_parse` calls at N ≥ 8 |
+Fast HTTP/1.1 request parsers in C, built on SIMD bitmasks (AVX2, AVX-512, NEON, with a scalar fallback).
+They are header-only, stateless and never allocate.
 
-The intended server path is `fast_parse` first, then `fbparse` for whatever it declines:
+This repository holds three single-header parsers plus a learning mode:
+- **[`fastparse.h`](include/fastparse.h)**, a fast path for *your* API. Its routes are generated from a JSON spec,
+  and it hands back the route, the numeric id, the `Bearer` token and the body framing directly.
+- **`fast_parse_learn()`**, the learning mode of fastparse.h. It learns each route's most common header layout at
+  runtime and checks later requests against that layout, with results identical to `fast_parse`.
+- **[`fbparse.h`](include/fbparse.h)**, a general parser with picohttpparser's API and exactly its results.
+- **[`batchparse.h`](include/batchparse.h)**, which parses many connections' requests in one lane-parallel call.
 
-```c
-int c = fast_parse(buf, len, &req);              // > 0: done; 0: need more bytes
-if (c == FP_FALLBACK) c = fb_parse_req(buf, len, &req);
-```
+## Features
 
-### Benchmark comparison at a glance
+* **Bitmask parsing.** One ISA-specific step classifies 64 bytes into bitmasks; everything else is portable C on
+  those masks.
+* **Stateless, zero-copy, no allocation.** Results point into your buffer, and partial requests just return
+  "need more".
+* **Spec-generated routing.** `gen/httpgen.py` compiles your routes into canonical request-line templates matched
+  with 64-bit compares. It can be profile-guided, and the profile contributes decisions only, never bytes.
+* **Safe by construction, not by hope.**
+  - Anything unusual returns `FP_FALLBACK`: HTTP/1.0, chunked, obs-fold, a bare CR, an odd Content-Length.
+  - `fbparse.h` takes those requests with picohttpparser's exact accept/reject.
+  - 298 third-party conformance cases (llhttp, HTTP Garden, picohttpparser, httparse) give 0 framing mismatches.
+* **A drop-in for picohttpparser.** `fb_parse_request` has `phr_parse_request`'s signature and returns
+  identical results on every input, including the -1 vs -2 decisions. Millions of differential inputs check that
+  on every run.
+* **Tested hard.** Differential fuzzing against picohttpparser, ASan/UBSan, planted-bug (mutation) checks, and
+  real AVX-512 runs on a Xeon.
 
-ns per request, Intel Xeon Platinum 8260 (Cascade Lake), Ubuntu 24.04, kernel 6.8, gcc 13.3 `-O3 -march=native`.
-"+logic" means the general parser plus the same routing/Bearer/Content-Length work fastparse does. Method and
-full tables are under [Benchmarks](#benchmarks).
+## Are we fast?
 
-| request-API traffic (read-heavy mix) | ns/req (+logic) | vs fastparse |
+![benchmark chart](bench/bench.svg)
+
+Intel Xeon Platinum 8260 (Cascade Lake), Ubuntu 24.04, kernel 6.8, gcc 13.3 `-O3 -march=native`, ns per request.
+General parsers are measured "+logic": the parser plus the same routing / Bearer / Content-Length work fastparse
+does. Every parser must agree with fastparse on every request before it's timed.
+
+| request-API traffic (read-heavy mix) | ns/req | |
 |---|---|---|
 | **fastparse.h** (AVX2) | **47.5** | 1× |
-| fastparse.h, learned layout ¹ | 42.9 vs 39.0 for plain fast_parse | +10% (no gain on this CPU) |
+| fastparse.h, learned layout ¹ | 42.9 vs 39.0 for plain fast_parse | +10% on this CPU |
 | picohttpparser (SSE4.2) | 108.6 | 2.3× slower |
 | hparse (Zig) | 122.9 | 2.6× slower |
 | uWebSockets 20.80 (C++) | 122.9 | 2.6× slower |
 | llhttp 9.4.3 (Node.js) | 248.5 | 5.2× slower |
 
-| general traffic, +logic | **fbparse.h** (AVX2) | picohttpparser | hparse | llhttp |
+¹ Measured before the conformance fixes, in the same run as plain `fast_parse` at 39.0. On ARM the learned layout
+saves 2–3 ns per request in pipelined batches.
+
+| general traffic | **fbparse.h** (AVX2) | picohttpparser | hparse | llhttp |
 |---|---|---|---|---|
 | curl (181 B) | **101.7** | 125.8 | 157.4 | 323.1 |
 | Chrome (1,040 B) | **345.2** | 448.9 | 716.6 | 1056.6 |
 | long headers (11 KB) | **812.4** | 1543.7 | 3252.7 | 4760.9 |
 
-¹ Measured before the conformance fixes, in the same run as plain `fast_parse` at 39.0.
+- **httparse (Rust)** was measured on Linux arm64 only. There fbparse is 1.04–2.1× faster than httparse, and
+  fastparse 4.5× faster.
+- **batchparse.h** at 16 connections per call is 4–7% faster than 16 `fast_parse` calls on mixed traffic and
+  7–13% faster on GET-only traffic. 16 picohttpparser calls are about 2.2× slower.
 
-httparse (Rust) was measured on Linux arm64 only. There fbparse is 1.04–2.1× faster than it, and fastparse
-4.5× faster.
+Reproduce:
 
-| batch of 16 connections | ns/req vs `fast_parse` × 16 |
-|---|---|
-| **batchparse.h**, mixed traffic | −4 to −7% |
-| batchparse.h, GET-only | −7 to −13% |
-| picohttpparser × 16 | about 2.2× slower |
+```bash
+make bench
+```
 
-All three are differentially tested against picohttpparser on millions of inputs per run (see
-[Correctness](#correctness)).
+This runs pico and llhttp, which are vendored. To add uWebSockets, httparse and hparse (fetched at pinned
+commits):
+
+```bash
+make compare-all
+```
+
+The full tables and the method are under [Benchmarks](#benchmarks).
+
+## Usage
+
+The example below reads a request from socket `sock` using `read(2)`. It parses the request with `fast_parse`,
+passes anything unusual to `fbparse`, and prints what it got. It is
+[`examples/read_loop.c`](examples/read_loop.c), and `make test` builds and runs it.
+
+```c
+#include "fastparse.h"
+#include "fbparse.h"
+
+char buf[8192 + 64];                       /* + 64: readable padding after the data, any contents */
+int buflen = 0, ret;
+req_t req;
+
+while (1) {
+    /* read the request */
+    ssize_t n;
+    while ((n = read(sock, buf + buflen, sizeof buf - 64 - buflen)) == -1 && errno == EINTR)
+        ;
+    if (n <= 0)
+        return IOError;
+    buflen += n;
+    /* parse it: the API's canonical requests on the fast path, everything else pico-exact */
+    ret = fast_parse(buf, buflen, &req);
+    if (ret == FP_FALLBACK) {
+        fb_info_t info;
+        ret = fb_parse_req_ex(buf, buflen, &req, &info);
+        if (ret == FP_FALLBACK && info.flags == FB_MINOR)
+            ret = info.total;              /* HTTP/1.0: fine too */
+    }
+    if (ret > 0)
+        break;                             /* complete request: head + body */
+    if (ret == -2 || ret == FP_FALLBACK)
+        return BadRequest;                 /* invalid, or chunked / odd Content-Length (or 501) */
+    /* FP_NEED_MORE: request is incomplete, continue the loop */
+    if (buflen == sizeof buf - 64)
+        return RequestIsTooLongError;
+}
+
+printf("request is %d bytes, route %d\n", ret, req.route);
+if (req.id_ok) printf("id is %lld\n", (long long)req.id);
+if (req.auth)  printf("bearer token is %.*s\n", req.tok_len, req.tok);
+printf("body is %d bytes at offset %d\n", req.body_len, req.body_off);
+```
+
+**Many connections at once:**
+
+```c
+bp_parse(n, bufs, lens, reqs, rets);   /* rets[i] == fast_parse(bufs[i], lens[i], &reqs[i]) */
+```
+
+**As a drop-in for picohttpparser:** keep your `phr_parse_request` call, rename it to `fb_parse_request`, and use
+`struct fb_header`. That struct has the same layout as `struct phr_header`.
+
+## Installation
+
+The parsers are header-only. Copy `include/` into your tree, then add `-march=native` (x86) or `-mcpu=native`
+(ARM); see the [build matrix](#build-matrix).
+
+For your own routes, generate the header from your spec:
+
+```bash
+python3 gen/httpgen.py gen my_spec.json --base include/fastparse.h -o fastparse_my_api.h
+```
+
+To run the tests and benchmarks you need `cc`, `make` and `python3`:
+
+```bash
+make test
+```
+
+```bash
+make bench
+```
 
 ## Contents
 
@@ -62,6 +163,7 @@ All three are differentially tested against picohttpparser on millions of inputs
 - [Correctness](#correctness)
 - [Benchmarks](#benchmarks)
 - [Limits and semantic differences](#limits-and-semantic-differences)
+- [Acknowledgements](#acknowledgements)
 - [Licence](#licence)
 
 ## Why it's fast
@@ -524,6 +626,23 @@ anyway.
 - POST layouts rarely stick in the learned path, because token lengths vary.
 - The spec format is as listed above.
 - picohttpparser itself is undefined for `last_len > len + 3`, and so is `fb_parse_request`.
+
+## Acknowledgements
+
+This project builds on, and is measured against:
+
+* [h2o/picohttpparser](https://github.com/h2o/picohttpparser): the reference every test compares against, and the
+  API `fbparse.h` reproduces
+* [nodejs/llhttp](https://github.com/nodejs/llhttp), [seanmonstar/httparse](https://github.com/seanmonstar/httparse),
+  [nikneym/hparse](https://github.com/nikneym/hparse) and [uNetworking/uWebSockets](https://github.com/uNetworking/uWebSockets):
+  comparison and conformance references
+* [narfindustries/http-garden](https://github.com/narfindustries/http-garden): request-smuggling payloads that
+  found real framing bugs here
+* [simdjson](https://github.com/simdjson/simdjson) and Geoff Langdale's and Daniel Lemire's work on bitmask
+  parsing
+* [SWAR explained: parsing eight digits](https://lemire.me/blog/2022/01/21/swar-explained-parsing-eight-digits/)
+  by Daniel Lemire
+* [Bit Twiddling Hacks](https://graphics.stanford.edu/~seander/bithacks.html) by Sean Eron Anderson
 
 ## Licence
 
