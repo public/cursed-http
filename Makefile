@@ -5,6 +5,8 @@
 #   make bench        benchmarks: fastparse, fbparse, batchparse, and the comparison vs pico / llhttp
 #   make avx512       real AVX-512 builds (need an AVX-512 CPU to run: make avx512-run)
 #   make mutants      planted bugs: every mutant must make a test fail
+#   make compare-all  + uWebSockets, httparse, hparse (fetched at pinned commits; rustc / zig optional)
+#   make conformance  third-party conformance suites (fetched at pinned commits)
 #   make gen          regenerate build/fastparse_gen.h and build/fastparse_pgo.h from gen/example_spec.json
 # Everything is built into build/. The library itself is header-only: include/*.h.
 CC ?= cc
@@ -151,6 +153,28 @@ avx512-run: avx512
 	@set -e; $(RUN) 1 $(B)/test_fastparse_avx512 nobench; $(RUN) 1 $(B)/test_fastparse_zmm nobench; \
 	  $(RUN) 1 $(B)/test_fbparse_avx512 quick; $(RUN) 1 $(B)/test_fbparse_zmm quick; $(RUN) 1 $(B)/test_batch_avx512
 
+# ---- extras that need third-party sources fetched at pinned commits (network; nothing is vendored) ----
+fetch:
+	./scripts/fetch-thirdparty.sh
+# fastparse / fbparse vs pico, llhttp, uWebSockets, httparse (rustc), hparse (zig 0.15)
+compare-all: fetch
+	./scripts/build-extras.sh
+	./$(B)/compare_all
+	./$(B)/bench_fbparse_all
+# quick check of all of the above (correctness gates only, short benchmarks): used by CI / Docker
+extras-check: conformance
+	./$(B)/compare_all gate
+	$(RUN) 2 $(B)/bench_fbparse_all 2
+# conformance: 298 cases from llhttp, HTTP Garden, picohttpparser and httparse suites, every truncation
+$(B)/cases.bin: conformance/extract.py | $(B)
+	./scripts/fetch-thirdparty.sh llhttp-src garden pico-src httparse
+	$(PYTHON) conformance/extract.py third_party/llhttp-src third_party/garden third_party/pico-src/test.c third_party/httparse/src/lib.rs > $@
+conformance: $(B)/cases.bin all
+	./scripts/fetch-thirdparty.sh uws
+	./scripts/build-extras.sh
+	./$(B)/conf $(B)/cases.bin $(B)/conformance-report.txt
+	@for t in test_fbparse test_fbparse_scalar test_fbparse_emu512; do FB_CASES=$(B)/cases.bin ./$(B)/$$t quick | grep -E "conformance|TOTAL"; done
+
 # planted bugs that the tests must catch (prints one line per mutant; read the output)
 mutants:
 	./scripts/mutants_fbparse.sh
@@ -159,4 +183,4 @@ mutants:
 
 clean:
 	rm -rf $(B)
-.PHONY: all gen gencheck test test-quick asan bench avx512 avx512-run mutants clean
+.PHONY: all gen gencheck test test-quick asan bench avx512 avx512-run mutants fetch compare-all conformance extras-check clean

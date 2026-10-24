@@ -46,3 +46,20 @@ from the release tag. MIT licence, Copyright Fedor Indutny, 2018; full text in `
 
 `include/fbparse.h` reproduces picohttpparser's validation rules and its -1/-2 (invalid/incomplete) decisions,
 including its `is_complete()` last-length check, and is tested to agree with it on every input.
+
+## Fetched on demand (never committed): `scripts/fetch-thirdparty.sh` → `third_party/`
+
+Used only by `make conformance`, `make compare-all` and `make extras-check`. Each is downloaded at a pinned commit
+and keeps its own licence.
+
+| name | project | commit | licence | used for |
+|---|---|---|---|---|
+| uws | https://github.com/uNetworking/uWebSockets v20.80.0 | `3ffd6f44c9c3` | Apache-2.0 | comparison benchmark, conformance reference |
+| httparse | https://github.com/seanmonstar/httparse v1.10.1 | `9f29e79f9832` | MIT / Apache-2.0 | comparison benchmark (rustc), conformance cases |
+| hparse | https://github.com/nikneym/hparse | `4fb3d836e804` | MIT | comparison benchmark (zig 0.15) |
+| llhttp-src | https://github.com/nodejs/llhttp | `69936dbc2292` | MIT | conformance cases (`test/request/*.md`) |
+| garden | https://github.com/narfindustries/http-garden | `b417e806c1b1` | **GPL-3.0** | conformance cases (`TROPHIES.md` payloads) |
+| pico-src | https://github.com/h2o/picohttpparser | `465a7ff09fbd` | MIT / Perl | conformance cases (`test.c`) |
+
+The shims in `bench/` (`uws_shim.cpp`, `httparse_shim.rs`, `hparse_shim.zig`, `llhttp_shim.c`) are this
+project's own code (MIT); they adapt each parser to picohttpparser's `phr_parse_request` signature.

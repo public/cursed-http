@@ -6,6 +6,7 @@ ARM64 (NEON), with a portable scalar fallback:
 | header | what it is | typical cost |
 |---|---|---|
 | [`include/fastparse.h`](include/fastparse.h) | **Fast path for one known API.** Its routes are generated from a JSON spec. It returns the route, a numeric path id, the `Bearer` token and the body framing, and says `FP_FALLBACK` for anything unusual | 2.3× faster than picohttpparser doing the same job |
+| ↳ `fast_parse_learn()` (in fastparse.h) | **A learning parser.** It learns each route's most common header layout at runtime (majority vote, caller-owned 5.6 KB table) and checks later requests against it with independent compares instead of a scan. Results are identical to `fast_parse` (390k layout-claimed test inputs, all equal) | −2 to −3 ns per request in pipelined batches on ARM; no gain for single calls on Cascade Lake |
 | [`include/fbparse.h`](include/fbparse.h) | **A general parser that matches picohttpparser exactly.** It has pico's `phr_parse_request` API and gives the same result on every input, including every -1/-2 | 16–47% faster than pico on a Xeon |
 | [`include/batchparse.h`](include/batchparse.h) | **A lane-parallel batch parser.** It parses N requests from N connections in one call, and gives exactly `fast_parse`'s result per lane | 4–13% faster than N `fast_parse` calls at N ≥ 8 |
 
@@ -15,6 +16,38 @@ The intended server path is `fast_parse` first, then `fbparse` for whatever it d
 int c = fast_parse(buf, len, &req);              // > 0: done; 0: need more bytes
 if (c == FP_FALLBACK) c = fb_parse_req(buf, len, &req);
 ```
+
+### Benchmark comparison at a glance
+
+ns per request, Intel Xeon Platinum 8260 (Cascade Lake), Ubuntu 24.04, kernel 6.8, gcc 13.3 `-O3 -march=native`.
+"+logic" means the general parser plus the same routing/Bearer/Content-Length work fastparse does. Method and
+full tables are under [Benchmarks](#benchmarks).
+
+| request-API traffic (read-heavy mix) | ns/req (+logic) | vs fastparse |
+|---|---|---|
+| **fastparse.h** (AVX2) | **47.5** | 1× |
+| fastparse.h, learned layout ¹ | 42.9 vs 39.0 for plain fast_parse | +10% (no gain on this CPU) |
+| picohttpparser (SSE4.2) | 108.6 | 2.3× slower |
+| hparse (Zig) | 122.9 | 2.6× slower |
+| uWebSockets 20.80 (C++) | 122.9 | 2.6× slower |
+| llhttp 9.4.3 (Node.js) | 248.5 | 5.2× slower |
+
+| general traffic, +logic | **fbparse.h** (AVX2) | picohttpparser | hparse | llhttp |
+|---|---|---|---|---|
+| curl (181 B) | **101.7** | 125.8 | 157.4 | 323.1 |
+| Chrome (1,040 B) | **345.2** | 448.9 | 716.6 | 1056.6 |
+| long headers (11 KB) | **812.4** | 1543.7 | 3252.7 | 4760.9 |
+
+¹ Measured before the conformance fixes, in the same run as plain `fast_parse` at 39.0.
+
+httparse (Rust) was measured on Linux arm64 only. There fbparse is 1.04–2.1× faster than it, and fastparse
+4.5× faster.
+
+| batch of 16 connections | ns/req vs `fast_parse` × 16 |
+|---|---|
+| **batchparse.h**, mixed traffic | −4 to −7% |
+| batchparse.h, GET-only | −7 to −13% |
+| picohttpparser × 16 | about 2.2× slower |
 
 All three are differentially tested against picohttpparser on millions of inputs per run (see
 [Correctness](#correctness)).
@@ -210,7 +243,8 @@ is checked on any machine. Little-endian only.
 ## Build and test
 
 Needs `cc` (GCC or Clang), `make` and `python3`. Nothing else: picohttpparser and llhttp are vendored for tests and
-benchmarks only.
+benchmarks only. The extras below download their third-party sources at pinned commits into `third_party/`
+(git-ignored, never redistributed) with `scripts/fetch-thirdparty.sh`.
 
 ```bash
 make test         # every differential test, all backends the host can run + emulated AVX-512 (~40 s)
@@ -219,6 +253,11 @@ make asan         # ASan + UBSan builds (quick mode)
 make mutants      # planted bugs: each must make a test fail (read the output)
 make bench        # benchmarks (below)
 make avx512       # real AVX-512 builds; `make avx512-run` on AVX-512 hardware
+
+# extras (network + c++; rustc for httparse, zig 0.15 for hparse, each skipped when missing)
+make conformance  # 298 third-party conformance cases x every truncation (llhttp, HTTP Garden, pico, httparse)
+make compare-all  # the benchmarks with uWebSockets, httparse and hparse added
+make extras-check # both, as quick correctness gates (CI / Docker)
 ```
 
 Linux in Docker, from any host:
@@ -292,8 +331,20 @@ back:
 - obs-fold;
 - a header name split across lines.
 
-After the fixes, every backend has **0 mismatches and 0 stalls**. The cases are built into tests/edges.h. The
-harness isn't shipped, because the HTTP Garden payloads are GPL-3.0.
+After the fixes, every backend has **0 mismatches and 0 stalls**, and the 5 shapes are fixed cases in
+`tests/edges.h`. `make conformance` reruns it: it fetches the suites at pinned commits (HTTP Garden is GPL-3.0, so
+it is downloaded, not shipped), extracts the cases with `conformance/extract.py`, and judges every input against
+llhttp (strict, full message framing), pico + the same routing logic, and uWebSockets. It also feeds the same
+cases to `tests/test_fbparse.c` (`FB_CASES`), where fbparse must match pico exactly. Current result:
+
+```
+298 cases (+26821 truncations):
+  AGREE 26 · RELAXED 3 · ACCEPT-INVALID 4 · FALLBACK 164 · NEED_MORE 101 · MISMATCH 0 · STALL 0
+```
+
+The 7 inputs accepted against some reference's rejection don't affect framing or any returned field (for example
+`Connection : upgrade`, or a form feed in a header value). The report lists each one in
+`build/conformance-report.txt`.
 
 **Platforms run:**
 
@@ -325,13 +376,15 @@ harness isn't shipped, because the HTTP Garden payloads are GPL-3.0.
   `-O3 -march=native`, steal ≤ 0.01%.
 - ARM: Apple M5 Pro, macOS, Apple clang 21, `-O3 -mcpu=native`.
 
-### fastparse.h vs general parsers (`make bench` → `build/compare`)
+### fastparse.h vs general parsers (`make bench` → `build/compare`; `make compare-all` adds uWS, httparse, hparse)
 
 Xeon, gocli -gzip corpus:
 
 | | mix | GET /feed | GET /posts/:id | POST like |
 |---|---|---|---|---|
 | picohttpparser (SSE4.2), raw / +logic | 87.1 / **107.2** | 75.4 / 85.0 | 77.2 / 95.5 | 121.6 / 159.6 |
+| hparse 4fb3d83 (Zig), raw / +logic | 97.2 / **122.9** | 74.5 / 83.4 | 74.8 / 89.7 | 192.0 / 233.3 |
+| uWebSockets 20.80.0 (C++), raw / +logic | 107.8 / **122.9** | 88.0 / 98.5 | 90.7 / 108.1 | 145.0 / 180.2 |
 | llhttp 9.4.3, raw / +logic | 220.8 / **248.5** | 191.7 / 205.3 | 200.5 / 226.3 | 367.6 / 411.8 |
 | fastparse, AVX2 ¹ | **39.0** | 22.5 | 28.6 | 80.8 |
 | fastparse, generated from the spec ¹ | 37.5 | 21.8 | 26.5 | 77.5 |
@@ -346,8 +399,10 @@ Xeon, gocli -gzip corpus:
 relative to each other. Against pico+logic re-measured in the same run (108.6 ns), the current build is **2.3×
 faster**. It is also faster than pico's raw parse, because it doesn't validate token characters.
 
-On the Xeon, uWebSockets' parser (+logic 122.9) and the Zig hparse (122.9) were measured too, but their harnesses
-aren't included. Among general parsers, pico is the fastest there.
+Among the general parsers, pico is the fastest on the Xeon. hparse ties it on GETs but loses on long POSTs, and
+uWebSockets' parser is about 20% slower than pico. httparse (Rust) wasn't measured on the Xeon. On Linux arm64
+(Docker on the M5, gcc 13), raw / +logic on the mix was: pico 35.4 / 41.4, hparse 35.1 / 46.7, httparse 52.4 /
+57.2, llhttp 64.9 / 73.5, and fastparse 12.8.
 
 Apple M5 Pro, current build (`build/compare`, gocli -gzip corpus, one run, load average ~6.5):
 
@@ -367,20 +422,31 @@ Apple M5 Pro, current build (`build/compare`, gocli -gzip corpus, one run, load 
 - Parsing is 10–50 ns of a request that costs tens of µs in a real server. Treat this as removing the parser from
   the profile, not as a throughput multiplier.
 
-### fbparse.h vs picohttpparser and llhttp (`build/bench_fbparse`)
+### fbparse.h vs general parsers (`build/bench_fbparse`; `make compare-all` adds httparse, hparse)
 
 Xeon, +logic (raw in brackets), ns/request:
 
-| corpus (avg bytes) | picohttpparser | **fbparse AVX2** | Δ | llhttp |
-|---|---|---|---|---|
-| curl (181) | 125.8 (102.4) | **101.7** (85.1) | −19% | 323.1 |
-| Chrome (1040) | 448.9 (363.8) | **345.2** (295.6) | −23% | 1056.6 |
-| Firefox (813) | 402.1 (328.8) | **347.4** (299.8) | −14% | 948.2 |
-| HTTP/1.0 (166) | 108.6 (107.8) | **105.4** (88.1) | −3% | 288.7 |
-| long headers (11206) | 1543.7 (1505.3) | **812.4** (780.9) | −47% | 4760.9 |
-| chunked POST (456) | 201.3 (176.9) | **167.6** (156.7) | −17% | 550.7 |
-| k6 (130) | 101.7 (80.9) | **83.7** (66.8) | −18% | 257.6 |
-| gocli (80) | 83.8 (64.4) | **65.0** (49.0) | −22% | 211.9 |
+| corpus (avg bytes) | picohttpparser | **fbparse AVX2** | Δ | llhttp | hparse (Zig) |
+|---|---|---|---|---|---|
+| curl (181) | 125.8 (102.4) | **101.7** (85.1) | −19% | 323.1 | 157.4 |
+| Chrome (1040) | 448.9 (363.8) | **345.2** (295.6) | −23% | 1056.6 | 716.6 |
+| Firefox (813) | 402.1 (328.8) | **347.4** (299.8) | −14% | 948.2 | 572.5 |
+| HTTP/1.0 (166) | 108.6 (107.8) | **105.4** (88.1) | −3% | 288.7 | 126.9 |
+| long headers (11206) | 1543.7 (1505.3) | **812.4** (780.9) | −47% | 4760.9 | 3252.7 |
+| chunked POST (456) | 201.3 (176.9) | **167.6** (156.7) | −17% | 550.7 | 305.3 |
+| k6 (130) | 101.7 (80.9) | **83.7** (66.8) | −18% | 257.6 | 120.0 |
+| gocli (80) | 83.8 (64.4) | **65.0** (49.0) | −22% | 211.9 | 101.4 |
+
+Linux arm64 (Docker on the M5, gcc 13, NEON), +logic, with httparse (Rust, NEON):
+
+| corpus | pico | **fbparse** | httparse 1.10.1 | hparse | llhttp |
+|---|---|---|---|---|---|
+| curl | 57.3 | **38.2** | 65.3 | 82.4 | 92.0 |
+| Chrome | 240.9 | **142.8** | 169.1 | 571.9 | 279.7 |
+| long headers | 1633.6 | **453.3** | 470.3 | 4728.0 | 525.1 |
+| chunked POST | 113.4 | **61.4** | 94.1 | 226.5 | 143.6 |
+| k6 | 42.7 | **29.4** | 53.0 | 45.6 | 74.8 |
+| gocli | 33.1 | **22.3** | 47.4 | 32.6 | 60.3 |
 
 Variants on the Xeon:
 - AVX-512 ymm ≈ AVX2.

@@ -12,6 +12,6 @@ docker run --rm --platform linux/$ARCH ${DOCKER_CPUS:+--cpuset-cpus $DOCKER_CPUS
   set -e; uname -sm
   for cc in gcc clang; do
     echo \"===== \$cc: \$(\$cc --version | head -1)\"
-    rm -rf /w; mkdir /w; cd /src; tar --exclude=./build --exclude=./.git -cf - . | tar -C /w -xf -; cd /w
+    rm -rf /w; mkdir /w; cd /src; tar --exclude=./build --exclude=./.git --exclude=./third_party -cf - . | tar -C /w -xf -; cd /w
     make -s CC=\$cc $TARGETS
   done"

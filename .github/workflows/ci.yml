@@ -16,5 +16,7 @@ jobs:
       - run: make CC=${{ matrix.cc }} test-quick
       - if: runner.os == 'Linux'
         run: make CC=${{ matrix.cc }} asan
+      - if: runner.os == 'Linux'
+        run: make CC=${{ matrix.cc }} extras-check
       - if: runner.os == 'Linux' && runner.arch == 'X64'
         run: make CC=${{ matrix.cc }} avx512
