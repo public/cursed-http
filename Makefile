@@ -6,6 +6,7 @@
 #   make avx512       real AVX-512 builds (need an AVX-512 CPU to run: make avx512-run)
 #   make mutants      planted bugs: every mutant must make a test fail
 #   make compare-all  + uWebSockets, httparse, hparse (fetched at pinned commits; rustc / zig optional)
+#   make compare-go   + fasthttp (Go >= 1.26) on the same corpora
 #   make conformance  third-party conformance suites (fetched at pinned commits)
 #   make gen          regenerate build/fastparse_gen.h and build/fastparse_pgo.h from gen/example_spec.json
 # Everything is built into build/. The library itself is header-only: include/*.h.
@@ -171,6 +172,13 @@ compare-all: fetch
 	./scripts/build-extras.sh
 	./$(B)/compare_all
 	./$(B)/bench_fbparse_all
+# fasthttp (Go >= 1.26, modules pinned by bench/go-fasthttp/go.sum; network for the first download)
+$(B)/dump_corpus: bench/dump_corpus.c $(HDRS)
+	$(CC_T) $< $(PICO) -o $@
+compare-go: $(B)/dump_corpus
+	cd bench/go-fasthttp && go build -o ../../$(B)/fasthttp_bench .
+	@for s in 1 0 2 10 11 12 13 14 15; do ./$(B)/dump_corpus $(B)/corpus$$s.bin $$s 4096; ./$(B)/fasthttp_bench $(B)/corpus$$s.bin 60; done
+
 # quick check of all of the above (correctness gates only, short benchmarks): used by CI / Docker
 extras-check: conformance
 	./$(B)/compare_all gate
@@ -193,4 +201,4 @@ mutants:
 
 clean:
 	rm -rf $(B)
-.PHONY: all gen gencheck test test-quick asan bench avx512 avx512-run mutants example-check fetch compare-all conformance extras-check clean
+.PHONY: all gen gencheck test test-quick asan bench avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check clean

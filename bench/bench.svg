@@ -1,33 +1,61 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="760" height="386" viewBox="0 0 760 386" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13">
-<rect width="760" height="386" fill="#ffffff"/>
-<text x="16" y="26" font-size="15" font-weight="600" fill="#1f2328">ns per request, lower is better · Xeon Platinum 8260, gcc 13.3 -O3 -march=native</text>
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="666" viewBox="0 0 760 666" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13">
+<rect width="760" height="666" fill="#ffffff"/>
+<text x="16" y="26" font-size="15" font-weight="600" fill="#1f2328">ns per request (+logic), lower is better · Xeon Platinum 8260, gcc 13.3 -O3 -march=native</text>
 <text x="16" y="62" font-weight="600" fill="#1f2328">API traffic, read-heavy mix (fastparse.h's job)</text>
 <text x="182" y="87" text-anchor="end" fill="#1f2328" font-weight="600">fastparse.h (AVX2)</text>
-<rect x="190" y="74" width="89.8" height="18" rx="3" fill="#2f81f7"/>
-<text x="285.8" y="87" fill="#1f2328">47.5</text>
-<text x="182" y="113" text-anchor="end" fill="#1f2328">picohttpparser</text>
-<rect x="190" y="100" width="205.4" height="18" rx="3" fill="#8c959f"/>
-<text x="401.4" y="113" fill="#1f2328">108.6</text>
-<text x="182" y="139" text-anchor="end" fill="#1f2328">hparse (Zig)</text>
-<rect x="190" y="126" width="232.4" height="18" rx="3" fill="#8c959f"/>
-<text x="428.4" y="139" fill="#1f2328">122.9</text>
-<text x="182" y="165" text-anchor="end" fill="#1f2328">uWebSockets</text>
-<rect x="190" y="152" width="232.4" height="18" rx="3" fill="#8c959f"/>
-<text x="428.4" y="165" fill="#1f2328">122.9</text>
-<text x="182" y="191" text-anchor="end" fill="#1f2328">llhttp</text>
-<rect x="190" y="178" width="470.0" height="18" rx="3" fill="#8c959f"/>
-<text x="666.0" y="191" fill="#1f2328">248.5</text>
-<text x="16" y="238" font-weight="600" fill="#1f2328">General traffic: a Chrome request, 1 KB (fbparse.h's job)</text>
-<text x="182" y="263" text-anchor="end" fill="#1f2328" font-weight="600">fbparse.h (AVX2)</text>
-<rect x="190" y="250" width="153.6" height="18" rx="3" fill="#2f81f7"/>
-<text x="349.6" y="263" fill="#1f2328">345.2</text>
-<text x="182" y="289" text-anchor="end" fill="#1f2328">picohttpparser</text>
-<rect x="190" y="276" width="199.7" height="18" rx="3" fill="#8c959f"/>
-<text x="395.7" y="289" fill="#1f2328">448.9</text>
-<text x="182" y="315" text-anchor="end" fill="#1f2328">hparse (Zig)</text>
-<rect x="190" y="302" width="318.8" height="18" rx="3" fill="#8c959f"/>
-<text x="514.8" y="315" fill="#1f2328">716.6</text>
-<text x="182" y="341" text-anchor="end" fill="#1f2328">llhttp</text>
-<rect x="190" y="328" width="470.0" height="18" rx="3" fill="#8c959f"/>
-<text x="666.0" y="341" fill="#1f2328">1056.6</text>
+<rect x="190" y="74" width="55.9" height="18" rx="3" fill="#2f81f7"/>
+<text x="251.9" y="87" fill="#1f2328">46.7</text>
+<text x="182" y="113" text-anchor="end" fill="#1f2328">lightning</text>
+<rect x="190" y="100" width="114.2" height="18" rx="3" fill="#8c959f"/>
+<text x="310.2" y="113" fill="#1f2328">95.4</text>
+<text x="182" y="139" text-anchor="end" fill="#1f2328">picohttpparser</text>
+<rect x="190" y="126" width="130.2" height="18" rx="3" fill="#8c959f"/>
+<text x="326.2" y="139" fill="#1f2328">108.8</text>
+<text x="182" y="165" text-anchor="end" fill="#1f2328">hparse (Zig)</text>
+<rect x="190" y="152" width="147.1" height="18" rx="3" fill="#8c959f"/>
+<text x="343.1" y="165" fill="#1f2328">122.9</text>
+<text x="182" y="191" text-anchor="end" fill="#1f2328">uWebSockets</text>
+<rect x="190" y="178" width="150.9" height="18" rx="3" fill="#8c959f"/>
+<text x="346.9" y="191" fill="#1f2328">126.1</text>
+<text x="182" y="217" text-anchor="end" fill="#1f2328">llhttp</text>
+<rect x="190" y="204" width="304.5" height="18" rx="3" fill="#8c959f"/>
+<text x="500.5" y="217" fill="#1f2328">254.4</text>
+<text x="182" y="243" text-anchor="end" fill="#1f2328">fasthttp (Go)</text>
+<rect x="190" y="230" width="470.0" height="18" rx="3" fill="#8c959f"/>
+<text x="666.0" y="243" fill="#1f2328">392.7</text>
+<text x="16" y="290" font-weight="600" fill="#1f2328">General traffic: a Chrome request, 1 KB (fbparse.h's job)</text>
+<text x="182" y="315" text-anchor="end" fill="#1f2328" font-weight="600">fbparse.h (AVX2)</text>
+<rect x="190" y="302" width="107.5" height="18" rx="3" fill="#2f81f7"/>
+<text x="303.5" y="315" fill="#1f2328">353.9</text>
+<text x="182" y="341" text-anchor="end" fill="#1f2328">lightning</text>
+<rect x="190" y="328" width="123.1" height="18" rx="3" fill="#8c959f"/>
+<text x="319.1" y="341" fill="#1f2328">405</text>
+<text x="182" y="367" text-anchor="end" fill="#1f2328">picohttpparser</text>
+<rect x="190" y="354" width="134.6" height="18" rx="3" fill="#8c959f"/>
+<text x="330.6" y="367" fill="#1f2328">442.9</text>
+<text x="182" y="393" text-anchor="end" fill="#1f2328">hparse (Zig)</text>
+<rect x="190" y="380" width="217.7" height="18" rx="3" fill="#8c959f"/>
+<text x="413.7" y="393" fill="#1f2328">716.6</text>
+<text x="182" y="419" text-anchor="end" fill="#1f2328">llhttp</text>
+<rect x="190" y="406" width="321.9" height="18" rx="3" fill="#8c959f"/>
+<text x="517.9" y="419" fill="#1f2328">1059.5</text>
+<text x="182" y="445" text-anchor="end" fill="#1f2328">fasthttp (Go)</text>
+<rect x="190" y="432" width="470.0" height="18" rx="3" fill="#8c959f"/>
+<text x="666.0" y="445" fill="#1f2328">1546.8</text>
+<text x="16" y="492" font-weight="600" fill="#1f2328">Long headers, 11 KB (fbparse.h's job)</text>
+<text x="182" y="517" text-anchor="end" fill="#1f2328" font-weight="600">fbparse.h (AVX2)</text>
+<rect x="190" y="504" width="50.2" height="18" rx="3" fill="#2f81f7"/>
+<text x="246.2" y="517" fill="#1f2328">595.5</text>
+<text x="182" y="543" text-anchor="end" fill="#1f2328">lightning</text>
+<rect x="190" y="530" width="51.9" height="18" rx="3" fill="#8c959f"/>
+<text x="247.9" y="543" fill="#1f2328">615.2</text>
+<text x="182" y="569" text-anchor="end" fill="#1f2328">picohttpparser</text>
+<rect x="190" y="556" width="130.0" height="18" rx="3" fill="#8c959f"/>
+<text x="326.0" y="569" fill="#1f2328">1542.2</text>
+<text x="182" y="595" text-anchor="end" fill="#1f2328">llhttp</text>
+<rect x="190" y="582" width="401.2" height="18" rx="3" fill="#8c959f"/>
+<text x="597.2" y="595" fill="#1f2328">4758.4</text>
+<text x="182" y="621" text-anchor="end" fill="#1f2328">fasthttp (Go)</text>
+<rect x="190" y="608" width="470.0" height="18" rx="3" fill="#8c959f"/>
+<text x="666.0" y="621" fill="#1f2328">5574.2</text>
 </svg>

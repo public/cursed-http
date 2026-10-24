@@ -207,6 +207,41 @@ FB_INLINE void fb_ntct64_simd(const char *p, uint64_t *nt, uint64_t *ct) {   // 
 #undef FB_P
 }
 #undef FB_NEON4
+// "maybe a ct byte in the next FB_CTANY_BLOCKS * 64 bytes?" for fb_line()'s long-value loop. It may over-approximate,
+// because a positive only sends the block to the exact masks: (int8)(x + 1) < 0x21 holds for every control byte
+// (HT too), DEL, and every byte >= 0x80 (not allowed in cookies, rare in other headers). Two ops per 16 bytes (add,
+// signed min), like memchr's compare + or; two independent accumulators, one reduction per test; no vld4, no packing.
+// -DFB_CTANY_EXACTISH: the unsigned variant instead (min < 0x20, or DEL): no false positives on bytes >= 0x80.
+#define FB_HAVE_CTANY 1
+#ifndef FB_CTANY_BLOCKS
+#define FB_CTANY_BLOCKS 8
+#endif
+#ifndef FB_CTANY_AFTER
+#define FB_CTANY_AFTER 2   // blocks of a line classified exactly before the skip windows start (after the crossing block)
+#endif
+#ifndef FB_CTANY_PREFETCH
+#define FB_CTANY_PREFETCH 3072   // bytes ahead to prefetch in the skip loop (0 = none); long heads are memory-bound
+#endif
+FB_INLINE int fb_ctany_simd(const char *p, const int nb) {   // nb 64-byte blocks (a constant at each call)
+#ifdef FB_CTANY_EXACTISH
+  const uint8x16_t DEL = vdupq_n_u8(0x7f);
+  uint8x16_t mn0 = vdupq_n_u8(0xff), mn1 = mn0, d0 = vdupq_n_u8(0), d1 = d0;
+  for (int i = 0; i < 4 * nb; i += 2) {
+    uint8x16_t x0 = vld1q_u8((const uint8_t *)p + 16 * i), x1 = vld1q_u8((const uint8_t *)p + 16 * i + 16);
+    mn0 = vminq_u8(mn0, x0); mn1 = vminq_u8(mn1, x1);
+    d0 = vorrq_u8(d0, vceqq_u8(x0, DEL)); d1 = vorrq_u8(d1, vceqq_u8(x1, DEL));
+  }
+  return (vminvq_u8(vminq_u8(mn0, mn1)) < 0x20) || (vmaxvq_u8(vorrq_u8(d0, d1)) != 0);
+#else
+  const uint8x16_t ONE = vdupq_n_u8(1);   // x + 1 wraps on purpose: done unsigned (no signed overflow), compared signed
+  int8x16_t m0 = vdupq_n_s8(127), m1 = m0;
+  for (int i = 0; i < 4 * nb; i += 2) {
+    m0 = vminq_s8(m0, vreinterpretq_s8_u8(vaddq_u8(vld1q_u8((const uint8_t *)p + 16 * i), ONE)));
+    m1 = vminq_s8(m1, vreinterpretq_s8_u8(vaddq_u8(vld1q_u8((const uint8_t *)p + 16 * i + 16), ONE)));
+  }
+  return vminvq_s8(vminq_s8(m0, m1)) < 0x21;
+#endif
+}
 #elif FB_BACKEND == 2
 FB_INLINE uint64_t fb_mm2(__m256i x, __m256i y) {
   return (uint32_t)_mm256_movemask_epi8(x) | ((uint64_t)(uint32_t)_mm256_movemask_epi8(y) << 32);
@@ -299,6 +334,45 @@ FB_INLINE void fb_all64_simd(const char *p, uint64_t *m) { m[0] = fb_nt64_simd(p
 #undef FB_NTM
 #endif
 
+#if (FB_BACKEND == 2 || FB_BACKEND == 3) && !defined(FP_AVX512_EMU) && !defined(FB_NO_CTANY)
+// x86 version of the NEON skip test above (AVX2 ops, also on the AVX-512 backend: no zmm): "maybe a ct byte in the
+// next FB_CTANY_BLOCKS * 64 bytes?". Over-approximates; a positive only sends the block to the exact masks.
+//   default: (int8)(x + 1) < 0x21 (controls, DEL, and every byte >= 0x80, as on NEON): add + signed min per 32 bytes
+//   -DFB_CTANY_EXACTISH: min_epu8 < 0x20 (HT counts) or any DEL: no false positives on bytes >= 0x80
+#define FB_HAVE_CTANY 1
+#ifndef FB_CTANY_BLOCKS
+#define FB_CTANY_BLOCKS 8
+#endif
+#ifndef FB_CTANY_AFTER
+#define FB_CTANY_AFTER 2   // blocks of a line classified exactly before the skip windows start (after the crossing block)
+#endif
+#ifndef FB_CTANY_PREFETCH
+#define FB_CTANY_PREFETCH 3072   // bytes ahead to prefetch in the skip loop (0 = none); long heads are memory-bound
+#endif
+FB_INLINE int fb_ctany_simd(const char *p, const int nb) {   // nb 64-byte blocks (a constant at each call)
+  const int nv = 2 * nb;
+#ifndef FB_CTANY_EXACTISH
+  const __m256i ONE = _mm256_set1_epi8(1);
+  __m256i m0 = _mm256_set1_epi8(127), m1 = m0;
+  for (int i = 0; i < nv; i += 2) {
+    m0 = _mm256_min_epi8(m0, _mm256_add_epi8(_mm256_loadu_si256((const void *)(p + 32 * i)), ONE));
+    m1 = _mm256_min_epi8(m1, _mm256_add_epi8(_mm256_loadu_si256((const void *)(p + 32 * i + 32)), ONE));
+  }
+  __m256i hit = _mm256_cmpgt_epi8(_mm256_set1_epi8(0x21), _mm256_min_epi8(m0, m1));
+  return !_mm256_testz_si256(hit, hit);
+#else
+  const __m256i DEL = _mm256_set1_epi8(0x7f), C20 = _mm256_set1_epi8(0x20);
+  __m256i mn = _mm256_set1_epi8(-1), d = _mm256_setzero_si256();
+  for (int i = 0; i < nv; i++) {
+    __m256i x = _mm256_loadu_si256((const void *)(p + 32 * i));
+    mn = _mm256_min_epu8(mn, x); d = _mm256_or_si256(d, _mm256_cmpeq_epi8(x, DEL));
+  }
+  __m256i lo = _mm256_cmpeq_epi8(_mm256_max_epu8(mn, C20), mn);   // mn >= 0x20 per byte
+  return !_mm256_testc_si256(lo, _mm256_set1_epi8(-1)) || !_mm256_testz_si256(d, d);
+#endif
+}
+#endif
+
 // simd is a compile-time constant at every call site
 enum { FB_NT, FB_CT, FB_PE, FB_LF };
 FB_INLINE uint64_t fb_cls64(int simd, const int which, const char *p) {
@@ -361,9 +435,50 @@ FB_INLINE int fb_line(const char *b, int len, int p, fb_scan_t *s, int *ce, cons
   uint64_t ml = s->m[FB_LF] >> (p & 63), mc = s->m[FB_CT] >> (p & 63);
   if (FB_LIKELY(ml)) { *ce = p + __builtin_ctzll(mc); return p + __builtin_ctzll(ml); }   // mc != 0: an LF is a ct
   int c = mc ? p + __builtin_ctzll(mc) : -1;
-  for (;;) {   // a line running on into later blocks (a long value): ct first, lf only where ct != 0 (LF is a ct)
+  // The line runs on into the next block. Most lines end there (short headers crossing a block boundary): classify
+  // that block exactly (lf and ct in one pass) before trying any skip windows, which only pay on long values.
+  p = ++k << 6;
+  if (p >= len) { *ce = c >= 0 ? c : p; return p; }
+  fb_lfct64(simd, b + p, &s->m[FB_LF], &s->m[FB_CT]); s->k[FB_LF] = s->k[FB_CT] = k;
+  if (s->m[FB_CT]) {
+    if (c < 0) c = p + __builtin_ctzll(s->m[FB_CT]);
+    if (s->m[FB_LF]) { *ce = c; return p + __builtin_ctzll(s->m[FB_LF]); }
+  }
+  for (int exact = 1;; exact++) {   // a long value: ct first, lf only where ct != 0 (LF is a ct)
     p = ++k << 6;
     if (p >= len) { *ce = c >= 0 ? c : p; return p; }
+#ifndef FB_HAVE_CTANY
+    (void)exact;
+#else
+    // Skip control-free stretches with fb_ctany_simd over windows aligned to the address (no cache-line-split loads,
+    // as memchr does), growing 256 -> 512 bytes; then find the line's end with exact masks over the same aligned
+    // 64-byte lines, in one loop, and return from here. Only for lines already FB_CTANY_AFTER blocks past the
+    // crossing: on medium lines (100-300 bytes: user agents, accept lists, small cookies) a window almost always
+    // hits and only costs (measured: ~10% on browser requests on x86).
+    // Bounds: a window or line starts at most 63 bytes before p (bytes of this same line; masked off below) and never
+    // before buf; windows are tested only while their last 64 bytes start before buf + len, lines only while they start
+    // before it, so reads stay within buf[len + 63]. Positions found in the padding are >= len, which callers read as
+    // "incomplete", exactly as for the block path below. The lf/ct block caches are left as they were (an earlier
+    // block of this line): the next fb_line() classifies its own block again.
+    if (simd && exact > FB_CTANY_AFTER) {
+      const char *a = (const char *)((uintptr_t)(b + p) & ~(uintptr_t)63), *end = b + len;
+      for (int nb = 4;;) {
+        if (a + 64 * (nb - 1) >= end || (nb == 4 ? fb_ctany_simd(a, 4) : fb_ctany_simd(a, 8))) break;
+#if FB_CTANY_PREFETCH > 0
+        __builtin_prefetch(a + FB_CTANY_PREFETCH); __builtin_prefetch(a + FB_CTANY_PREFETCH + 64 * nb - 64);
+#endif
+        a += 64 * nb; if (nb < 8) nb *= 2;
+      }
+      for (; a < end; a += 64) {
+        uint64_t keep = a < b + p ? ~0ull << ((b + p) - a) : ~0ull, ctm = fb_cls64(simd, FB_CT, a) & keep;
+        if (FB_LIKELY(!ctm)) continue;
+        if (c < 0) c = (int)(a - b) + __builtin_ctzll(ctm);
+        uint64_t lfm = fb_cls64(simd, FB_LF, a) & keep;
+        if (lfm) { *ce = c; return (int)(a - b) + __builtin_ctzll(lfm); }
+      }
+      *ce = c >= 0 ? c : (int)(a - b); return (int)(a - b);
+    }
+#endif
     uint64_t ct = fb_cls64(simd, FB_CT, b + p);
     if (FB_LIKELY(!ct)) continue;
     if (c < 0) c = p + __builtin_ctzll(ct);
@@ -385,7 +500,9 @@ static inline int fb_is_complete(const char *b, int len, size_t last_len) {
 }
 
 // What happens to each header: mode 0 = store into fb_header[] (the pico API); mode 1 = the req_t adapter.
-typedef struct { void *req; int route_auth, have_auth, have_cl, cl, flags, auth; const char *tok; int tok_len; } fb_ax_t;   // req: the req_t
+typedef struct { void *req; int route_auth, have_auth, have_cl, cl, flags, auth; const char *tok; int tok_len; int minor, lite, skip; } fb_ax_t;
+// req: the req_t; minor: set before on_reqline; lite: the caller only needs the verdict for minor != 1, so skip = 1 then
+// (no routing, no header work: the request falls back whatever its headers say)
 enum { FB_TE = 1, FB_BADCL = 2, FB_MINOR = 4 };   // fb_info_t.flags: why fb_parse_req said FP_FALLBACK
 FB_INLINE void fb_ax_header(fb_ax_t *a, const char *n, int nl, const char *v, int vl);
 
@@ -424,7 +541,7 @@ FB_INLINE int fb_core(const char *b, int len, const char **method, size_t *metho
   if (b[p] == '\r') { if (p + 1 >= len) return -2; if (b[p + 1] != '\n') return -1; p += 2; }
   else if (b[p] == '\n') p++;
   else return -1;
-  if (mode == 1) on_reqline(ax, b + ms, ml, b + ps, pl);
+  if (mode == 1) { ax->minor = mv; on_reqline(ax, b + ms, ml, b + ps, pl); }
   // headers
   size_t n = 0;
   for (;; n++) {
@@ -442,13 +559,16 @@ FB_INLINE int fb_core(const char *b, int len, const char **method, size_t *metho
       // before len goes to the sequential code below, which finds pico's exact -1 or -2.
       int ce; l = fb_line(b, len, p, &sc, &ce, simd);
       if (FB_LIKELY(l < len)) {
-        e = l - (b[l - 1] == '\r');                        // l - 1 >= p: b[p] is not LF, and not CR here
-        if (FB_UNLIKELY(ce != e)) return -1;
+        // l - 1 >= p: b[p] is not LF, and not CR here. Valid: the first ct is the CR before the LF, or the LF itself.
+        if (FB_LIKELY(ce == l - 1 && b[l - 1] == '\r')) e = l - 1;
+        else if (ce == l && b[l - 1] != '\r') e = l;
+        else return -1;
         if (FB_UNLIKELY(n != 0 && (c == ' ' || c == '\t'))) { name = NULL; nl = 0; vs = p; }
         else {
           int ne = fb_next(b, len, p, &sc, FB_NT, 0, simd);   // <= e: CR and LF are not tchars
-          if (b[ne] != ':' || ne == p) return -1;
-          name = b + p; nl = ne - p; vs = ne + 1;
+          unsigned w = (unsigned char)b[ne] | (unsigned)(unsigned char)b[ne + 1] << 8;   // ne + 1 <= e: readable
+          if ((w & 0xff) != ':' || ne == p) return -1;
+          name = b + p; nl = ne - p; vs = ne + 1 + (w >> 8 == ' ');   // the usual ": " in one step
           while (b[vs] == ' ' || b[vs] == '\t') vs++;          // stops at e at the latest
         }
         p = l + 1;
@@ -474,7 +594,7 @@ FB_INLINE int fb_core(const char *b, int len, const char **method, size_t *metho
     int ve = e;
     while (FB_UNLIKELY(ve > vs && (b[ve - 1] == ' ' || b[ve - 1] == '\t'))) ve--;
     if (mode == 0) { h[n].name = name; h[n].name_len = (size_t)nl; h[n].value = b + vs; h[n].value_len = (size_t)(ve - vs); }
-    else if (name) fb_ax_header(ax, name, nl, b + vs, ve - vs);
+    else if (name && !ax->skip) fb_ax_header(ax, name, nl, b + vs, ve - vs);
   }
   if (mode == 0) { *method = b + ms; *method_len = (size_t)ml; *path = b + ps; *path_len = (size_t)pl; *num_headers = n; }
   *minor = mv;
@@ -520,6 +640,7 @@ FB_INLINE void fb_ax_header(fb_ax_t *a, const char *n, int nl, const char *v, in
   } else if (nl >= 16 && fb_name_is(n, "transfer-encodin", 16)) a->flags |= FB_TE;
 }
 FB_INLINE void fb_ax_reqline(fb_ax_t *a, const char *m, int ml, const char *p, int pl) {
+  if (a->lite && a->minor != 1) { a->skip = 1; return; }   // fb_parse_req: falls back anyway, as ref_parse does
   req_t *r = (req_t *)a->req;
   fp_route(m, ml, p, pl, r);
   a->route_auth = fp_route_auth(r->route);
@@ -529,8 +650,8 @@ FB_INLINE void fb_ax_reqline(fb_ax_t *a, const char *m, int ml, const char *p, i
 // as for a success (route, id, auth, body_off/len) and total = head + body bytes, which may exceed len (then
 // wait for more): enough to serve an HTTP/1.0 client instead of answering 400.
 typedef struct { int minor, flags, total; } fb_info_t;
-FB_INLINE int fb_req_core(const char *b, int len, req_t *r, fb_info_t *info, const int walk, const int simd) {
-  fb_ax_t a; memset(&a, 0, sizeof a); a.req = r;
+FB_INLINE int fb_req_core(const char *b, int len, req_t *r, fb_info_t *info, const int walk, const int simd, const int lite) {
+  fb_ax_t a; memset(&a, 0, sizeof a); a.req = r; a.lite = lite;
   int minor = -1;
   r->route = R_NOTFOUND; r->id_ok = 0; r->id = 0;
   int ret = fb_core(b, len, NULL, NULL, NULL, NULL, &minor, NULL, NULL, 0, 1, &a, fb_ax_reqline, walk, simd);
@@ -544,11 +665,11 @@ FB_INLINE int fb_req_core(const char *b, int len, req_t *r, fb_info_t *info, con
   if (ret + a.cl > len) return FP_NEED_MORE;
   return ret + a.cl;
 }
-static inline int fb_parse_req_ex(const char *b, int len, req_t *r, fb_info_t *info) { return fb_req_core(b, len, r, info, FB_WALK, FB_BACKEND != 0); }
-static inline int fb_parse_req(const char *b, int len, req_t *r) { fb_info_t i; return fb_req_core(b, len, r, &i, FB_WALK, FB_BACKEND != 0); }
-static inline int fb_parse_req_scalar(const char *b, int len, req_t *r) { fb_info_t i; return fb_req_core(b, len, r, &i, FB_WALK, 0); }
+static inline int fb_parse_req_ex(const char *b, int len, req_t *r, fb_info_t *info) { return fb_req_core(b, len, r, info, FB_WALK, FB_BACKEND != 0, 0); }
+static inline int fb_parse_req(const char *b, int len, req_t *r) { fb_info_t i; return fb_req_core(b, len, r, &i, FB_WALK, FB_BACKEND != 0, 1); }
+static inline int fb_parse_req_scalar(const char *b, int len, req_t *r) { fb_info_t i; return fb_req_core(b, len, r, &i, FB_WALK, 0, 1); }
 static inline int fb_parse_req_loop(int walk, const char *b, int len, req_t *r) {   // test/A-B: the other header loop
-  fb_info_t i; return walk ? fb_req_core(b, len, r, &i, 1, FB_BACKEND != 0) : fb_req_core(b, len, r, &i, 0, FB_BACKEND != 0); }
+  fb_info_t i; return walk ? fb_req_core(b, len, r, &i, 1, FB_BACKEND != 0, 1) : fb_req_core(b, len, r, &i, 0, FB_BACKEND != 0, 1); }
 #else
 FB_INLINE void fb_ax_header(fb_ax_t *a, const char *n, int nl, const char *v, int vl) { (void)a; (void)n; (void)nl; (void)v; (void)vl; }
 #endif

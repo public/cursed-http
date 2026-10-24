@@ -39,6 +39,25 @@ if [ -z "$NOZIG" ] && command -v zig >/dev/null 2>&1 && [ -f $T/hparse/src/root.
   zig build-obj -O ReleaseFast -mcpu=native   # as hparse's bench: zig build -Doptimize=ReleaseFast (-Dcpu=...) -fPIC --dep hparse -Mroot=bench/hparse_shim.zig -Mhparse=$T/hparse/src/root.zig -femit-bin=$B/x_hparse.o
   DEFS="$DEFS -DHAVE_HPARSE"; XOBJ="$B/x_hparse.o"; echo "hparse: zig $(zig version)"
 else echo "hparse: skipped (no zig or not fetched)"; fi
+for n in lightning http-parser pico-a64 pico-a64tbl; do [ -d $T/$n ] || { echo "$n: skipped (not fetched)"; continue; }
+  case $n in
+    lightning)   # its CMake Release build: -O3 -DNDEBUG + -mavx2 (x86); -march=native covers that
+      for f in lightning url chunked; do $CC $F -DNDEBUG -w -I$T/lightning/include -I$T/lightning/src -c $T/lightning/src/$f.c -o $B/x_lt_$f.o; done
+      $CC $F -I$T/lightning/include -Ivendor/pico -c bench/lightning_shim.c -o $B/x_lt_shim.o
+      OBJS="$OBJS $B/x_lt_lightning.o $B/x_lt_url.o $B/x_lt_chunked.o $B/x_lt_shim.o"; DEFS="$DEFS -DHAVE_LIGHTNING" ;;
+    http-parser)
+      $CC $F -w -I$T/http-parser -c $T/http-parser/http_parser.c -o $B/x_hpn.o
+      $CC $F -I$T/http-parser -Ivendor/pico -c bench/http_parser_shim.c -o $B/x_hpn_shim.o
+      OBJS="$OBJS $B/x_hpn.o $B/x_hpn_shim.o"; DEFS="$DEFS -DHAVE_HTTP_PARSER" ;;
+    pico-a64|pico-a64tbl)   # Armv8-A forks of picohttpparser: only meaningful (and only built) on aarch64
+      case "$(uname -m)" in arm64|aarch64) ;; *) continue ;; esac
+      P=pa64; M=PICO_A64; [ $n = pico-a64tbl ] && P=pt64 M=PICO_A64TBL
+      R=""; for s in phr_parse_request phr_parse_response phr_parse_headers phr_decode_chunked phr_decode_chunked_is_in_data; do R="$R -D$s=${P}_$s"; done
+      $CC $F -w $R -c $T/$n/picohttpparser.c -o $B/x_$P.o
+      OBJS="$OBJS $B/x_$P.o"; DEFS="$DEFS -DHAVE_$M" ;;
+  esac
+  echo "$n: built"
+done
 $CC $F $INC $DEFS -DHAVE_UWS -c bench/compare.c -o $B/x_compare.o
 $CXX $MARCH $B/x_compare.o $B/x_ours_*.o $B/x_uw.o $OBJS $XOBJ $LIBS -o $B/compare_all
 $CC $F $INC $DEFS -c bench/bench_fbparse.c -o $B/x_bench_fb.o

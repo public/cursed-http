@@ -19,6 +19,18 @@ int lx_parse_request(const char *, size_t, const char **, size_t *, const char *
 #ifdef HAVE_HTTPARSE
 int hx_parse_request(const char *, size_t, const char **, size_t *, const char **, size_t *, int *, struct phr_header *, size_t *, size_t);
 #endif
+#ifdef HAVE_LIGHTNING
+int lt_parse_request(const char *, size_t, const char **, size_t *, const char **, size_t *, int *, struct phr_header *, size_t *, size_t);
+#endif
+#ifdef HAVE_PICO_A64
+int pa64_phr_parse_request(const char *, size_t, const char **, size_t *, const char **, size_t *, int *, struct phr_header *, size_t *, size_t);
+#endif
+#ifdef HAVE_PICO_A64TBL
+int pt64_phr_parse_request(const char *, size_t, const char **, size_t *, const char **, size_t *, int *, struct phr_header *, size_t *, size_t);
+#endif
+#ifdef HAVE_HTTP_PARSER
+int hpn_parse_request(const char *, size_t, const char **, size_t *, const char **, size_t *, int *, struct phr_header *, size_t *, size_t);
+#endif
 #ifdef HAVE_HPARSE
 int hp_parse_request(const char *, size_t, const char **, size_t *, const char **, size_t *, int *, struct phr_header *, size_t *, size_t);
 #endif
@@ -41,6 +53,18 @@ RAW(httparse, hx_parse_request) LOGIC(httparse, hx_parse_request)
 #endif
 #ifdef HAVE_HPARSE
 RAW(hparse, hp_parse_request) LOGIC(hparse, hp_parse_request)
+#endif
+#ifdef HAVE_LIGHTNING
+RAW(lightning, lt_parse_request) LOGIC(lightning, lt_parse_request)
+#endif
+#ifdef HAVE_PICO_A64
+RAW(pico_a64, pa64_phr_parse_request) LOGIC(pico_a64, pa64_phr_parse_request)
+#endif
+#ifdef HAVE_PICO_A64TBL
+RAW(pico_a64tbl, pt64_phr_parse_request) LOGIC(pico_a64tbl, pt64_phr_parse_request)
+#endif
+#ifdef HAVE_HTTP_PARSER
+RAW(http_parser, hpn_parse_request) LOGIC(http_parser, hpn_parse_request)
 #endif
 __attribute__((noinline)) static int logic_fb(const char *b, int l, req_t *r) { return fb_parse_req(b, l, r); }
 __attribute__((noinline)) static int fb_phr_seq(const char *b, size_t l, const char **m, size_t *ml, const char **p, size_t *pl, int *mv, struct phr_header *h, size_t *nh, size_t ll) {
@@ -65,6 +89,18 @@ static const entry_t E[] = {
 #endif
 #ifdef HAVE_HPARSE
   {"hparse 4fb3d83", raw_hparse, logic_hparse},
+#endif
+#ifdef HAVE_LIGHTNING
+  {"lightning 7b3b0cb (C, AVX2/SSE4.2)", raw_lightning, logic_lightning},
+#endif
+#ifdef HAVE_PICO_A64
+  {"pico, Armv8-A NEON fork", raw_pico_a64, logic_pico_a64},
+#endif
+#ifdef HAVE_PICO_A64TBL
+  {"pico, Armv8-A TBL fork", raw_pico_a64tbl, logic_pico_a64tbl},
+#endif
+#ifdef HAVE_HTTP_PARSER
+  {"http-parser 2.9.4 (Node.js)", raw_http_parser, logic_http_parser},
 #endif
 };
 #define NE ((int)(sizeof E / sizeof *E))

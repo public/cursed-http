@@ -60,6 +60,13 @@ and keeps its own licence.
 | llhttp-src | https://github.com/nodejs/llhttp | `69936dbc2292` | MIT | conformance cases (`test/request/*.md`) |
 | garden | https://github.com/narfindustries/http-garden | `b417e806c1b1` | **GPL-3.0** | conformance cases (`TROPHIES.md` payloads) |
 | pico-src | https://github.com/h2o/picohttpparser | `465a7ff09fbd` | MIT / Perl | conformance cases (`test.c`) |
+| lightning | https://github.com/softwaredc/lightning | `7b3b0cb1cb59` | Apache-2.0 | comparison benchmark |
+| pico-a64, pico-a64tbl | https://github.com/volyrique/picohttpparser (branches `armv8-a`, `armv8-a+tbl`) | `a47c4d00644f`, `b93abc18204c` | MIT / Perl | comparison benchmark (ARM) |
+| http-parser | https://github.com/nodejs/http-parser | `ec8b5ee63f0e` | MIT | comparison benchmark |
 
-The shims in `bench/` (`uws_shim.cpp`, `httparse_shim.rs`, `hparse_shim.zig`, `llhttp_shim.c`) are this
-project's own code (MIT); they adapt each parser to picohttpparser's `phr_parse_request` signature.
+`make compare-go` builds `bench/go-fasthttp` against [valyala/fasthttp](https://github.com/valyala/fasthttp) v1.76.0 (MIT)
+and its dependencies, pinned by `bench/go-fasthttp/go.sum` and downloaded by the Go toolchain into its module cache.
+
+The shims in `bench/` (`uws_shim.cpp`, `httparse_shim.rs`, `hparse_shim.zig`, `llhttp_shim.c`, `lightning_shim.c`,
+`http_parser_shim.c`) are this project's own code (MIT); they adapt each parser to picohttpparser's
+`phr_parse_request` signature.

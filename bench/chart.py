@@ -1,19 +1,23 @@
 #!/usr/bin/env python3
 """chart.py > bench/bench.svg: the README's benchmark chart (Xeon Platinum 8260 numbers from README.md, ns/request,
-general parsers +logic, i.e. doing the same routing / Bearer / Content-Length work as fastparse)."""
++logic, i.e. every parser doing the same routing / Bearer / Content-Length work as fastparse)."""
 PANELS = [
     ("API traffic, read-heavy mix (fastparse.h's job)", [
-        ("fastparse.h (AVX2)", 47.5, True), ("picohttpparser", 108.6, False), ("hparse (Zig)", 122.9, False),
-        ("uWebSockets", 122.9, False), ("llhttp", 248.5, False)]),
+        ("fastparse.h (AVX2)", 46.7, True), ("lightning", 95.4, False), ("picohttpparser", 108.8, False),
+        ("hparse (Zig)", 122.9, False), ("uWebSockets", 126.1, False), ("llhttp", 254.4, False),
+        ("fasthttp (Go)", 392.7, False)]),
     ("General traffic: a Chrome request, 1 KB (fbparse.h's job)", [
-        ("fbparse.h (AVX2)", 345.2, True), ("picohttpparser", 448.9, False), ("hparse (Zig)", 716.6, False),
-        ("llhttp", 1056.6, False)]),
+        ("fbparse.h (AVX2)", 353.9, True), ("lightning", 405.0, False), ("picohttpparser", 442.9, False),
+        ("hparse (Zig)", 716.6, False), ("llhttp", 1059.5, False), ("fasthttp (Go)", 1546.8, False)]),
+    ("Long headers, 11 KB (fbparse.h's job)", [
+        ("fbparse.h (AVX2)", 595.5, True), ("lightning", 615.2, False), ("picohttpparser", 1542.2, False),
+        ("llhttp", 4758.4, False), ("fasthttp (Go)", 5574.2, False)]),
 ]
 W, LBL, BAR, ROW, GAP = 760, 190, 470, 26, 46
 h = 40 + sum(GAP + ROW * len(r) for _, r in PANELS) + 20
 o = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" height="{h}" viewBox="0 0 {W} {h}" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13">',
      f'<rect width="{W}" height="{h}" fill="#ffffff"/>',
-     f'<text x="16" y="26" font-size="15" font-weight="600" fill="#1f2328">ns per request, lower is better · Xeon Platinum 8260, gcc 13.3 -O3 -march=native</text>']
+     f'<text x="16" y="26" font-size="15" font-weight="600" fill="#1f2328">ns per request (+logic), lower is better · Xeon Platinum 8260, gcc 13.3 -O3 -march=native</text>']
 y = 40
 for title, rows in PANELS:
     y += 30; o.append(f'<text x="16" y="{y - 8}" font-weight="600" fill="#1f2328">{title}</text>')
