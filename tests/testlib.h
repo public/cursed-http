@@ -1,0 +1,119 @@
+// Shared by the tests and benchmarks: timer, PRNG, the reference semantics on top of a pico-style parser, and the
+// request corpus generator (k6 and gocli shapes). Include after the parser header and picohttpparser.h.
+#pragma once
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+#include <time.h>
+#define PAD 64
+static double now(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t); return t.tv_sec * 1e9 + t.tv_nsec; }
+static uint64_t rs = 0x9E3779B97F4A7C15ull;
+static uint32_t rnd(void) { rs ^= rs << 13; rs ^= rs >> 7; rs ^= rs << 17; return (uint32_t)rs; }
+
+// out-of-line entry points, so the benchmark compares calls with calls (pico is a real call too)
+__attribute__((noinline)) static int P_fast(const char *b, int l, req_t *r) { return fast_parse(b, l, r); }
+__attribute__((noinline)) static int P_scalar(const char *b, int l, req_t *r) { return fast_parse_scalar(b, l, r); }
+__attribute__((noinline)) static int P_cand_scalar(const char *b, int l, req_t *r) { return fp_core_cand(b, l, r, 0); }
+__attribute__((noinline)) static int P_cand_simd(const char *b, int l, req_t *r) { return fp_core_cand(b, l, r, 1); }
+__attribute__((noinline)) static int P_walk_simd(const char *b, int l, req_t *r) { return fp_core_walk(b, l, r, 1); }
+__attribute__((noinline)) static fp_batch_t P_many(const char *b, int l, req_t *o, int m) { return fast_parse_many(b, l, o, m); }
+__attribute__((noinline)) static fp_batch_t P_many_scalar(const char *b, int l, req_t *o, int m) { return fast_parse_many_scalar(b, l, o, m); }
+
+// ---- reference: picohttpparser + identical semantics, with its own plain routing/digits ----
+static int64_t ref_digits(const char *p, int n, int *ok) {
+  *ok = 0; if (n < 1 || n > 16) return 0;
+  int64_t v = 0; for (int i = 0; i < n; i++) { unsigned d = (unsigned char)p[i] - '0'; if (d > 9) return 0; v = v * 10 + d; }
+  *ok = v > 0; return v;
+}
+static void ref_route(const char *m, int ml, const char *p, int pl, req_t *r) {   // fastparse.h fp_route, verbatim logic
+  r->route = R_NOTFOUND; r->id_ok = 0; r->id = 0;
+  if (ml == 3 && !memcmp(m, "GET", 3)) {
+    if (pl == 5 && !memcmp(p, "/feed", 5)) r->route = R_FEED;
+    else if (pl == 7 && !memcmp(p, "/health", 7)) r->route = R_HEALTH;
+    else if (pl >= 7 && !memcmp(p, "/posts/", 7)) {
+      r->id = ref_digits(p + 7, pl - 7, &r->id_ok);
+      r->route = (r->id_ok || !memchr(p + 7, '/', pl - 7)) ? R_GETPOST : R_NOTFOUND; }
+  } else if (ml == 4 && !memcmp(m, "POST", 4)) {
+    if (pl == 6 && !memcmp(p, "/posts", 6)) r->route = R_CREATE;
+    else if (pl >= 12 && !memcmp(p, "/posts/", 7) && !memcmp(p + pl - 5, "/like", 5)) {
+      r->id = ref_digits(p + 7, pl - 12, &r->id_ok);
+      r->route = (r->id_ok || !memchr(p + 7, '/', pl - 12)) ? R_LIKE : R_NOTFOUND; }
+  }
+}
+// any parser with picohttpparser's phr_parse_request signature (pico itself, and the llhttp
+// adapter in bench/) + the same routing/header logic = a reference with fast_parse's semantics
+typedef int (*phr_fn)(const char *, size_t, const char **, size_t *, const char **, size_t *, int *, struct phr_header *, size_t *, size_t);
+static inline __attribute__((always_inline)) int ref_parse_with(phr_fn parse, const char *b, int len, req_t *r) {
+  const char *m, *p; size_t ml, pl, nh = 48; int minor; struct phr_header h[48];
+  int ret = parse(b, len, &m, &ml, &p, &pl, &minor, h, &nh, 0);
+  if (ret == -2) return FP_NEED_MORE;
+  if (ret < 0) return -2;                       // pico says invalid
+  if (minor != 1) return FP_FALLBACK;
+  ref_route(m, (int)ml, p, (int)pl, r);
+  int cl = 0, have_auth = 0, have_cl = 0; r->auth = 0; r->tok = 0; r->tok_len = 0;
+  for (size_t i = 0; i < nh; i++) {
+    if (!h[i].name) continue;
+    if (h[i].name_len == 13 && !strncasecmp(h[i].name, "authorization", 13) && !have_auth) {
+      have_auth = 1;
+      if (h[i].value_len >= 7 && !memcmp(h[i].value, "Bearer ", 7)) { r->auth = 1; r->tok = h[i].value + 7; r->tok_len = (int)h[i].value_len - 7; }
+    } else if (h[i].name_len == 14 && !strncasecmp(h[i].name, "content-length", 14)) {
+      if (have_cl || h[i].value_len < 1 || h[i].value_len > 9) return FP_FALLBACK;
+      int x = 0; for (size_t k = 0; k < h[i].value_len; k++) { unsigned d = h[i].value[k] - '0'; if (d > 9) return FP_FALLBACK; x = x * 10 + d; }
+      if (h[i].value_len > 1 && h[i].value[0] == '0') return FP_FALLBACK;
+      cl = x; have_cl = 1;
+    } else if (h[i].name_len >= 16 && !strncasecmp(h[i].name, "transfer-encodin", 16)) return FP_FALLBACK;
+  }
+  if (r->route != R_CREATE && r->route != R_LIKE) { r->auth = 0; r->tok = 0; r->tok_len = 0; }
+  if (ret + cl > len) return FP_NEED_MORE;
+  r->body_off = ret; r->body_len = cl;
+  return ret + cl;
+}
+static int ref_parse(const char *b, int len, req_t *r) { return ref_parse_with(phr_parse_request, b, len, r); }
+
+static int same(int a, const req_t *x, int b, const req_t *y) {
+  if (a != b) return 0;
+  if (a <= 0) return 1;
+  return x->route == y->route && x->id_ok == y->id_ok && (!x->id_ok || x->id == y->id) && x->auth == y->auth &&
+         x->tok_len == y->tok_len && (!x->auth || x->tok == y->tok) && x->body_off == y->body_off && x->body_len == y->body_len;
+}
+
+// ---- corpus in k6 (Go net/http) request format ----
+static char TOKS[64][256];
+static void mk_tokens(void) {
+  const char *a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+  for (int t = 0; t < 64; t++) {
+    int n = sprintf(TOKS[t], "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.");
+    for (int i = 0; i < 96 + (int)(rnd() % 20); i++) TOKS[t][n++] = a[rnd() % 64];
+    TOKS[t][n++] = '.'; for (int i = 0; i < 43; i++) TOKS[t][n++] = a[rnd() % 64];
+    TOKS[t][n] = 0;
+  }
+}
+// shape 0: k6 (Go net/http header order); 1/2: "gocli", a minimal Go load generator's request writer,
+// with / without -gzip. These bytes live only in the test, never in the parser.
+static int gen_gocli(char *s, int gz) {
+  uint32_t r = rnd() % 1000; unsigned id = 1 + rnd() % 500000; const char *tok = TOKS[rnd() % 64];
+  int n = 0;
+  if (r < 460) n = sprintf(s, "GET /feed HTTP/1.1\r\n");
+  else if (r < 920) n = sprintf(s, "GET /posts/%u HTTP/1.1\r\n", id);
+  else if (r < 990) n = sprintf(s, "POST /posts/%u/like HTTP/1.1\r\n", id);
+  else n = sprintf(s, "POST /posts HTTP/1.1\r\n");
+  n += sprintf(s + n, "Host: 10.0.0.5\r\nUser-Agent: gocli\r\n%s", gz ? "Accept-Encoding: gzip\r\n" : "");
+  if (r >= 920) n += sprintf(s + n, "Authorization: Bearer %s\r\n", tok);
+  if (r >= 990) { char body[200]; int bl = sprintf(body, "{\"body\":\"post %u from gocli\"}", id);
+    return n + sprintf(s + n, "Content-Type: application/json\r\nContent-Length: %d\r\n\r\n%s", bl, body); }
+  if (r >= 920) return n + sprintf(s + n, "Content-Length: 0\r\n\r\n");
+  return n + sprintf(s + n, "\r\n");
+}
+static int gen(char *s, int shape) {
+  if (shape) return gen_gocli(s, shape == 1);
+  const char *H = "Host: 203.0.113.10\r\nUser-Agent: k6/0.54.0 (https://k6.io/)\r\n";
+  uint32_t r = rnd() % 1000; unsigned id = 1 + rnd() % 500000;
+  if (r < 460) return sprintf(s, "GET /feed HTTP/1.1\r\n%sAccept-Encoding: gzip\r\n\r\n", H);
+  if (r < 920) return sprintf(s, "GET /posts/%u HTTP/1.1\r\n%sAccept-Encoding: gzip\r\n\r\n", id, H);
+  const char *tok = TOKS[rnd() % 64];
+  if (r < 990) return sprintf(s, "POST /posts/%u/like HTTP/1.1\r\n%sContent-Length: 0\r\nAccept-Encoding: gzip\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\n\r\n", id, H, tok);
+  char body[200]; int bl = sprintf(body, "{\"body\":\"silver_comet_%u says hi at 2026-10-24T08:00:00.000Z (VU %u, iter %u)\"}", id % 20000, id % 9000, id % 50);
+  return sprintf(s, "POST /posts HTTP/1.1\r\n%sContent-Length: %d\r\nAccept-Encoding: gzip\r\nAuthorization: Bearer %s\r\nContent-Type: application/json\r\n\r\n%s", H, bl, tok, body);
+}
+

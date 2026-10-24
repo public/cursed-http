@@ -1,0 +1,59 @@
+{
+ "name": "toy-spec-for-generator-selfcheck",
+ "params": {
+  "id": {
+   "type": "positive-int",
+   "max_digits": 16
+  }
+ },
+ "routes": [
+  {
+   "name": "A",
+   "method": "GET",
+   "path": "/a"
+  },
+  {
+   "name": "NEW",
+   "method": "GET",
+   "path": "/items/new"
+  },
+  {
+   "name": "ITEM",
+   "method": "GET",
+   "path": "/items/{id}"
+  },
+  {
+   "name": "SEVEN",
+   "method": "GET",
+   "path": "/items/7"
+  },
+  {
+   "name": "ITEMSUB",
+   "method": "GET",
+   "path": "/items/{id}/sub"
+  },
+  {
+   "name": "PUTIT",
+   "method": "PUT",
+   "path": "/items/{id}",
+   "auth": "bearer"
+  },
+  {
+   "name": "DEL",
+   "method": "DELETE",
+   "path": "/items/{id}/x",
+   "auth": "bearer"
+  },
+  {
+   "name": "LONG",
+   "method": "POST",
+   "path": "/very/long/literal/path/for/chunking",
+   "auth": "bearer"
+  },
+  {
+   "name": "N2",
+   "method": "GET",
+   "path": "/n/{id}2"
+  }
+ ]
+}

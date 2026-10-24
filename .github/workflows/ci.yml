@@ -1,0 +1,20 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, ubuntu-24.04-arm, macos-14]
+        cc: [gcc, clang]
+        exclude:
+          - os: macos-14
+            cc: gcc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: make CC=${{ matrix.cc }} test-quick
+      - if: runner.os == 'Linux'
+        run: make CC=${{ matrix.cc }} asan
+      - if: runner.os == 'Linux' && runner.arch == 'X64'
+        run: make CC=${{ matrix.cc }} avx512
