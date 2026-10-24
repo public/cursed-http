@@ -1,5 +1,5 @@
 // perf_one.c: one parser, one corpus, many passes, nothing else, for hardware counters (perf stat).
-//   perf_one CORPUS.bin PARSER PASSES      PARSER: fb | pico | lightning (if built with -DHAVE_LIGHTNING)
+//   perf_one CORPUS.bin PARSER PASSES      PARSER: fb | pico | lightning (-DHAVE_LIGHTNING) | httparse (-DHAVE_HTTPARSE)
 // -DPAD_BYTES=n shifts the code layout (for layout-randomised comparisons: the median over several n).
 // CORPUS.bin comes from build/dump_corpus. Each request sits in its own malloc'd buffer with 64 bytes of padding.
 #include <stdio.h>
@@ -8,6 +8,9 @@
 #include <time.h>
 #include "picohttpparser.h"
 #include "fbparse.h"
+#ifdef HAVE_HTTPARSE
+int hx_parse_request(const char *, size_t, const char **, size_t *, const char **, size_t *, int *, struct phr_header *, size_t *, size_t);
+#endif
 #ifdef HAVE_LIGHTNING
 int lt_parse_request(const char *, size_t, const char **, size_t *, const char **, size_t *, int *, struct phr_header *, size_t *, size_t);
 #endif
@@ -28,6 +31,9 @@ int main(int argc, char **argv) {
   phr_fn fn = !strcmp(argv[2], "fb") ? fb : !strcmp(argv[2], "pico") ? phr_parse_request :
 #ifdef HAVE_LIGHTNING
               !strcmp(argv[2], "lightning") ? lt_parse_request :
+#endif
+#ifdef HAVE_HTTPARSE
+              !strcmp(argv[2], "httparse") ? hx_parse_request :
 #endif
               NULL;
   if (!fn) { fprintf(stderr, "unknown parser %s\n", argv[2]); return 2; }

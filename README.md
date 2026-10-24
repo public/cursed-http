@@ -52,18 +52,19 @@ fastparse on every request before it's timed.
 | picohttpparser (SSE4.2) | 109.2 | 2.3× slower |
 | hparse (Zig) ¹ | 122.9 | 2.6× slower |
 | uWebSockets 20.80 (C++) | 125.8 | 2.7× slower |
+| httparse 1.10.1 (Rust, AVX2) ¹ | 150.4 | 3.2× slower |
 | llhttp 9.4.3 (Node.js) | 254.0 | 5.4× slower |
 | fasthttp 1.76 (Go) ² | 392.7 | 8.4× slower |
 | http-parser 2.9.4 (Node.js, legacy) | 397.7 | 8.5× slower |
 
 **General traffic** (fbparse.h against the general parsers, +logic):
 
-| corpus | **fbparse.h** | lightning | picohttpparser | llhttp | hparse ¹ | fasthttp ² | http-parser |
+| corpus | **fbparse.h** | lightning | picohttpparser | httparse ¹ | llhttp | hparse ¹ | fasthttp ² | http-parser |
 |---|---|---|---|---|---|---|---|
-| curl (181 B) | **95.1** | 113.9 | 123.9 | 319.2 | 157.4 | 485.1 | 614.3 |
-| Chrome (1,040 B) | **326.1** | 408.1 | 444.8 | 1,083.9 | 716.6 | 1,546.8 | 2,974.3 |
-| Firefox (813 B) | **292.8** | 364.0 | 394.3 | 943.0 | 572.5 | 1,365.9 | 2,433.6 |
-| long headers (11 KB) | **583.3** | 613.3 | 1,542.8 | 4,766.5 | 3,252.7 | 5,574.2 | 26,050.3 |
+| curl (181 B) | **95.1** | 113.9 | 123.9 | 177.1 | 319.2 | 157.4 | 485.1 | 614.3 |
+| Chrome (1,040 B) | **326.1** | 408.1 | 444.8 | 760.2 | 1,083.9 | 716.6 | 1,546.8 | 2,974.3 |
+| Firefox (813 B) | **292.8** | 364.0 | 394.3 | 654.2 | 943.0 | 572.5 | 1,365.9 | 2,433.6 |
+| long headers (11 KB) | **583.3** | 613.3 | 1,542.8 | 3,024.5 | 4,766.5 | 3,252.7 | 5,574.2 | 26,050.3 |
 
 **Raw parse, fbparse.h vs the fastest competitor (lightning).** These are medians over 8 code layouts × 3 rounds of
 back-to-back pairs (see [Method](#method)):
@@ -72,6 +73,7 @@ back-to-back pairs (see [Method](#method)):
 |---|---|---|---|---|---|---|---|---|
 | fbparse.h vs lightning | **−12.7%** | **−12.5%** | **−12.7%** | **−15.0%** | **−8.6%** | **−10.9%** | **−3.1%** | **−15.3%** |
 | fbparse.h vs picohttpparser | **−18.4%** | **−17.2%** | **−20.2%** | **−25.7%** | **−18.2%** | **−21.0%** | **−62.3%** | **−21.5%** |
+| fbparse.h vs httparse (Rust, AVX2) ¹ | **−50.2%** | **−51.6%** | **−48.7%** | **−58.9%** | **−52.4%** | **−46.9%** | **−80.8%** | **−53.7%** |
 
 Lightning validates nothing: no token characters, no control bytes in values. fbparse.h checks every byte as
 picohttpparser does, and is still faster on every corpus, raw and with the routing work added.
@@ -80,8 +82,10 @@ On an Apple M5 Pro, fbparse.h is the fastest general parser on every corpus, raw
 two Armv8-A NEON forks of it, lightning, llhttp, uWebSockets and http-parser. fastparse.h does the API mix in 14.2 ns,
 against 40.5 for the best general parser.
 
-¹ hparse and httparse need Zig and Rust toolchains, which the Xeon box doesn't have; hparse's numbers are from an
-earlier run of the same harness. httparse was measured on Linux arm64 only; see below.
+¹ hparse needs Zig 0.15, which the Xeon box doesn't have, so its numbers are from an earlier run of the same harness.
+httparse is from a separate Xeon run with the box's rustc 1.94.0. It was built like its own bench profile plus
+`target-cpu=native`, so its compile-time AVX2 path is on, and it passed the same correctness gate. Its vs-fbparse
+row uses the same layout-randomised pairs, 8 layouts × 2 rounds.
 ² fasthttp is Go. It is measured by its own harness on the same request bytes (`make compare-go`): it parses with
 `RequestHeader.Read`, as its server does, and its "+logic" is the same routing in Go. There is no shared correctness
 gate across languages; it accepted every request.
@@ -582,7 +586,8 @@ Xeon, gocli -gzip corpus, raw / +logic:
 | fastparse, learned layout | 49.8 | 29.2 | 36.5 | 94.3 |
 | fastparse, scalar backend | 93.4 | 65.5 | 77.4 | 197.3 |
 
-hparse (Zig) measured 97.2 / 122.9 on the mix in an earlier run of the same harness. fasthttp (Go) is at 355.1 /
+httparse 1.10.1 (Rust, AVX2, rustc 1.94.0, separate run) is at 134.4 / 150.4 on the mix. hparse (Zig) measured
+97.2 / 122.9 on the mix in an earlier run of the same harness. fasthttp (Go) is at 355.1 /
 392.7.
 
 On the Xeon, AVX-512 (ymm or zmm), the walk-only core and the learned layout are correct but not faster than the
@@ -639,6 +644,10 @@ Xeon, raw / +logic, ns/request:
 This table is one layout. The layout-randomised medians above are the better guide where the numbers are close. On
 "odd" requests lightning disagrees with picohttpparser on 167 of 512, mostly by rejecting them early, so that row
 isn't the same job.
+
+httparse (Rust, AVX2), raw / +logic, from a separate run: curl 158.2 / 177.1, Chrome 666.8 / 760.2, Firefox
+569.4 / 654.2, HTTP/1.0 154.5 / 156.4, long headers 2992.6 / 3024.5, chunked 318.2 / 345.3, k6 132.2 / 147.7,
+gocli 111.1 / 125.9.
 
 fasthttp (Go) +logic on the same corpora: curl 485.1, Chrome 1546.8, Firefox 1365.9, HTTP/1.0 533.3, long headers
 5574.2, chunked 920.6. hparse +logic, from the earlier run: curl 157.4, Chrome 716.6, Firefox 572.5, long headers
