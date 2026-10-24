@@ -5,6 +5,7 @@
 // Not included (that is uWS's request handling around the parser): Host-required check, bloom filter,
 // Content-Length / chunked handling, query split. Our shared logic does the CL part.
 #include <cstddef>
+#include <cstdint>   // uWS headers use uint64_t without including it (its own build gets it earlier)
 #define private public
 #include "HttpParser.h"   // -Ithird_party/uws/src
 #undef private

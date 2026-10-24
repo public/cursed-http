@@ -58,8 +58,8 @@ saves 2–3 ns per request in pipelined batches.
 | Chrome (1,040 B) | **345.2** | 448.9 | 716.6 | 1056.6 |
 | long headers (11 KB) | **812.4** | 1543.7 | 3252.7 | 4760.9 |
 
-- **httparse (Rust)** was measured on Linux arm64 only. There fbparse is 1.04–2.1× faster than httparse, and
-  fastparse 4.5× faster.
+- **httparse (Rust)** was measured on Linux arm64 only, built like its own bench profile (opt-level 3, LTO, one
+  codegen unit, target-cpu=native). There fbparse is 1.2–1.8× faster than httparse, and fastparse 2.8× faster.
 - **batchparse.h** at 16 connections per call is 4–7% faster than 16 `fast_parse` calls on mixed traffic and
   7–13% faster on GET-only traffic. 16 picohttpparser calls are about 2.2× slower.
 
@@ -478,6 +478,31 @@ The 7 inputs accepted against some reference's rejection don't affect framing or
   `-O3 -march=native`, steal ≤ 0.01%.
 - ARM: Apple M5 Pro, macOS, Apple clang 21, `-O3 -mcpu=native`.
 
+### Build flags of the comparisons
+
+Every competitor is built at least as aggressively as its own project builds it for release or benchmarks. Every
+C/C++ parser, ours included, uses the same compiler and the same `-O3 -march=native`.
+
+| parser | its own release / benchmark build | ours |
+|---|---|---|
+| picohttpparser | `-O2 -msse4.2` in H2O (its Makefile only builds tests) | `-O3 -march=native` (SSE4.2 path on x86) |
+| llhttp | CMake RelWithDebInfo, `-O2 -g` | `-O3 -march=native` |
+| uWebSockets | `build.c`: `-march=native -O3 -std=c++2b -flto` | `-O3 -march=native -std=c++2b` (the parser is header-only in one TU, so LTO changes nothing) |
+| httparse | `[profile.bench]`: opt-level 3, `lto = true`, `codegen-units = 1`; SIMD cfgs from `build.rs` | the same, plus `target-cpu=native` (as its AVX2 bench) |
+| hparse | `zig build -Doptimize=ReleaseFast` (`-Dcpu=skylake` in its x86 bench) | ReleaseFast, `-mcpu=native` |
+
+The harness treats every parser the same way:
+- every parser, ours included, is called through a `noinline` function;
+- the general parsers get picohttpparser's `phr_parse_request` signature through a thin shim, which copies at most
+  8 header structs (a few ns, counted against them);
+- each request sits in its own buffer, and the corpus runs in a random order;
+- the same timing loop applies to all (best of N passes);
+- before any timing, every parser + logic must agree with `fast_parse` on every request.
+
+Ours does less work than a general parser: fastparse doesn't validate token characters (see
+[Limits](#limits-and-semantic-differences)). The +logic column is there so that each parser does the same job, so
+compare that column.
+
 ### fastparse.h vs general parsers (`make bench` → `build/compare`; `make compare-all` adds uWS, httparse, hparse)
 
 Xeon, gocli -gzip corpus:
@@ -502,9 +527,19 @@ relative to each other. Against pico+logic re-measured in the same run (108.6 ns
 faster**. It is also faster than pico's raw parse, because it doesn't validate token characters.
 
 Among the general parsers, pico is the fastest on the Xeon. hparse ties it on GETs but loses on long POSTs, and
-uWebSockets' parser is about 20% slower than pico. httparse (Rust) wasn't measured on the Xeon. On Linux arm64
-(Docker on the M5, gcc 13), raw / +logic on the mix was: pico 35.4 / 41.4, hparse 35.1 / 46.7, httparse 52.4 /
-57.2, llhttp 64.9 / 73.5, and fastparse 12.8.
+uWebSockets' parser is about 20% slower than pico. httparse (Rust) wasn't measured on the Xeon.
+
+Linux arm64 (Docker on the M5, gcc 13.3 and rustc 1.75, one run, every parser built as in [Build flags](#build-flags-of-the-comparisons)):
+
+| raw / +logic | mix | GET /feed | GET /posts/:id | POST like |
+|---|---|---|---|---|
+| picohttpparser | 35.5 / 41.9 | 26.2 / 28.8 | 29.4 / 35.5 | 73.6 / 95.1 |
+| httparse 1.10.1 (Rust) | 41.3 / 46.7 | 31.0 / 34.3 | 33.8 / 40.3 | 59.0 / 77.0 |
+| llhttp | 69.7 / 78.5 | 60.6 / 64.4 | 62.4 / 69.5 | 97.5 / 117.4 |
+| **fastparse NEON** | **16.4** | 10.9 | 12.5 | 30.2 |
+
+uWebSockets is left out of the Linux arm64 table: its timings there swing between about 35 and 95 ns from run to
+run, with g++ and clang++ alike. It is stable on macOS and on the Xeon.
 
 Apple M5 Pro, current build (`build/compare`, gocli -gzip corpus, one run, load average ~6.5):
 
@@ -539,16 +574,14 @@ Xeon, +logic (raw in brackets), ns/request:
 | k6 (130) | 101.7 (80.9) | **83.7** (66.8) | −18% | 257.6 | 120.0 |
 | gocli (80) | 83.8 (64.4) | **65.0** (49.0) | −22% | 211.9 | 101.4 |
 
-Linux arm64 (Docker on the M5, gcc 13, NEON), +logic, with httparse (Rust, NEON):
+Linux arm64 (Docker on the M5, gcc 13.3, NEON), +logic, with httparse (Rust, NEON) from the same run:
 
-| corpus | pico | **fbparse** | httparse 1.10.1 | hparse | llhttp |
-|---|---|---|---|---|---|
-| curl | 57.3 | **38.2** | 65.3 | 82.4 | 92.0 |
-| Chrome | 240.9 | **142.8** | 169.1 | 571.9 | 279.7 |
-| long headers | 1633.6 | **453.3** | 470.3 | 4728.0 | 525.1 |
-| chunked POST | 113.4 | **61.4** | 94.1 | 226.5 | 143.6 |
-| k6 | 42.7 | **29.4** | 53.0 | 45.6 | 74.8 |
-| gocli | 33.1 | **22.3** | 47.4 | 32.6 | 60.3 |
+| corpus | pico | **fbparse** | httparse 1.10.1 | llhttp |
+|---|---|---|---|---|
+| curl | 60.1 | **39.3** | 56.9 | 95.6 |
+| Chrome | 231.1 | **140.4** | 170.7 | 284.2 |
+| k6 | 44.1 | **29.3** | 44.3 | 76.3 |
+| gocli | 32.6 | **22.2** | 39.6 | 62.4 |
 
 Variants on the Xeon:
 - AVX-512 ymm ≈ AVX2.
