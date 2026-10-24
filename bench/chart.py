@@ -3,15 +3,15 @@
 +logic, i.e. every parser doing the same routing / Bearer / Content-Length work as fastparse)."""
 PANELS = [
     ("API traffic, read-heavy mix (fastparse.h's job)", [
-        ("fastparse.h (AVX2)", 46.7, True), ("lightning", 95.4, False), ("picohttpparser", 108.8, False),
-        ("hparse (Zig)", 122.9, False), ("uWebSockets", 126.1, False), ("llhttp", 254.4, False),
+        ("fastparse.h (AVX2)", 46.9, True), ("lightning", 95.3, False), ("picohttpparser", 109.2, False),
+        ("hparse (Zig)", 122.9, False), ("uWebSockets", 125.8, False), ("llhttp", 254.0, False),
         ("fasthttp (Go)", 392.7, False)]),
     ("General traffic: a Chrome request, 1 KB (fbparse.h's job)", [
-        ("fbparse.h (AVX2)", 353.9, True), ("lightning", 405.0, False), ("picohttpparser", 442.9, False),
-        ("hparse (Zig)", 716.6, False), ("llhttp", 1059.5, False), ("fasthttp (Go)", 1546.8, False)]),
+        ("fbparse.h (AVX2)", 326.1, True), ("lightning", 408.1, False), ("picohttpparser", 444.8, False),
+        ("hparse (Zig)", 716.6, False), ("llhttp", 1083.9, False), ("fasthttp (Go)", 1546.8, False)]),
     ("Long headers, 11 KB (fbparse.h's job)", [
-        ("fbparse.h (AVX2)", 595.5, True), ("lightning", 615.2, False), ("picohttpparser", 1542.2, False),
-        ("llhttp", 4758.4, False), ("fasthttp (Go)", 5574.2, False)]),
+        ("fbparse.h (AVX2)", 583.3, True), ("lightning", 613.3, False), ("picohttpparser", 1542.8, False),
+        ("llhttp", 4766.5, False), ("fasthttp (Go)", 5574.2, False)]),
 ]
 W, LBL, BAR, ROW, GAP = 760, 190, 470, 26, 46
 h = 40 + sum(GAP + ROW * len(r) for _, r in PANELS) + 20

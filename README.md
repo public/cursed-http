@@ -46,40 +46,39 @@ fastparse on every request before it's timed.
 
 | parser | ns/req | |
 |---|---|---|
-| **fastparse.h** (AVX2) | **46.7** | 1× |
-| fastparse.h, generated from the spec + profile | 44.8 | 0.96× |
-| lightning (C, AVX2/SSE4.2) | 95.4 | 2.0× slower |
-| picohttpparser (SSE4.2) | 108.8 | 2.3× slower |
+| **fastparse.h** (AVX2) | **46.9** | 1× |
+| fastparse.h, generated from the spec + profile | 45.1 | 0.96× |
+| lightning (C, AVX2/SSE4.2) | 95.3 | 2.0× slower |
+| picohttpparser (SSE4.2) | 109.2 | 2.3× slower |
 | hparse (Zig) ¹ | 122.9 | 2.6× slower |
-| uWebSockets 20.80 (C++) | 126.1 | 2.7× slower |
-| llhttp 9.4.3 (Node.js) | 254.4 | 5.4× slower |
+| uWebSockets 20.80 (C++) | 125.8 | 2.7× slower |
+| llhttp 9.4.3 (Node.js) | 254.0 | 5.4× slower |
 | fasthttp 1.76 (Go) ² | 392.7 | 8.4× slower |
-| http-parser 2.9.4 (Node.js, legacy) | 396.9 | 8.5× slower |
+| http-parser 2.9.4 (Node.js, legacy) | 397.7 | 8.5× slower |
 
 **General traffic** (fbparse.h against the general parsers, +logic):
 
 | corpus | **fbparse.h** | lightning | picohttpparser | llhttp | hparse ¹ | fasthttp ² | http-parser |
 |---|---|---|---|---|---|---|---|
-| curl (181 B) | **101.7** | 114.6 | 125.8 | 321.0 | 157.4 | 485.1 | 611.4 |
-| Chrome (1,040 B) | **353.9** | 405.0 | 442.9 | 1,059.5 | 716.6 | 1,546.8 | 2,970.3 |
-| Firefox (813 B) | **339.4** | 364.0 | 402.0 | 949.7 | 572.5 | 1,365.9 | 2,425.8 |
-| long headers (11 KB) | **595.5** | 615.2 | 1,542.2 | 4,758.4 | 3,252.7 | 5,574.2 | 26,015.6 |
+| curl (181 B) | **95.1** | 113.9 | 123.9 | 319.2 | 157.4 | 485.1 | 614.3 |
+| Chrome (1,040 B) | **326.1** | 408.1 | 444.8 | 1,083.9 | 716.6 | 1,546.8 | 2,974.3 |
+| Firefox (813 B) | **292.8** | 364.0 | 394.3 | 943.0 | 572.5 | 1,365.9 | 2,433.6 |
+| long headers (11 KB) | **583.3** | 613.3 | 1,542.8 | 4,766.5 | 3,252.7 | 5,574.2 | 26,050.3 |
 
 **Raw parse, fbparse.h vs the fastest competitor (lightning).** These are medians over 8 code layouts × 3 rounds of
 back-to-back pairs (see [Method](#method)):
 
 | | k6 | gocli | curl | Chrome | Firefox | HTTP/1.0 | long headers | chunked |
 |---|---|---|---|---|---|---|---|---|
-| fbparse.h vs lightning | **−8.2%** | **−6.3%** | **−5.1%** | **−7.0%** | +1.5% | **−4.4%** | **−1.5%** | **−5.9%** |
-| fbparse.h vs picohttpparser | **−13.6%** | **−11.2%** | **−13.0%** | **−18.3%** | **−8.1%** | **−16.2%** | **−61.7%** | **−13.3%** |
+| fbparse.h vs lightning | **−12.7%** | **−12.5%** | **−12.7%** | **−15.0%** | **−8.6%** | **−10.9%** | **−3.1%** | **−15.3%** |
+| fbparse.h vs picohttpparser | **−18.4%** | **−17.2%** | **−20.2%** | **−25.7%** | **−18.2%** | **−21.0%** | **−62.3%** | **−21.5%** |
 
 Lightning validates nothing: no token characters, no control bytes in values. fbparse.h checks every byte as
-picohttpparser does, and still wins every corpus but one by raw time, and every corpus once the routing work is
-added.
+picohttpparser does, and is still faster on every corpus, raw and with the routing work added.
 
 On an Apple M5 Pro, fbparse.h is the fastest general parser on every corpus, raw and +logic, against picohttpparser,
 two Armv8-A NEON forks of it, lightning, llhttp, uWebSockets and http-parser. fastparse.h does the API mix in 14.2 ns,
-against 40.3 for the best general parser.
+against 40.5 for the best general parser.
 
 ¹ hparse and httparse need Zig and Rust toolchains, which the Xeon box doesn't have; hparse's numbers are from an
 earlier run of the same harness. httparse was measured on Linux arm64 only; see below.
@@ -238,8 +237,12 @@ make bench
   - the loop prefetches 3 KB ahead.
 
   It then finds the line end with exact masks over the hit window, in one loop. On 11 KB heads this streams at
-  `memchr` speed while still validating every byte (429 → 163 ns on the M5, 812 → 576 ns on the Xeon). Short and
+  `memchr` speed while still validating every byte (429 → 164 ns on the M5, 812 → 561 ns on the Xeon). Short and
   medium lines never enter it.
+- **Names are scanned at the line start, not through a block cache.** One unaligned 32-byte load (16 on NEON),
+  the token LUT and a `tzcnt` give the name's end directly. The per-block mask cache it replaces missed whenever a
+  line crossed a block boundary, and those branch misses were most of the gap to non-validating parsers on browser
+  requests (Firefox on the Xeon: +3% → −9% against lightning).
 
 **batchparse.h**
 - **The gain is mostly scheduling, not SIMD.** Request lines of all lanes are classified first, then lanes are
@@ -457,8 +460,8 @@ routing logic on top. Any difference fails the test, except where the expected d
 - Every lane must equal `fast_parse`.
 - The same check runs on the generated header, and on the toy spec with `-DBP_CANON_ONLY`.
 
-**The tests catch planted bugs.** `make mutants` plants 32 bugs in fbparse.h (including 5 in the long-value skip
-loop) and 9 in batchparse.h. Every one
+**The tests catch planted bugs.** `make mutants` plants 34 bugs in fbparse.h (including 5 in the long-value skip
+loop and 2 in the line-start name scan) and 9 in batchparse.h. Every one
 fails on the platform it targets; the zero lines are backend-specific mutants run on another platform, plus one
 deliberate no-op. During development, planted bugs in fastparse.h were caught as well. One of them survived plain
 fuzzing, which is why the header-swap fuzzer exists.
@@ -568,16 +571,16 @@ Xeon, gocli -gzip corpus, raw / +logic:
 
 | | mix | GET /feed | GET /posts/:id | POST like |
 |---|---|---|---|---|
-| lightning (C, AVX2) | 74.4 / **95.4** | 69.6 / 78.4 | 70.0 / 88.8 | 114.2 / 148.8 |
-| picohttpparser (SSE4.2) | 85.8 / **108.8** | 73.8 / 85.1 | 76.2 / 96.4 | 124.3 / 161.4 |
-| uWebSockets 20.80.0 (C++) | 107.7 / **126.1** | 85.8 / 99.3 | 88.4 / 109.7 | 138.9 / 176.1 |
-| llhttp 9.4.3 | 227.3 / **254.4** | 195.6 / 211.5 | 205.7 / 233.5 | 372.2 / 415.7 |
-| http-parser 2.9.4 | 372.3 / **396.9** | 282.1 / 293.8 | 332.7 / 356.1 | 956.2 / 995.3 |
-| **fastparse, AVX2** | **46.7** | 31.1 | 36.0 | 93.1 |
-| fastparse, generated from the spec | 45.6 | 30.7 | 35.1 | 87.0 |
-| fastparse, generated, spec + profile | **44.8** | 30.8 | 34.4 | 84.3 |
-| fastparse, learned layout | 49.2 | 29.3 | 36.6 | 94.4 |
-| fastparse, scalar backend | 93.5 | 65.6 | 77.5 | 197.2 |
+| lightning (C, AVX2) | 74.4 / **95.3** | 69.6 / 78.4 | 70.0 / 89.0 | 114.1 / 149.4 |
+| picohttpparser (SSE4.2) | 85.7 / **109.2** | 73.7 / 85.3 | 76.2 / 97.2 | 124.3 / 162.6 |
+| uWebSockets 20.80.0 (C++) | 107.5 / **125.8** | 85.7 / 99.8 | 88.9 / 110.3 | 139.5 / 177.3 |
+| llhttp 9.4.3 | 225.9 / **254.0** | 195.2 / 211.3 | 205.7 / 233.3 | 373.2 / 416.7 |
+| http-parser 2.9.4 | 375.0 / **397.7** | 284.6 / 295.5 | 333.9 / 356.6 | 957.9 / 1002.5 |
+| **fastparse, AVX2** | **46.9** | 31.1 | 36.0 | 93.1 |
+| fastparse, generated from the spec | 45.9 | 30.7 | 35.1 | 87.2 |
+| fastparse, generated, spec + profile | **45.1** | 30.8 | 34.3 | 84.2 |
+| fastparse, learned layout | 49.8 | 29.2 | 36.5 | 94.3 |
+| fastparse, scalar backend | 93.4 | 65.5 | 77.4 | 197.3 |
 
 hparse (Zig) measured 97.2 / 122.9 on the mix in an earlier run of the same harness. fasthttp (Go) is at 355.1 /
 392.7.
@@ -589,17 +592,17 @@ Apple M5 Pro, gocli -gzip corpus, raw / +logic:
 
 | | mix | GET /feed | GET /posts/:id | POST like |
 |---|---|---|---|---|
-| picohttpparser (no SIMD on ARM) | 35.2 / 41.7 | 23.8 / 27.4 | 28.1 / 33.8 | 74.3 / 99.1 |
-| pico, Armv8-A TBL fork | 35.4 / **40.3** | 22.2 / 26.7 | 28.1 / 32.4 | 75.1 / 97.9 |
-| pico, Armv8-A NEON fork | 33.7 / 42.2 | 28.0 / 32.5 | 32.4 / 38.9 | 48.6 / 71.4 |
-| lightning (scalar on ARM) | 43.5 / 51.3 | 32.5 / 33.9 | 33.1 / 41.0 | 62.4 / 90.9 |
-| uWebSockets | 51.5 / 57.4 | 44.1 / 45.5 | 44.9 / 49.4 | 69.7 / 93.8 |
-| llhttp | 66.2 / 75.7 | 55.6 / 61.7 | 58.7 / 68.0 | 96.2 / 119.8 |
-| http-parser | 106.9 / 116.5 | 85.0 / 87.1 | 97.3 / 101.4 | 236.4 / 259.5 |
-| **fastparse NEON** | **14.2** | 9.1 | 10.7 | 29.4 |
-| fastparse NEON, generated + profile | 14.9 | 9.9 | 10.9 | 29.6 |
-| fastparse NEON, learned layout | 15.4 | 9.0 | 10.3 | 30.9 |
-| fastparse scalar | 29.8 | 19.5 | 21.9 | 44.9 |
+| picohttpparser (no SIMD on ARM) | 35.6 / 41.7 | 26.0 / 31.0 | 29.5 / 34.4 | 79.2 / 103.0 |
+| pico, Armv8-A TBL fork | 35.9 / **40.5** | 22.8 / 26.5 | 27.9 / 32.4 | 74.8 / 97.2 |
+| pico, Armv8-A NEON fork | 33.4 / 41.3 | 29.0 / 32.6 | 33.0 / 38.8 | 47.4 / 69.7 |
+| lightning (scalar on ARM) | 42.7 / 51.5 | 31.4 / 34.2 | 33.0 / 39.8 | 62.9 / 91.6 |
+| uWebSockets | 50.5 / 56.4 | 42.7 / 45.4 | 44.7 / 48.9 | 68.8 / 92.1 |
+| llhttp | 67.9 / 77.4 | 55.8 / 60.8 | 59.6 / 67.7 | 96.7 / 121.2 |
+| http-parser | 105.7 / 115.2 | 85.5 / 86.8 | 98.0 / 106.6 | 234.5 / 263.4 |
+| **fastparse NEON** | **14.2** | 9.7 | 10.9 | 29.6 |
+| fastparse NEON, generated + profile | 14.4 | 10.6 | 11.6 | 30.6 |
+| fastparse NEON, learned layout | 16.1 | 8.8 | 9.6 | 29.9 |
+| fastparse scalar | 29.8 | 19.5 | 22.3 | 45.4 |
 
 fasthttp (Go 1.27, M5) is at 113.1 / 117.2.
 
@@ -623,18 +626,19 @@ Xeon, raw / +logic, ns/request:
 
 | corpus (avg bytes) | **fbparse AVX2** | lightning | picohttpparser | llhttp | http-parser |
 |---|---|---|---|---|---|
-| curl (181) | **88.6 / 101.7** | 91.3 / 114.6 | 102.6 / 125.8 | 289.0 / 321.0 | 575.4 / 611.4 |
-| Chrome (1040) | 325.8 / **353.9** | 315.5 / 405.0 | 368.9 / 442.9 | 966.9 / 1059.5 | 2879.2 / 2970.3 |
-| Firefox (813) | 326.5 / **339.4** | 297.7 / 364.0 | 331.7 / 402.0 | 872.0 / 949.7 | 2342.1 / 2425.8 |
-| HTTP/1.0 (166) | 91.8 / **88.0** | 90.1 / 91.5 | 107.8 / 108.3 | 286.8 / 288.3 | 578.9 / 581.8 |
-| long headers (11206) | **575.7 / 595.5** | 581.0 / 615.2 | 1505.3 / 1542.2 | 4721.2 / 4758.4 | 25963.8 / 26015.6 |
-| chunked POST (456) | **161.3 / 165.8** | 162.5 / 182.5 | 175.8 / 200.2 | 511.7 / 547.0 | 1279.2 / 1316.9 |
-| odd (246) | 193.9 / 247.8 | 178.9 / 209.3 [167] | 224.8 / 258.9 | 262.7 / 272.7 [1546] | 916.7 / 943.7 [667] |
-| k6 (130) | **69.9 / 82.2** | 74.9 / 93.8 | 81.0 / 101.6 | 227.9 / 255.4 | 430.6 / 470.3 |
-| gocli (80) | **52.7 / 65.9** | 59.4 / 76.5 | 64.3 / 83.7 | 183.7 / 210.5 | 308.3 / 335.5 |
+| curl (181) | **82.2 / 95.1** | 91.2 / 113.9 | 98.8 / 123.9 | 284.6 / 319.2 | 583.1 / 614.3 |
+| Chrome (1040) | **302.4 / 326.1** | 314.0 / 408.1 | 358.2 / 444.8 | 983.1 / 1083.9 | 2884.1 / 2974.3 |
+| Firefox (813) | **288.1 / 292.8** | 299.9 / 364.0 | 325.4 / 394.3 | 861.4 / 943.0 | 2346.2 / 2433.6 |
+| HTTP/1.0 (166) | **86.3 / 79.1** | 90.2 / 92.5 | 103.5 / 105.4 | 284.0 / 286.2 | 587.4 / 590.0 |
+| long headers (11206) | **560.5 / 583.3** | 579.0 / 613.3 | 1504.8 / 1542.8 | 4726.2 / 4766.5 | 25998.8 / 26050.3 |
+| chunked POST (456) | **145.6 / 149.2** | 165.4 / 187.3 | 176.3 / 198.6 | 506.2 / 539.8 | 1281.8 / 1321.9 |
+| odd (246) | 180.7 / 227.1 | 178.0 / 209.1 [167] | 221.2 / 255.4 | 260.4 / 269.4 [1546] | 931.9 / 957.1 [667] |
+| k6 (130) | **65.4 / 77.7** | 74.8 / 93.3 | 78.8 / 100.5 | 223.1 / 251.4 | 439.3 / 468.1 |
+| gocli (80) | **51.3 / 64.2** | 59.8 / 76.1 | 62.2 / 82.1 | 180.6 / 206.2 | 315.8 / 341.8 |
 
-This table is one layout. The layout-randomised medians above are the better guide where the numbers are close: raw
-Chrome is −7.0% against lightning there, and raw Firefox +1.5%.
+This table is one layout. The layout-randomised medians above are the better guide where the numbers are close. On
+"odd" requests lightning disagrees with picohttpparser on 167 of 512, mostly by rejecting them early, so that row
+isn't the same job.
 
 fasthttp (Go) +logic on the same corpora: curl 485.1, Chrome 1546.8, Firefox 1365.9, HTTP/1.0 533.3, long headers
 5574.2, chunked 920.6. hparse +logic, from the earlier run: curl 157.4, Chrome 716.6, Firefox 572.5, long headers
@@ -644,22 +648,22 @@ fasthttp (Go) +logic on the same corpora: curl 485.1, Chrome 1546.8, Firefox 136
 
 | | fast + fbparse | fast + pico |
 |---|---|---|
-| HTTP/1.0 | 125.7 | 141.4 |
-| long headers | 1293.8 | 2236.5 |
-| chunked | 263.8 | 293.5 |
+| HTTP/1.0 | 116.8 | 139.9 |
+| long headers | 1300.2 | 2237.8 |
+| chunked | 237.3 | 288.1 |
 
 Apple M5 Pro, raw / +logic:
 
 | corpus | **fbparse NEON** | pico NEON fork | pico TBL fork | picohttpparser | lightning | llhttp |
 |---|---|---|---|---|---|---|
-| curl | **32.5 / 37.4** | 37.8 / 50.5 | 48.8 / 61.0 | 47.9 / 59.8 | 58.1 / 71.0 | 83.0 / 97.9 |
-| Chrome | **124.8 / 133.8** | 152.1 / 179.2 | 208.0 / 234.6 | 220.0 / 245.6 | 205.3 / 231.2 | 263.4 / 292.2 |
-| Firefox | **111.3 / 131.1** | 139.6 / 170.2 | 176.5 / 207.8 | 184.6 / 214.6 | 196.0 / 225.6 | 236.6 / 266.6 |
-| HTTP/1.0 | **32.5 / 35.6** | 38.8 / 39.1 | 49.8 / 50.5 | 51.3 / 52.2 | 54.2 / 54.7 | 83.0 / 83.3 |
-| long headers | **163.1 / 168.7** | 198.5 / 217.5 | 1718.0 / 1735.6 | 1713.4 / 1731.4 | 275.4 / 293.0 | 463.6 / 481.0 |
-| chunked POST | **53.5 / 55.9** | 70.3 / 91.8 | 89.4 / 111.6 | 98.4 / 121.6 | 106.4 / 133.3 | 143.3 / 167.5 |
-| k6 | **22.0 / 29.3** | 29.8 / 38.8 | 35.2 / 41.0 | 35.4 / 41.5 | 39.8 / 48.3 | 69.3 / 75.9 |
-| gocli | **15.1 / 22.7** | 21.0 / 29.8 | 26.9 / 31.7 | 24.9 / 30.8 | 30.5 / 38.1 | 55.2 / 62.3 |
+| curl | **29.3 / 33.4** | 37.1 / 50.5 | 49.3 / 59.3 | 47.9 / 60.3 | 59.1 / 73.2 | 81.8 / 95.5 |
+| Chrome | **123.0 / 131.3** | 154.5 / 182.6 | 211.2 / 247.6 | 221.7 / 248.5 | 205.1 / 228.5 | 263.4 / 293.9 |
+| Firefox | **106.0 / 117.4** | 139.2 / 168.5 | 176.5 / 214.4 | 186.3 / 215.1 | 191.4 / 220.0 | 245.4 / 270.8 |
+| HTTP/1.0 | **30.8 / 32.5** | 40.3 / 40.5 | 49.8 / 50.5 | 51.3 / 52.7 | 57.1 / 55.7 | 81.1 / 84.2 |
+| long headers | **164.1 / 168.9** | 198.5 / 216.3 | 1723.1 / 1740.5 | 1713.9 / 1739.3 | 275.1 / 291.7 | 465.3 / 479.7 |
+| chunked POST | **51.8 / 53.5** | 74.0 / 94.0 | 90.8 / 112.8 | 103.0 / 124.3 | 108.2 / 134.8 | 146.5 / 169.2 |
+| k6 | **21.0 / 28.1** | 28.6 / 37.4 | 37.4 / 41.5 | 36.6 / 42.0 | 43.0 / 50.0 | 67.9 / 76.7 |
+| gocli | **15.4 / 22.9** | 20.8 / 29.5 | 26.4 / 32.5 | 25.6 / 32.0 | 30.5 / 37.1 | 53.0 / 62.0 |
 
 Linux arm64 (Docker on the M5, gcc 13.3), +logic, with httparse (Rust, NEON) from the same run: curl 39.3 against
 httparse's 56.9; Chrome 140.4 against 170.7; k6 29.3 against 44.3; gocli 22.2 against 39.6.
@@ -667,7 +671,7 @@ httparse's 56.9; Chrome 140.4 against 170.7; k6 29.3 against 44.3; gocli 22.2 ag
 Variants on the Xeon:
 - AVX-512 ymm ≈ AVX2;
 - zmm is 10–15% slower on small requests;
-- the sequential loop is about 1.7× slower on long heads;
+- the sequential loop is about 1.7× slower on long heads (it keeps the block-cached name scan);
 - the scalar backend is 4–6× slower.
 
 ### batchparse.h vs fast_parse × N (`build/bench_batch`)

@@ -207,6 +207,13 @@ FB_INLINE void fb_ntct64_simd(const char *p, uint64_t *nt, uint64_t *ct) {   // 
 #undef FB_P
 }
 #undef FB_NEON4
+// nt mask of the 16 bytes at p as 4 bits per byte (vshrn nibble mask): the name scan at a line start (fb_core).
+FB_INLINE uint64_t fb_nt16_nib(const char *p) {
+  const uint8x16_t LO = vld1q_u8(FB_LO), HI = vld1q_u8(FB_HI), F = vdupq_n_u8(0x0f);
+  uint8x16_t x = vld1q_u8((const uint8_t *)p);
+  uint8x16_t nt = vceqq_u8(vandq_u8(vqtbl1q_u8(LO, vandq_u8(x, F)), vqtbl1q_u8(HI, vshrq_n_u8(x, 4))), vdupq_n_u8(0));
+  return vget_lane_u64(vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(nt), 4)), 0);
+}
 // "maybe a ct byte in the next FB_CTANY_BLOCKS * 64 bytes?" for fb_line()'s long-value loop. It may over-approximate,
 // because a positive only sends the block to the exact masks: (int8)(x + 1) < 0x21 holds for every control byte
 // (HT too), DEL, and every byte >= 0x80 (not allowed in cookies, rare in other headers). Two ops per 16 bytes (add,
@@ -339,6 +346,13 @@ FB_INLINE void fb_all64_simd(const char *p, uint64_t *m) { m[0] = fb_nt64_simd(p
 // next FB_CTANY_BLOCKS * 64 bytes?". Over-approximates; a positive only sends the block to the exact masks.
 //   default: (int8)(x + 1) < 0x21 (controls, DEL, and every byte >= 0x80, as on NEON): add + signed min per 32 bytes
 //   -DFB_CTANY_EXACTISH: min_epu8 < 0x20 (HT counts) or any DEL: no false positives on bytes >= 0x80
+// nt mask (not a token character) of the 32 bytes at p, bit i = byte i: the name scan at a line start (fb_core).
+FB_INLINE uint32_t fb_nt32_at(const char *p) {
+  const __m256i LO = _mm256_load_si256((const void *)FB_LO), HI = _mm256_load_si256((const void *)FB_HI), F = _mm256_set1_epi8(0x0f);
+  __m256i v = _mm256_loadu_si256((const void *)p);
+  __m256i t = _mm256_and_si256(_mm256_shuffle_epi8(LO, _mm256_and_si256(v, F)), _mm256_shuffle_epi8(HI, _mm256_and_si256(_mm256_srli_epi16(v, 4), F)));
+  return (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(t, _mm256_setzero_si256()));
+}
 #define FB_HAVE_CTANY 1
 #ifndef FB_CTANY_BLOCKS
 #define FB_CTANY_BLOCKS 8
@@ -565,7 +579,23 @@ FB_INLINE int fb_core(const char *b, int len, const char **method, size_t *metho
         else return -1;
         if (FB_UNLIKELY(n != 0 && (c == ' ' || c == '\t'))) { name = NULL; nl = 0; vs = p; }
         else {
-          int ne = fb_next(b, len, p, &sc, FB_NT, 0, simd);   // <= e: CR and LF are not tchars
+          int ne;
+#if (FB_BACKEND == 2 || FB_BACKEND == 3) && !defined(FP_AVX512_EMU) && !defined(FB_NAME_CACHED)
+          // x86: classify the 32 bytes at the line start directly (one load, one LUT pass, tzcnt) instead of a
+          // per-block nt mask whose cache misses depend on where lines cross blocks (unpredictable branches).
+          // The bytes are readable: the line's LF is < len and the 64-byte padding follows. Names of 32+ bytes
+          // fall back to the block masks.
+          if (simd) {
+            uint32_t ntm = fb_nt32_at(b + p);
+            ne = FB_LIKELY(ntm) ? p + __builtin_ctz(ntm) : fb_next(b, len, p, &sc, FB_NT, 0, simd);
+          } else
+#elif FB_BACKEND == 1 && !defined(FB_NAME_CACHED)
+          if (simd) {   // NEON: the same with 16 bytes and a nibble mask
+            uint64_t ntm = fb_nt16_nib(b + p);
+            ne = FB_LIKELY(ntm) ? p + (__builtin_ctzll(ntm) >> 2) : fb_next(b, len, p, &sc, FB_NT, 0, simd);
+          } else
+#endif
+          ne = fb_next(b, len, p, &sc, FB_NT, 0, simd);   // <= e: CR and LF are not tchars
           unsigned w = (unsigned char)b[ne] | (unsigned)(unsigned char)b[ne + 1] << 8;   // ne + 1 <= e: readable
           if ((w & 0xff) != ':' || ne == p) return -1;
           name = b + p; nl = ne - p; vs = ne + 1 + (w >> 8 == ' ');   // the usual ": " in one step

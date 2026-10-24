@@ -45,4 +45,6 @@ mut 's/return vminvq_s8(vminq_s8(m0, m1)) < 0x21;/return vminvq_s8(vminq_s8(m0, 
 mut 's/__m256i hit = _mm256_cmpgt_epi8(_mm256_set1_epi8(0x21)/__m256i hit = _mm256_cmpgt_epi8(_mm256_set1_epi8(0x20)/' "skip windows: 0x1f not seen (x86 only)"
 mut 's/        a += 64 \* nb; if (nb < 8) nb \*= 2;/        a += 64 * nb + 64; if (nb < 8) nb *= 2;/' "skip windows: 64 unchecked bytes after each window"
 mut 's/      for (; a < end; a += 64) {/      for (a += 64; a < end; a += 64) {/' "long-line exit: first window line not scanned"
+mut 's/ne = FB_LIKELY(ntm) ? p + __builtin_ctz(ntm) :/ne = FB_LIKELY(ntm) ? p + __builtin_ctz(ntm \& (ntm - 1)) :/' "name scan (x86): second non-token byte taken as the name end (x86 only)"
+mut 's/ne = FB_LIKELY(ntm) ? p + (__builtin_ctzll(ntm) >> 2) :/ne = FB_LIKELY(ntm) ? p + (__builtin_ctzll(ntm) >> 3) :/' "name scan (neon): nibble index halved (arm64 only)"
 rm -rf $S
