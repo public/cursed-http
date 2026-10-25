@@ -470,10 +470,19 @@ The generator also checks the spec:
   [`gen/headers_spec.json`](gen/headers_spec.json)).
 - **A spec that asks for no headers costs nothing:** `FP_NHDR` is 0, `req_t` keeps its layout, and every check
   compiles away.
-- **What it costs on the routes that ask:**
-  - those routes' methods use the walk core, which reads every header line, as Authorization routes already do;
-  - the learned layout is off for them;
-  - a line that starts with a wanted name but isn't `name:` falls back.
+- **What it costs on the routes that ask.** The names' first letters join `c`/`t` in the SIMD line
+  classification, so these routes visit only lines starting with one of them; Authorization routes still read
+  every line. The learned layout is off for them, and a line that starts with a wanted name but isn't `name:`
+  falls back. On the Xeon (ns/request, API traffic):
+
+  | spec | k6 | gocli -gzip | gocli |
+  |---|---|---|---|
+  | example (no headers) | 47 | 42 | 41 |
+  | `X-Request-Id` on two GET routes | 50 | 46 | 42 |
+  | [`gen/headers_spec.json`](gen/headers_spec.json): 7 headers, including `Accept-Language` | 68 | 62 | 50 |
+
+  A name whose first letter starts common headers costs more, because their lines become candidates:
+  `Accept-Language` does that to every `Accept…` line.
 - **Rules:** names start with a letter and are HTTP tokens of up to 56 characters, with at most 32 per spec.
   Content-Length, Transfer-Encoding, Connection and Authorization are handled already and can't be listed.
 

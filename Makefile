@@ -36,7 +36,7 @@ FP_BINS := $(B)/test_fastparse $(B)/test_fastparse_scalar $(B)/test_fastparse_em
 FB_BINS := $(B)/test_fbparse $(B)/test_fbparse_scalar $(B)/test_fbparse_emu512 $(B)/test_fbparse_emuzmm
 BP_BINS := $(B)/test_batch $(B)/test_batch_emu $(B)/test_batch_gen $(B)/test_batch_spec
 GENCHECK := $(B)/check_example_spec $(B)/check_toy_spec $(B)/check_headers_spec
-PR_BINS := $(B)/test_probe $(B)/test_probe_scalar $(B)/test_probe_emu512 $(B)/test_chunked $(B)/test_hdrspec $(B)/test_hdrspec_scalar
+PR_BINS := $(B)/test_probe $(B)/test_probe_scalar $(B)/test_probe_emu512 $(B)/test_chunked $(B)/test_hdrspec $(B)/test_hdrspec_scalar $(B)/test_hdrspec_emu512
 
 # ---- include/chp.h: every backend in one library, picked at load time (src/chp.c) ----
 # Each backend's object gets exactly the flags src/chp.c checks the CPU for; the rest is built for the
@@ -112,6 +112,8 @@ $(B)/test_hdrspec: $(HS_DEPS) $(B)/pico.o
 	$(CC_T) $(HS_F) $< $(B)/pico.o -o $@
 $(B)/test_hdrspec_scalar: $(HS_DEPS) $(B)/pico.o
 	$(CC_T) $(HS_F) -DFP_FORCE_SCALAR $< $(B)/pico.o -o $@
+$(B)/test_hdrspec_emu512: $(HS_DEPS) $(B)/pico.o
+	$(CC_T) $(HS_F) -DFP_AVX512_EMU $< $(B)/pico.o -o $@
 $(B)/test_hdrspec_sse2: $(HS_DEPS) $(B)/pico_base.o
 	$(CC) $(CFLAGS) $(WARN) $(CHP_BASE) $(INC) $(HS_F) $< $(B)/pico_base.o -o $@
 $(B)/fastparse_gen.h: gen/example_spec.json gen/httpgen.py include/fastparse.h | $(B)

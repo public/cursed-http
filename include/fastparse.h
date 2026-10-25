@@ -89,6 +89,9 @@ enum { FP_NEED_MORE = 0, FP_FALLBACK = -1, FP_FULL = 1 };   // FP_FULL: fast_par
 // Headers the API spec asks for by name (gen/httpgen.py, a route's "headers"): none in the example API.
 // With FP_NHDR > 0 this region also holds FP_H_<NAME> (the index of each in req_t.hdr) and fp_hdr_names.
 #define FP_NHDR 0
+// first letters of those names other than c/t, lowercase: every backend's c/t line classification also marks
+// them (FP_HDR_LETTERS(X) expands to X('x') X('i') ...), so routes asking for headers visit only those lines
+#define FP_HDR_LETTERS(X)
 // ==== END API SPEC FIELDS ====
 
 typedef struct {
@@ -141,7 +144,11 @@ FP_INLINE void fp_cls64_scalar(const char *p, uint64_t *lf, uint64_t *ct) {
   for (int i = 0; i < 8; i++) {
     uint64_t w = fp_ld64(p + 8 * i), f = w | 0x2020202020202020ull;
     l |= fp_swar_mm(fp_swar_eq(w, '\n' * FP_ONES)) << (8 * i);
-    t |= fp_swar_mm(fp_swar_eq(f, 'c' * FP_ONES) | fp_swar_eq(f, 't' * FP_ONES) | fp_swar_le20(w)) << (8 * i);
+    uint64_t m = fp_swar_eq(f, 'c' * FP_ONES) | fp_swar_eq(f, 't' * FP_ONES) | fp_swar_le20(w);
+#define FP_HL(c) m |= fp_swar_eq(f, (uint64_t)(c) * FP_ONES);
+    FP_HDR_LETTERS(FP_HL)
+#undef FP_HL
+    t |= fp_swar_mm(m) << (8 * i);
   }
   *lf = l; *ct = t;
 }
@@ -174,13 +181,19 @@ FP_INLINE uint64_t fp_lf64_simd(const char *p) {
   const uint8x16_t LF = vdupq_n_u8('\n');
   return fp_neon_pack4(vceqq_u8(v.val[0], LF), vceqq_u8(v.val[1], LF), vceqq_u8(v.val[2], LF), vceqq_u8(v.val[3], LF));
 }
+FP_INLINE uint8x16_t fp_ct_neon(uint8x16_t x) {   // c/t (either case), <= 0x20, or a first letter of a spec header
+  const uint8x16_t F = vdupq_n_u8(0x20), f = vorrq_u8(x, F);
+  uint8x16_t m = vorrq_u8(vorrq_u8(vceqq_u8(f, vdupq_n_u8('c')), vceqq_u8(f, vdupq_n_u8('t'))), vcleq_u8(x, F));
+#define FP_HL(c) m = vorrq_u8(m, vceqq_u8(f, vdupq_n_u8(c)));
+  FP_HDR_LETTERS(FP_HL)
+#undef FP_HL
+  return m;
+}
 FP_INLINE void fp_cls64_simd(const char *p, uint64_t *lf, uint64_t *ct) {
   uint8x16x4_t v = vld4q_u8((const uint8_t *)p);
   const uint8x16_t LF = vdupq_n_u8('\n'), F = vdupq_n_u8(0x20), C = vdupq_n_u8('c'), T = vdupq_n_u8('t');
   *lf = fp_neon_pack4(vceqq_u8(v.val[0], LF), vceqq_u8(v.val[1], LF), vceqq_u8(v.val[2], LF), vceqq_u8(v.val[3], LF));
-#define FP_CT(x) vorrq_u8(vorrq_u8(vceqq_u8(vorrq_u8(x, F), C), vceqq_u8(vorrq_u8(x, F), T)), vcleq_u8(x, F))
-  *ct = fp_neon_pack4(FP_CT(v.val[0]), FP_CT(v.val[1]), FP_CT(v.val[2]), FP_CT(v.val[3]));
-#undef FP_CT
+  *ct = fp_neon_pack4(fp_ct_neon(v.val[0]), fp_ct_neon(v.val[1]), fp_ct_neon(v.val[2]), fp_ct_neon(v.val[3]));
 }
 typedef uint8x16_t fp_crv_t;
 FP_INLINE fp_crv_t fp_crv0(void) { return vdupq_n_u8(0); }
@@ -218,7 +231,11 @@ FP_INLINE uint64_t fp_lf64_simd(const char *p) {
 }
 FP_INLINE __m128i fp_ct16(__m128i v) {   // c/t line start (either case) or <= 0x20 (unsigned: min(x, 0x20) == x)
   const __m128i F = _mm_set1_epi8(0x20); __m128i f = _mm_or_si128(v, F);
-  return _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(f, _mm_set1_epi8('c')), _mm_cmpeq_epi8(f, _mm_set1_epi8('t'))), _mm_cmpeq_epi8(_mm_min_epu8(v, F), v));
+  __m128i m = _mm_or_si128(_mm_or_si128(_mm_cmpeq_epi8(f, _mm_set1_epi8('c')), _mm_cmpeq_epi8(f, _mm_set1_epi8('t'))), _mm_cmpeq_epi8(_mm_min_epu8(v, F), v));
+#define FP_HL(c) m = _mm_or_si128(m, _mm_cmpeq_epi8(f, _mm_set1_epi8(c)));
+  FP_HDR_LETTERS(FP_HL)
+#undef FP_HL
+  return m;
 }
 FP_INLINE void fp_cls64_simd(const char *p, uint64_t *lf, uint64_t *ct) {
   const __m128i LF = _mm_set1_epi8('\n');
@@ -256,8 +273,12 @@ FP_INLINE void fp_cls64_simd(const char *p, uint64_t *lf, uint64_t *ct) {
   __m256i v0 = _mm256_loadu_si256((const void *)p), v1 = _mm256_loadu_si256((const void *)(p + 32));
   __m256i f0 = _mm256_or_si256(v0, F), f1 = _mm256_or_si256(v1, F);
   *lf = fp_mm2(_mm256_cmpeq_epi8(v0, LF), _mm256_cmpeq_epi8(v1, LF));
-  *ct = fp_mm2(_mm256_or_si256(_mm256_or_si256(_mm256_cmpeq_epi8(f0, C), _mm256_cmpeq_epi8(f0, T)), FP_LE20(v0)),
-               _mm256_or_si256(_mm256_or_si256(_mm256_cmpeq_epi8(f1, C), _mm256_cmpeq_epi8(f1, T)), FP_LE20(v1)));
+  __m256i m0 = _mm256_or_si256(_mm256_or_si256(_mm256_cmpeq_epi8(f0, C), _mm256_cmpeq_epi8(f0, T)), FP_LE20(v0));
+  __m256i m1 = _mm256_or_si256(_mm256_or_si256(_mm256_cmpeq_epi8(f1, C), _mm256_cmpeq_epi8(f1, T)), FP_LE20(v1));
+#define FP_HL(c) m0 = _mm256_or_si256(m0, _mm256_cmpeq_epi8(f0, _mm256_set1_epi8(c))); m1 = _mm256_or_si256(m1, _mm256_cmpeq_epi8(f1, _mm256_set1_epi8(c)));
+  FP_HDR_LETTERS(FP_HL)
+#undef FP_HL
+  *ct = fp_mm2(m0, m1);
 }
 #undef FP_LE20
 #else
@@ -270,7 +291,11 @@ FP_INLINE uint64_t fp_lf64_simd(const char *p) { return FP_EQ64(_mm512_loadu_si5
 FP_INLINE void fp_cls64_simd(const char *p, uint64_t *lf, uint64_t *ct) {
   __m512i v = _mm512_loadu_si512((const void *)p), f = _mm512_or_si512(v, _mm512_set1_epi8(0x20));
   *lf = FP_EQ64(v, '\n');
-  *ct = FP_EQ64(f, 'c') | FP_EQ64(f, 't') | (uint64_t)_mm512_cmple_epu8_mask(v, _mm512_set1_epi8(0x20));
+  uint64_t m = FP_EQ64(f, 'c') | FP_EQ64(f, 't') | (uint64_t)_mm512_cmple_epu8_mask(v, _mm512_set1_epi8(0x20));
+#define FP_HL(c) m |= FP_EQ64(f, c);
+  FP_HDR_LETTERS(FP_HL)
+#undef FP_HL
+  *ct = m;
 }
 #undef FP_EQ64
 #else
@@ -285,7 +310,11 @@ FP_INLINE void fp_cls64_simd(const char *p, uint64_t *lf, uint64_t *ct) {
   __m256i v0 = _mm256_loadu_si256((const void *)p), v1 = _mm256_loadu_si256((const void *)(p + 32));
   __m256i f0 = _mm256_or_si256(v0, F), f1 = _mm256_or_si256(v1, F);
   *lf = FP_EQ32(v0, '\n') | FP_EQ32(v1, '\n') << 32;
-  *ct = (FP_EQ32(f0, 'c') | FP_EQ32(f0, 't') | FP_LE32(v0)) | (FP_EQ32(f1, 'c') | FP_EQ32(f1, 't') | FP_LE32(v1)) << 32;
+  uint64_t m0 = FP_EQ32(f0, 'c') | FP_EQ32(f0, 't') | FP_LE32(v0), m1 = FP_EQ32(f1, 'c') | FP_EQ32(f1, 't') | FP_LE32(v1);
+#define FP_HL(c) m0 |= FP_EQ32(f0, c); m1 |= FP_EQ32(f1, c);
+  FP_HDR_LETTERS(FP_HL)
+#undef FP_HL
+  *ct = m0 | m1 << 32;
 }
 #undef FP_EQ32
 #undef FP_LE32
@@ -573,6 +602,23 @@ FP_INLINE int fp_next_lf(const uint64_t *L, int pos) {   // first LF at index >=
   return (k << 6) + fp_ctz(m);
 }
 
+// One header line [ls, end) (end at its LF) for the spec's headers still wanted: fills r->hdr, clears the bit.
+// -> 0, or FP_FALLBACK for a line that starts with a wanted name but isn't "name:".
+FP_INLINE int fp_hdr_line(const char *b, int ls, int end, req_t *r, unsigned *want) {
+  int e2 = b[end - 1] == '\r' ? end - 1 : end, i = fp_hdr_match(b, ls, e2);
+  if (i == -2) return FP_FALLBACK;
+  if (i >= 0 && (*want >> i & 1)) {
+    int v = ls + 1, ve = e2; while (b[v - 1] != ':') v++;   // the name ends at its ':' (fp_hdr_match checked it)
+    fp_trim(b, &v, &ve);
+#if FP_NHDR > 0
+    r->hdr[i] = b + v; r->hdr_len[i] = ve - v;
+#else
+    (void)r;
+#endif
+    *want &= ~(1u << i);
+  }
+  return 0;
+}
 // Visit every line after the request line (l0 = its LF); dispatch on the first byte. -> *cl or FP_FALLBACK.
 FP_INLINE int fp_walk(const char *b, const uint64_t *L, int k0, int nch, int l0, req_t *r, int *cl) {
   int have_cl = 0, have_auth = !fp_wants_auth(r), s = l0 + 1;
@@ -582,18 +628,7 @@ FP_INLINE int fp_walk(const char *b, const uint64_t *L, int k0, int nch, int l0,
     while (!m) { if (++kk >= nch) return 0; m = L[kk]; }
     int end = kk * 64 + fp_ctz(m), ls = s; m &= m - 1; s = end + 1;
     unsigned char c0 = (unsigned char)b[ls]; int c = c0 | 0x20;
-    if (want && c0 > 0x20) {   // the spec's headers: the first line of each name wins (as ref)
-      int e2 = b[end - 1] == '\r' ? end - 1 : end, i = fp_hdr_match(b, ls, e2);
-      if (i == -2) return FP_FALLBACK;
-      if (i >= 0 && (want >> i & 1)) {
-        int v = ls + 1, ve = e2; while (b[v - 1] != ':') v++;   // the name ends at its ':' (fp_hdr_match checked it)
-        fp_trim(b, &v, &ve);
-#if FP_NHDR > 0
-        r->hdr[i] = b + v; r->hdr_len[i] = ve - v;
-#endif
-        want &= ~(1u << i);
-      }
-    }
+    if (want && c0 > 0x20 && fp_hdr_line(b, ls, end, r, &want)) return FP_FALLBACK;   // spec headers: first line wins
     if (FP_LIKELY(c0 > 0x20 && c != 'a' && c != 'c' && c != 't')) continue;
     if (b[end - 1] == '\r') end--;
     if (c != 'a') { if (fp_hdr_ct(b, ls, end, cl, &have_cl)) return FP_FALLBACK; }
@@ -637,11 +672,16 @@ FP_INLINE int fp_core_cand_l(const char *b, int len, req_t *r, const int simd, i
     if (fp_reqline(b, l0, r)) return FP_FALLBACK;
   }
   int cl = 0;
-  if (fp_wants_lines(r)) { if (fp_walk(b, L, k0, nch, l0, r, &cl)) return FP_FALLBACK; }
-  else if (anyc) {
+  unsigned want = fp_route_hdrs(r->route);
+  if (fp_wants_auth(r)) { if (fp_walk(b, L, k0, nch, l0, r, &cl)) return FP_FALLBACK; }   // Authorization: every line
+  else if (anyc) {   // the candidate lines only: c/t/<= 0x20, and the first letters of the spec's headers
     int have_cl = 0;
     for (int kk = 0; kk < nch; kk++) for (uint64_t m = C[kk]; m; m &= m - 1) {
-      int s = (kk << 6) + fp_ctz(m), end = fp_next_lf(L, s); if (b[end - 1] == '\r') end--;
+      int s = (kk << 6) + fp_ctz(m), end = fp_next_lf(L, s);
+      unsigned char c0 = (unsigned char)b[s]; int c = c0 | 0x20;
+      if (want && c0 > 0x20 && fp_hdr_line(b, s, end, r, &want)) return FP_FALLBACK;
+      if (FP_NHDR > 0 && c0 > 0x20 && c != 'c' && c != 't') continue;   // a spec header's letter, not c/t
+      if (b[end - 1] == '\r') end--;
       if (fp_hdr_ct(b, s, end, &cl, &have_cl)) return FP_FALLBACK;
     }
   }
