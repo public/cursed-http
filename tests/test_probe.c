@@ -68,6 +68,34 @@ static void check_case(const probe_case_t *c) {
   free(b);
 }
 
+// RFC 9112 9.6: a client's "close" must reach the server. Every route x close-ish value x header position: fast_parse
+// falls back, fb_parse_req_ex parses it and says close; keep-alive spellings stay on the fast path.
+static void check_connection(void) {
+  static const char *routes[][3] = {   // method, target, body (NULL: none); POSTs carry a Bearer token
+    {"GET", "/health", NULL}, {"GET", "/feed", NULL}, {"GET", "/posts/1", NULL}, {"POST", "/posts", "{\"body\":\"x\"}"},
+    {"POST", "/posts/1/like", NULL}};
+  static const char *closes[] = {"close", "Close", "CLOSE", "keep-alive, close", "close, keep-alive", " close "};
+  static const char *keeps[] = {"keep-alive", "Keep-Alive", "KEEP-ALIVE", " keep-alive "};
+  char src[1024], err[256];
+  for (int ri = 0; ri < 5; ri++) for (int k = 0; k < 6 + 4; k++) for (int pos = 0; pos < 3; pos++) {
+    const char *val = k < 6 ? closes[k] : keeps[k - 6], *body = routes[ri][2];
+    char conn[64]; snprintf(conn, sizeof conn, "Connection:%s%s\r\n", val[0] == ' ' ? "" : " ", val);
+    int n = snprintf(src, sizeof src, "%s %s HTTP/1.1\r\n%s", routes[ri][0], routes[ri][1], pos == 0 ? conn : "");
+    n += snprintf(src + n, sizeof src - n, "Host: localhost:8080\r\n%s", pos == 1 ? conn : "");
+    if (routes[ri][0][0] == 'P') n += snprintf(src + n, sizeof src - n, "Authorization: Bearer " PC_TOK "\r\n");
+    if (body) n += snprintf(src + n, sizeof src - n, "Content-Type: application/json\r\nContent-Length: %d\r\n", (int)strlen(body));
+    n += snprintf(src + n, sizeof src - n, "%s\r\n%s", pos == 2 ? conn : "", body ? body : "");
+    char *b = fz_copy(src, n, 0);
+    req_t f, e; fb_info_t in; int a = fast_parse(b, n, &f), x = fb_parse_req_ex(b, n, &e, &in);
+    if (x != n || in.close != (k < 6)) FAIL("%s %s, Connection \"%s\" at %d: fb_parse_req_ex %d (want %d), close %d\n", routes[ri][0], routes[ri][1], val, pos, x, n, in.close);
+    if (k < 6 ? a != FP_FALLBACK : a != n) FAIL("%s %s, Connection \"%s\" at %d: fast_parse %d, want %d\n", routes[ri][0], routes[ri][1], val, pos, a, k < 6 ? FP_FALLBACK : n);
+    bp_parse(1, (const char *const *)&b, &n, &e, &x);
+    if (x != a) FAIL("%s %s, Connection \"%s\" at %d: bp_parse %d, fast_parse %d\n", routes[ri][0], routes[ri][1], val, pos, x, a);
+    if (fz_check_fast(b, n, err, sizeof err) || fz_check_fb(b, n, 64, 0, err, sizeof err)) FAIL("Connection \"%s\": %s\n", val, err);
+    free(b);
+  }
+}
+
 static void check_pipeline(const char *t1, const char *t2) {
   static char src[1024];
   int n1 = snprintf(src, sizeof src, "GET %s HTTP/1.1\r\nHost: localhost:8080\r\n\r\n", t1);
@@ -87,7 +115,8 @@ int main(void) {
   for (int i = 0; i < N_PROBE_CASES; i++) check_case(&PROBE_CASES[i]);
   for (size_t i = 0; i < sizeof PROBE_PIPELINES / sizeof *PROBE_PIPELINES; i++) check_pipeline(PROBE_PIPELINES[i][0], PROBE_PIPELINES[i][1]);
   check_pipeline("/posts/1/like", "/posts/1");   // the probe's like pair, as GETs (the like route then is NOTFOUND)
-  printf("%d cases, %zu pipelined pairs + 1, every truncation\nTOTAL FAILURES: %d\n", N_PROBE_CASES,
+  check_connection();
+  printf("%d cases, %zu pipelined pairs + 1, every truncation; Connection: 5 routes x 10 values x 3 positions\nTOTAL FAILURES: %d\n", N_PROBE_CASES,
          sizeof PROBE_PIPELINES / sizeof *PROBE_PIPELINES, fails);
   return fails != 0;
 }

@@ -30,6 +30,33 @@ static char *fz_copy(const char *d, size_t n, int pad) {
   return b;
 }
 
+// ---- Connection headers, read straight off the raw head (no parser involved) ----
+// over the header lines of b[0..hend): kind 0 = any line whose name starts with "connection" (case-insensitive) is
+// "connection:" + exactly keep-alive (OWS trimmed); kind 1 = some "connection:" line lists the "close" token
+static int fz_ci(const char *a, const char *lc, int n) { for (int i = 0; i < n; i++) if ((a[i] | (lc[i] >= 'a' ? 0x20 : 0)) != lc[i]) return 0; return 1; }
+static int fz_conn(const char *b, int hend, int kind) {
+  const char *e = b + hend, *l = memchr(b, '\n', hend);
+  for (l = l ? l + 1 : e; l < e; ) {
+    const char *nl = memchr(l, '\n', e - l); if (!nl) nl = e;
+    int n = (int)(nl - l); if (n && l[n - 1] == '\r') n--;
+    if (n >= 10 && fz_ci(l, "connection", 10)) {
+      int named = n >= 11 && l[10] == ':';
+      const char *v = l + 11, *ve = l + n;
+      if (named) { while (v < ve && (*v == ' ' || *v == '\t')) v++; while (ve > v && (ve[-1] == ' ' || ve[-1] == '\t')) ve--; }
+      if (kind == 0 && !(named && ve - v == 10 && fz_ci(v, "keep-alive", 10))) return 0;
+      if (kind == 1 && named)
+        for (const char *t = v; t < ve; ) {
+          while (t < ve && (*t == ' ' || *t == '\t' || *t == ',')) t++;
+          const char *u = t; while (u < ve && *u != ',' && *u != ' ' && *u != '\t') u++;
+          if (u - t == 5 && fz_ci(t, "close", 5)) return 1;
+          t = u;
+        }
+    }
+    l = nl + 1;
+  }
+  return kind == 0;
+}
+
 // ---- fbparse.h vs picohttpparser ----
 typedef int (*fz_fbfn)(const char *, size_t, const char **, size_t *, const char **, size_t *, int *, struct fb_header *, size_t *, size_t);
 static int fz_fb_simd(const char *b, size_t l, const char **m, size_t *ml, const char **p, size_t *pl, int *mv, struct fb_header *h, size_t *nh, size_t ll) {
@@ -71,6 +98,8 @@ static int fz_adapter(const char *A, const char *Bp, int len, char *err, size_t 
     if (!same(c, &g, x, &q) || (c > 0 && g.id_ok && g.id != q.id)) return fz_err(err, en, "fb_parse_req_loop(%d) %d, ref_parse %d", w, x, c); }
   fb_info_t in; req_t e; memset(&e, 0, sizeof e); int x = fb_parse_req_ex(A, len, &e, &in);
   if (x != c || (x == FP_FALLBACK && !in.flags) || (x > 0 && in.flags)) return fz_err(err, en, "fb_parse_req_ex %d (flags %d), ref_parse %d", x, in.flags, c);
+  if (x != -2 && x != FP_NEED_MORE && in.close != fz_conn(A, e.body_off, 1))
+    return fz_err(err, en, "fb_parse_req_ex close %d, the head's Connection says %d", in.close, fz_conn(A, e.body_off, 1));
   // HTTP/1.x with x != 1 and nothing else odd: ex fills r like a success of the same request as HTTP/1.1
   if (x == FP_FALLBACK && in.flags == FB_MINOR) {
     int vp = -1; for (int i = 0; i + 8 <= len; i++) if (!memcmp(A + i, "HTTP/1.", 7) && A[i + 7] != '1' && (A[i + 8] == '\r' || A[i + 8] == '\n')) { vp = i + 7; break; }
@@ -139,6 +168,8 @@ static int fz_fast_one(const char *b, const char *b2, int len, int prefixes, cha
   if (a2 > 0 && f2.auth) f2.tok = b + (f2.tok - b2);
   if (!same(a, &f, a2, &f2) || (a > 0 && f.id != f2.id)) return fz_err(err, en, "fast_parse depends on the padding: %d vs %d", a, a2);
   if (fz_fast_backends(b, len, a, &f, err, en)) return 1;
+  if (a > 0 && !fz_conn(b, f.body_off, 0))   // RFC 9112 9.6: a close (or anything but keep-alive) must reach the caller
+    return fz_err(err, en, "fast_parse completes a request whose Connection header is not keep-alive");
   if (c != -2 && a != FP_FALLBACK && c != FP_FALLBACK && !same(a, &f, c, &g))
     return fz_err(err, en, "fast_parse %d (route %d id %lld body %d+%d), ref_parse %d (route %d id %lld body %d+%d)", a, f.route,
                   (long long)f.id, f.body_off, f.body_len, c, g.route, (long long)g.id, g.body_off, g.body_len);

@@ -352,7 +352,8 @@ int fb_parse_req(const char *buf, int len, req_t *r);
 int fb_parse_req_ex(const char *buf, int len, req_t *r, fb_info_t *info);
 //   same return; info->flags says why it fell back: FB_MINOR (HTTP/1.0 etc.), FB_TE (Transfer-Encoding),
 //   FB_BADCL (odd or duplicate Content-Length). With flags == FB_MINOR only, r is filled and info->total
-//   is the request size: enough to serve an HTTP/1.0 client.
+//   is the request size: enough to serve an HTTP/1.0 client. info->close: the Connection header lists "close"
+//   (answer, then close the connection; RFC 9112 9.6).
 ```
 
 There is no head-size limit. The header count is bounded by the caller's array.
@@ -910,6 +911,8 @@ anyway.
 - a `c`/`t` header line without `:`;
 - `content-length` not directly followed by `:`;
 - any `transfer*` header;
+- a `Connection` header other than exactly `keep-alive` (`close`, token lists, upgrades), so the caller sees it
+  (`fb_info_t.close`). Browsers send `keep-alive`, which stays fast;
 - an odd or duplicate Content-Length (only 1–9 digits are accepted);
 - a leading empty line;
 - heads over 8 KB.

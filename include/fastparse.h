@@ -495,6 +495,13 @@ FP_INLINE int fp_hdr_ct(const char *b, int s, int end, int *cl, int *have_cl) {
       *cl = (int)x; *have_cl = 1;
       return 0;
     }
+    // Connection (RFC 9112 9.6): only "keep-alive" stays here (browsers send it on every request). "close", token
+    // lists, upgrades and anything else go to the general parser, whose caller sees them (fb_info_t.close).
+    if (end - s >= 10 && FP_HNAME(b + s, "connecti", "on\0\0\0\0\0\0", 2)) {
+      if (end - s < 11 || b[s + 10] != ':') return FP_FALLBACK;   // "Connection :" and other names starting so
+      int v = s + 11, ve = end; fp_trim(b, &v, &ve);
+      return ve - v == 10 && FP_HNAME(b + v, "keep-ali", "ve\0\0\0\0\0\0", 2) ? 0 : FP_FALLBACK;
+    }
   } else if (end - s >= 8 && FP_HNAME(b + s, "transfer", "\0\0\0\0\0\0\0\0", 0)) return FP_FALLBACK;
   return FP_LIKELY(fp_has_colon(b, s, end)) ? 0 : FP_FALLBACK;
 }
@@ -765,6 +772,8 @@ static inline int fp_layout_build(const char *b, int l0, int hend, int route, fp
       t.cl_i = t.n;
     }
     if (c == 't' && e - s >= 8 && FP_HNAME(b + s, "transfer", "\0\0\0\0\0\0\0\0", 0)) return 0;
+    // a Connection line's verdict depends on its whole value, but a layout only compares a line's first 16 bytes
+    if (c == 'c' && e - s >= 10 && FP_HNAME(b + s, "connecti", "on\0\0\0\0\0\0", 2)) return 0;
     if (c == 'a' && t.auth_i < 0 && e - s >= 14 && FP_HNAME(b + s, "authoriz", "ation:\0\0", 6)) t.auth_i = t.n;
     t.n++; s = p + 1;
   }

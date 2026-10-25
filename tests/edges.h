@@ -87,4 +87,24 @@ static const edge_t EDGES[] = {
   {"POST /postsHTTP/1.1\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0},
   {"POST /posts HTTP/1.1\r\n\r\n", 1, R_CREATE, 0, 0, 0, 0},                               // pico skips a leading CRLF; we don't
   {"POST /posts/5/like HTTP/1.1\r\nContent-Length: 0\r\nTE: x\r\nCookie: c\r\nauthorization: Bearer T\r\n\r\n", 1, R_LIKE, 1, 5, 1, "T"},
+  // Connection (RFC 9112 9.6): only "keep-alive" stays on the fast path; anything else falls back, so the caller
+  // sees a close (fb_info_t.close) or whatever else the header asks for
+  {"GET /feed HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0},
+  {"GET /feed HTTP/1.1\r\nConnection: Close\r\nHost: x\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0},
+  {"GET /posts/7 HTTP/1.1\r\nCONNECTION: CLOSE\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0},
+  {"GET /health HTTP/1.1\r\nHost: x\r\nconnection: keep-alive, close\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0},
+  {"GET /health HTTP/1.1\r\nHost: x\r\nConnection: close, keep-alive\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0},
+  {"GET /feed HTTP/1.1\r\nHost: x\r\nConnection:  close  \r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0},
+  {"GET /feed HTTP/1.1\r\nHost: x\r\nConnection : close\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0},  // pico: invalid
+  {"GET /feed HTTP/1.1\r\nHost: x\r\nConnection: upgrade\r\nUpgrade: websocket\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0},
+  {"GET /feed HTTP/1.1\r\nHost: x\r\nConnection: keep-alivex\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0},
+  {"GET /feed HTTP/1.1\r\nHost: x\r\nConnection: keep-alive, Upgrade\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0},
+  {"GET /feed HTTP/1.1\r\nHost: x\r\nConnection:\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0},
+  {"GET /feed HTTP/1.1\r\nHost: x\r\nConnectionX: close\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0},   // any connection* name
+  {"POST /posts HTTP/1.1\r\nAuthorization: Bearer t.o.k\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}", FP_FALLBACK, 0, 0, 0, 0, 0},
+  {"POST /posts/3/like HTTP/1.1\r\nConnection: close\r\nAuthorization: Bearer t.o.k\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0},
+  {"GET /feed HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n", 1, R_FEED, 0, 0, 0, 0},
+  {"GET /feed HTTP/1.1\r\nCONNECTION: Keep-Alive\r\nHost: x\r\n\r\n", 1, R_FEED, 0, 0, 0, 0},
+  {"GET /posts/9 HTTP/1.1\r\nconnection:keep-alive \r\n\r\n", 1, R_GETPOST, 1, 9, 0, 0},
+  {"POST /posts HTTP/1.1\r\nConnection: keep-alive\r\nAuthorization: Bearer t.o.k\r\nContent-Length: 2\r\n\r\n{}", 1, R_CREATE, 0, 0, 1, "t.o.k"},
 };

@@ -577,7 +577,7 @@ static inline int fb_is_complete(const char *b, int len, size_t last_len) {
 }
 
 // What happens to each header: mode 0 = store into fb_header[] (the pico API); mode 1 = the req_t adapter.
-typedef struct { void *req; int route_auth, have_auth, have_cl, cl, flags, auth; const char *tok; int tok_len; int minor, lite, skip; } fb_ax_t;
+typedef struct { void *req; int route_auth, have_auth, have_cl, cl, flags, auth; const char *tok; int tok_len; int minor, lite, skip, close; } fb_ax_t;
 // req: the req_t; minor: set before on_reqline; lite: the caller only needs the verdict for minor != 1, so skip = 1 then
 // (no routing, no header work: the request falls back whatever its headers say)
 enum { FB_TE = 1, FB_BADCL = 2, FB_MINOR = 4 };   // fb_info_t.flags: why fb_parse_req said FP_FALLBACK
@@ -842,6 +842,14 @@ FB_INLINE void fb_ax_header(fb_ax_t *a, const char *n, int nl, const char *v, in
       a->cl = x; a->have_cl = 1;
     }
   } else if (nl >= 16 && fb_name_is(n, "transfer-encodin", 16)) a->flags |= FB_TE;
+  else if (nl == 10 && fb_name_is(n, "connection", 10)) {   // a "close" token in the list (RFC 9112 9.6)
+    for (int i = 0; i < vl; ) {
+      while (i < vl && (v[i] == ' ' || v[i] == '\t' || v[i] == ',')) i++;
+      int t = i; while (i < vl && v[i] != ',' && v[i] != ' ' && v[i] != '\t') i++;
+      if (i - t == 5 && (v[t] | 0x20) == 'c' && (v[t + 1] | 0x20) == 'l' && (v[t + 2] | 0x20) == 'o' && (v[t + 3] | 0x20) == 's' &&
+          (v[t + 4] | 0x20) == 'e') a->close = 1;
+    }
+  }
 }
 FB_INLINE void fb_ax_reqline(fb_ax_t *a, const char *m, int ml, const char *p, int pl) {
   if (a->lite && a->minor != 1) { a->skip = 1; return; }   // fb_parse_req: falls back anyway, as ref_parse does
@@ -853,13 +861,15 @@ FB_INLINE void fb_ax_reqline(fb_ax_t *a, const char *m, int ml, const char *p, i
 // NEED_MORE from the head). flags = why FP_FALLBACK. With flags == FB_MINOR only (HTTP/1.0 etc.), r is filled
 // as for a success (route, id, auth, body_off/len) and total = head + body bytes, which may exceed len (then
 // wait for more): enough to serve an HTTP/1.0 client instead of answering 400.
-typedef struct { int minor, flags, total; } fb_info_t;
+// close: the Connection header lists "close" (RFC 9112 9.6: answer, then close). HTTP/1.0 closes by default unless
+// it asks for keep-alive, which close does not report: check minor for that.
+typedef struct { int minor, flags, total, close; } fb_info_t;
 FB_INLINE int fb_req_core(const char *b, int len, req_t *r, fb_info_t *info, const int walk, const int simd, const int lite) {
   fb_ax_t a; memset(&a, 0, sizeof a); a.req = r; a.lite = lite;
   int minor = -1;
   r->route = R_NOTFOUND; r->id_ok = 0; r->id = 0;
   int ret = fb_core(b, len, NULL, NULL, NULL, NULL, &minor, NULL, NULL, 0, 1, &a, fb_ax_reqline, walk, simd);
-  info->minor = minor; info->flags = a.flags | (minor != 1 ? FB_MINOR : 0); info->total = 0;
+  info->minor = minor; info->flags = a.flags | (minor != 1 ? FB_MINOR : 0); info->total = 0; info->close = a.close;
   if (ret == -2) return FP_NEED_MORE;
   if (ret < 0) return -2;
   r->auth = 0; r->tok = 0; r->tok_len = 0;

@@ -115,6 +115,10 @@ def header(draw):
     elif kind == 2:
         name = draw(recase(b"Transfer-Encoding"))
         val = draw(st.sampled_from([b"chunked", b"gzip, chunked", b"identity"]))
+    elif kind == 3:
+        name = draw(recase(b"Connection"))
+        val = draw(st.sampled_from([b"keep-alive", b"Keep-Alive", b"close", b"Close", b"keep-alive, close", b"close, keep-alive",
+                                    b"upgrade", b"keep-alivex", b"Keep-Alive, Upgrade", b"te, close"]))
     else:
         name, val = draw(header_name), draw(generic_value)
     return name, draw(ows), val, draw(ows)
@@ -372,6 +376,9 @@ def req_model(req):
         assert got_fields(data, out) == fields, f"fb_parse_req {got_fields(data, out)}, the rules say {fields}"
     want, fields = model(data, parts, zeros=True)
     r = LIB.fz_req(data, len(data), 0, out)      # fast_parse: the exact answer, or FALLBACK
+    # RFC 9112 9.6: a Connection header other than exactly keep-alive must reach the caller, so the fast path falls back
+    if any(n.lower() == b"connection" and strip_ows(v).lower() != b"keep-alive" for n, v in parts["headers"]):
+        assert r == FALLBACK, f"fast_parse returned {r} on a request whose Connection header is not keep-alive"
     if r != FALLBACK:
         assert r == want, f"fast_parse returned {r}, the rules say {want}"
         if want > 0:
