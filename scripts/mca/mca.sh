@@ -6,10 +6,13 @@
 # With uiCA fetched (scripts/mca/fetch-uica.sh; AGPL, never vendored), the x86 kernels are also run through uiCA's
 # Intel models, which track the Xeon's measured cycles much more closely than llvm-mca's (README, Benchmarks).
 #   scripts/mca/mca.sh [LLVM_BIN_DIR]     (default: $LLVM, then /opt/homebrew/opt/llvm/bin, then PATH)
+#   MEASURED=file scripts/mca/mca.sh      + a "measured" column from scripts/mca/validate.sh's output
 cd "$(dirname "$0")/../.."
 M=${1:-${LLVM:-/opt/homebrew/opt/llvm/bin}}; [ -x "$M/llvm-mca" ] || M=$(dirname "$(command -v llvm-mca)")
 [ -x "$M/llvm-mca" ] || { echo "llvm-mca not found (brew install llvm, or apt install llvm)"; exit 1; }
 S=$(mktemp -d "${TMPDIR:-/tmp}/mca.XXXXXX"); trap 'rm -rf "$S"' EXIT
+U=${UICA:-third_party/uiCA}; UPY=${PYTHON:-build/venv/bin/python}   # UICA=: an existing uiCA checkout (fetch-uica.sh)
+[ -x "$UPY" ] && UPY=$(cd "$(dirname "$UPY")" && pwd)/$(basename "$UPY")
 X86_CPUS="cascadelake icelake-server sapphirerapids graniterapids znver3 znver4 znver5 alderlake sierraforest"
 ARM_CPUS="neoverse-n1 neoverse-n2 neoverse-v1 neoverse-v2 neoverse-v3 ampere1b apple-m4"
 A2="-mavx2 -mbmi -mbmi2 -mpopcnt"
@@ -55,7 +58,6 @@ PY
       awk -v be="$be" -v c="$c" '/Code Region - /{r=$NF} /Block RThroughput:/{print be, c, r, $3}'
   done
   # uiCA (Intel only): each region alone, assembled as the host's object format (its XED reads that)
-  U=third_party/uiCA; UPY=${PYTHON:-build/venv/bin/python}
   case "$tgt" in x86*) if [ -f $U/uiCA.py ] && [ -f $U/instrData/CLX_data.py ]; then
     if [ "$(uname)" = Darwin ]; then ot=x86_64-apple-macos13; else ot=x86_64-linux-gnu; fi
     for reg in $(sed -n 's/^# LLVM-MCA-BEGIN //p' "$S/$be.s"); do
@@ -63,22 +65,25 @@ PY
         perl -pe 's/\bL(CPI|_)/_x$1/g; s/##.*$//' > "$S/u.s"
       "$M/llvm-mc" -triple $ot -filetype=obj "$S/u.s" -o "$S/u.o" 2>/dev/null || continue
       for a in CLX ICL TGL; do
-        t=$(cd $U && "../../$UPY" uiCA.py "$S/u.o" -arch $a -TPonly 2>/dev/null) && echo "$be uica-$a $reg $t"
+        t=$(cd $U && "$UPY" uiCA.py "$S/u.o" -arch $a -TPonly 2>/dev/null) && echo "$be uica-$a $reg $t"
       done
     done; fi;; esac
 done < "$S/backends" > "$S/out"
 touch "$S/loops"
+[ -n "$MEASURED" ] && grep -v '^#' "$MEASURED" | awk '{print $2, "measured", $1, $3}' >> "$S/out"
 python3 - "$S/out" "$S/loops" <<'PY'
 import sys, collections
 loops = {tuple(l.split()) for l in open(sys.argv[2])}
-d = collections.OrderedDict(); cpus = []
+d = collections.OrderedDict(); cpus = ["measured"]
 for l in open(sys.argv[1]):
     be, cpu, reg, t = l.split()
     d.setdefault((reg, be), {})[cpu] = float(t)
     if cpu not in cpus: cpus.append(cpu)
 for arch in ("x86", "uica", "arm"):
-    cs = [c for c in cpus if ("arm" if c.startswith(("neoverse", "ampere", "apple")) else "uica" if c.startswith("uica") else "x86") == arch]
-    if not cs: continue
+    kind = lambda c: "arm" if c.startswith(("neoverse", "ampere", "apple")) else "uica" if c.startswith("uica") else "x86"
+    cs = [c for c in cpus if kind(c) == arch or (c == "measured" and arch != "arm")]   # measured: an x86 box
+    if not any(c != "measured" for c in cs): continue
+    if not any("measured" in v for v in d.values()): cs = [c for c in cs if c != "measured"]
     # a CPU whose numbers equal an earlier column on every kernel shares that scheduling model
     same = {}
     for i, c in enumerate(cs):

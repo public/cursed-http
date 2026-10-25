@@ -792,9 +792,11 @@ on the Xeon is mostly branches and bookkeeping.
 - **uiCA** ([uops.info](https://uops.info), AGPL-3.0, fetched by `scripts/mca/fetch-uica.sh`, never vendored):
   Intel only, up to Ice Lake / Tiger Lake in the pinned version.
 - Regions that contain a loop are marked, because a model counts a loop body once.
+- **`make mca-validate`** measures the same kernels with `perf stat` on the machine it runs on
+  (`scripts/mca/validate.sh`, x86-64 Linux) and adds them as a column. `UICA=path` reuses an existing uiCA checkout.
 
-Calibration on the Xeon (Cascade Lake), cycles per kernel call. Measured is `perf stat` cycles of back-to-back
-calls on L1-hot data (`scripts/mca/kbench.c`), minus the call overhead:
+Calibration on the Xeon (Cascade Lake, `make mca-validate`, clang 18), cycles per kernel call. Measured is
+`perf stat` cycles of back-to-back calls on L1-hot data (`scripts/mca/kbench.c`), minus the call overhead:
 
 | kernel / backend | measured | uiCA | llvm-mca |
 |---|---|---|---|

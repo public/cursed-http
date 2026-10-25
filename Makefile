@@ -246,6 +246,10 @@ conformance: $(B)/cases.bin all
 # scripts/mca/fetch-uica.sh has fetched it): for CPUs we can't run on; see README, "Estimating other CPUs"
 mca:
 	./scripts/mca/mca.sh
+# the same kernels measured with perf on this machine (x86-64 Linux), added as a column next to the estimates
+mca-validate: | $(B)
+	./scripts/mca/validate.sh > $(B)/mca-measured.txt
+	MEASURED=$(B)/mca-measured.txt ./scripts/mca/mca.sh
 
 # planted bugs that the tests must catch (prints one line per mutant; read the output)
 mutants:
@@ -291,4 +295,4 @@ mutants-fuzz: $(B)/venv/.done
 
 clean:
 	rm -rf $(B)
-.PHONY: all lib mca gen gencheck test test-quick asan bench avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check fuzz fuzz-replay hypothesis mutants-fuzz clean
+.PHONY: all lib mca mca-validate gen gencheck test test-quick asan bench avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check fuzz fuzz-replay hypothesis mutants-fuzz clean
