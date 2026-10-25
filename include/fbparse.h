@@ -712,8 +712,10 @@ static inline int fb_parse_request_loop(int walk, const char *buf, size_t len, c
 // ---------------- Transfer-Encoding: chunked bodies (RFC 9112 7.1) ----------------
 // fb_decode_chunked(b, len, out, max_body, &body_len): the chunked body that starts at b (right after the head).
 //   > 0                  bytes the chunked body occupies, final CRLF included (a pipelined next request starts
-//                        there); the decoded body, *body_len bytes, is written to out (out may be b: in place)
-//   FB_CHUNK_NEED_MORE   (0) incomplete: call again with more bytes (stateless; out is not touched until complete)
+//                        there); the decoded body, *body_len bytes, is in out. out is either b (in place) or a
+//                        buffer of max_body bytes that doesn't overlap b; its contents are unspecified unless > 0
+//   FB_CHUNK_NEED_MORE   (0) incomplete: call again with more bytes (stateless; in place, b is only rewritten once
+//                        the body is complete, so the retry sees the original bytes)
 //   FB_CHUNK_INVALID     (-2) not a valid chunked body: answer 400 and close
 //   FB_CHUNK_TOO_LARGE   (-3) the decoded body would exceed max_body bytes: answer 413 and close
 // Strict where request smuggling lives:
@@ -729,8 +731,26 @@ enum { FB_CHUNK_NEED_MORE = 0, FB_CHUNK_INVALID = -2, FB_CHUNK_TOO_LARGE = -3 };
 static inline int fb_chunk_hex(unsigned char c) {
   return (unsigned)(c - '0') < 10u ? c - '0' : (unsigned)((c | 0x20) - 'a') < 6u ? (c | 0x20) - 'a' + 10 : -1;
 }
-// one pass; write = 0: validate and measure, write = 1: copy the data out (only after a validating pass)
-static inline int fb_chunked_pass(const char *b, int len, char *out, int max_body, int *body_len, const int write) {
+// n bytes from s to d, d <= s or no overlap. Chunks are usually short, so no memmove call up to 256 bytes:
+// 16-byte blocks forward, the last 16 bytes loaded before any store (in place, a block store can land on them).
+// Forward blocks are safe in place: with d <= s a store never reaches bytes a later block still has to load.
+static inline void fb_chunk_copy(char *d, const char *s, int n) {
+  if (n > 256) { memmove(d, s, (size_t)n); return; }
+  if (n >= 16) {
+    char t[16]; memcpy(t, s + n - 16, 16);
+    for (int i = 0; i + 16 < n; i += 16) { char v[16]; memcpy(v, s + i, 16); memcpy(d + i, v, 16); }
+    memcpy(d + n - 16, t, 16);
+    return;
+  }
+  if (n >= 8) { uint64_t a, z; memcpy(&a, s, 8); memcpy(&z, s + n - 8, 8); memcpy(d, &a, 8); memcpy(d + n - 8, &z, 8); return; }
+  for (int i = 0; i < n; i++) d[i] = s[i];
+}
+#define FB_CHUNK_SPANS 128   // in place: chunk positions remembered by the validating pass (more: a second parse)
+typedef struct { int off, size; } fb_chunk_span_t;
+// one pass. write = 1: copy each chunk to out as it is validated (out != b, or a second in-place pass after a
+// validating one); write = 0: validate only, remembering up to FB_CHUNK_SPANS chunk positions in sp
+static inline int fb_chunked_pass(const char *b, int len, char *out, int max_body, int *body_len, const int write,
+                                  fb_chunk_span_t *sp, int *nsp) {
   int p = 0, total = 0;
   for (;;) {
     // chunk-size
@@ -747,8 +767,12 @@ static inline int fb_chunked_pass(const char *b, int len, char *out, int max_bod
     int q = p;
     while (q < len && (b[q] == ' ' || b[q] == '\t')) q++;
     if (q >= len) return FB_CHUNK_NEED_MORE;
-    if (b[q] == ';') {
-      for (q++; q < len && b[q] != '\r'; q++) {
+    if (b[q] == ';') {   // the extension: 8 bytes at a time, the first control byte must be the CR that ends it
+      for (q++; q + 8 <= len; q += 8) {
+        uint64_t w = fb_ld64(b + q), m = (fb_swar_le(w, 0x1f) & ~fb_swar_eq(w, '\t' * FB_ONES)) | fb_swar_eq(w, 0x7f * FB_ONES);
+        if (m) { q += __builtin_ctzll(m) >> 3; if (b[q] != '\r') return FB_CHUNK_INVALID; break; }
+      }
+      for (; q < len && b[q] != '\r'; q++) {
         unsigned char c = (unsigned char)b[q];
         if ((c < 0x20 && c != '\t') || c == 0x7f) return FB_CHUNK_INVALID;
       }
@@ -773,13 +797,26 @@ static inline int fb_chunked_pass(const char *b, int len, char *out, int max_bod
       return FB_CHUNK_NEED_MORE;
     }
     if (b[p + size] != '\r' || b[p + size + 1] != '\n') return FB_CHUNK_INVALID;
-    if (write) memmove(out + total, b + p, (size_t)size);   // out + total <= b + p: in place works
+    if (write) fb_chunk_copy(out + total, b + p, (int)size);   // out + total <= b + p: in place works
+    else if (*nsp < FB_CHUNK_SPANS) { sp[*nsp].off = p; sp[*nsp].size = (int)size; ++*nsp; } else *nsp = FB_CHUNK_SPANS + 1;
     total += (int)size; p += (int)size + 2;
   }
 }
 static inline int fb_decode_chunked(const char *b, int len, char *out, int max_body, int *body_len) {
-  int n = 0, r = fb_chunked_pass(b, len, out, max_body < 0 ? 0 : max_body, &n, 0);
-  if (r > 0) { fb_chunked_pass(b, len, out, max_body, &n, 1); *body_len = n; }
+  int n = 0, ns = 0, r;
+  fb_chunk_span_t sp[FB_CHUNK_SPANS];
+  if (max_body < 0) max_body = 0;
+  if (out != b) {   // a separate buffer: one pass, copying as it goes
+    r = fb_chunked_pass(b, len, out, max_body, &n, 1, sp, &ns);
+    if (r > 0) *body_len = n;
+    return r;
+  }
+  // in place: validate first (a NEED_MORE retry must see the original bytes), then compact the chunks
+  r = fb_chunked_pass(b, len, out, max_body, &n, 0, sp, &ns);
+  if (r <= 0) return r;
+  if (ns <= FB_CHUNK_SPANS) { int t = 0; for (int i = 0; i < ns; i++) { fb_chunk_copy(out + t, b + sp[i].off, sp[i].size); t += sp[i].size; } }
+  else fb_chunked_pass(b, len, out, max_body, &n, 1, sp, &ns);
+  *body_len = n;
   return r;
 }
 

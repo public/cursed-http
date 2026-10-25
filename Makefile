@@ -215,14 +215,17 @@ $(B)/bench_fbparse: bench/bench_fbparse.c $(HDRS) $(B)/pico.o $(LLHTTP_O) $(B)/l
 	$(CC_T) $< $(B)/pico.o $(LLHTTP_O) $(B)/llhttp_shim.o -o $@
 $(B)/bench_batch: bench/bench_batch.c $(HDRS) $(B)/pico.o
 	$(CC_T) $< $(B)/pico.o -o $@
+$(B)/bench_chunked: bench/bench_chunked.c $(HDRS) $(B)/pico.o
+	$(CC_T) $< $(B)/pico.o -o $@
 $(B)/bench_chp: bench/bench_chp.c include/chp.h $(HDRS) $(B)/libchp.a $(B)/pico.o
 	$(CC_T) $< $(B)/pico.o $(B)/libchp.a -o $@
-bench: $(B)/test_fastparse $(B)/compare $(B)/bench_fbparse $(B)/bench_batch $(B)/bench_chp
+bench: $(B)/test_fastparse $(B)/compare $(B)/bench_fbparse $(B)/bench_batch $(B)/bench_chp $(B)/bench_chunked
 	./$(B)/test_fastparse benchonly
 	./$(B)/compare
 	./$(B)/bench_fbparse
 	./$(B)/bench_batch
 	./$(B)/bench_chp
+	./$(B)/bench_chunked
 
 # ---- real AVX-512 (compile anywhere with gcc/clang; run only on AVX-512BW/VL hardware) ----
 AVX512 := -march=cascadelake

@@ -23,6 +23,8 @@ static const ccase_t CC[] = {
   OKC("16 hex digits", "0000000000000005\r\nhello\r\n0\r\n\r\n", "hello"),
   OKC("extension ignored", "5;name=value\r\nhello\r\n0;last\r\n\r\n", "hello"),
   OKC("extension after BWS", "5 ;x\r\nhello\r\n0\t;y=\"q s\"\r\n\r\n", "hello"),
+  OKC("long extension", "5;name=a-long-extension-value-with-spaces and\ttabs\x80\r\nhello\r\n0\r\n\r\n", "hello"),
+  OKC("extension ending on an 8-byte boundary", "5;abcdefgh\r\nhello\r\n0;1234567\r\n\r\n", "hello"),
   OKC("CRLF inside the data", "4\r\n\r\n\r\n\r\n0\r\n\r\n", "\r\n\r\n"),
   OKC("binary data", "3\r\n\x00\xff\x7f\r\n0\r\n\r\n", "\x00\xff\x7f"),
   {"17 hex digits", "00000000000000005\r\nhello\r\n0\r\n\r\n", 0, FB_CHUNK_INVALID, NULL, 0},
@@ -39,6 +41,7 @@ static const ccase_t CC[] = {
   {"data shorter than its size", "6\r\nhello\r\n0\r\n\r\n", 0, FB_CHUNK_INVALID, NULL, 0},
   {"bare LF after the data", "5\r\nhello\n0\r\n\r\n", 0, FB_CHUNK_INVALID, NULL, 0},
   {"control byte in an extension", "5;a\x01\r\nhello\r\n0\r\n\r\n", 0, FB_CHUNK_INVALID, NULL, 0},
+  {"control byte deep in a long extension", "5;name=a-long-extension\x02value\r\nhello\r\n0\r\n\r\n", 0, FB_CHUNK_INVALID, NULL, 0},
   {"DEL in an extension", "5;a\x7f\r\nhello\r\n0\r\n\r\n", 0, FB_CHUNK_INVALID, NULL, 0},
   {"LF in an extension", "5;a\nb\r\nhello\r\n0\r\n\r\n", 0, FB_CHUNK_INVALID, NULL, 0},
   {"trailer field", "5\r\nhello\r\n0\r\nX-Trailer: 1\r\n\r\n", 0, FB_CHUNK_INVALID, NULL, 0},
@@ -50,7 +53,8 @@ static const ccase_t CC[] = {
 #define NCC ((int)(sizeof CC / sizeof *CC))
 
 static int first_bad(const ccase_t *c, int len) {   // the shortest prefix that is already invalid (or len + 1)
-  for (int t = 0; t <= len; t++) { int bl; if (fb_decode_chunked(c->in, t, (char[1]){0}, 1 << 20, &bl) == FB_CHUNK_INVALID) return t; }
+  static char out[1 << 16];
+  for (int t = 0; t <= len; t++) { int bl; if (fb_decode_chunked(c->in, t, out, sizeof out, &bl) == FB_CHUNK_INVALID) return t; }
   return len + 1;
 }
 
@@ -60,7 +64,7 @@ int main(int argc, char **argv) {
   // 1. exact cases
   for (int i = 0; i < NCC; i++) {
     const ccase_t *c = &CC[i]; int len = c->len ? c->len : (int)strlen(c->in), bl = -1;
-    char *out = malloc(len + 1);
+    char *out = malloc(1 << 20);
     int r = fb_decode_chunked(c->in, len, out, 1 << 20, &bl);
     if (c->body ? (r != len || bl != c->body_len || memcmp(out, c->body, bl)) : r != c->want)
       FAIL("%s: fb_decode_chunked %d (body %d), want %d (body %d)\n", c->name, r, bl, c->body ? len : c->want, c->body_len);
@@ -75,10 +79,10 @@ int main(int argc, char **argv) {
     }
     free(out);
   }
-  { int bl; if (fb_decode_chunked("800\r\n", 5, (char[1]){0}, 1000, &bl) != FB_CHUNK_TOO_LARGE) FAIL("2048-byte chunk under a 1000-byte limit not too large\n");
-    if (fb_decode_chunked("3e8\r\n", 5, (char[1]){0}, 1000, &bl) != FB_CHUNK_NEED_MORE) FAIL("1000-byte chunk under a 1000-byte limit not accepted\n"); }
+  { int bl; static char o[1000]; if (fb_decode_chunked("800\r\n", 5, o, 1000, &bl) != FB_CHUNK_TOO_LARGE) FAIL("2048-byte chunk under a 1000-byte limit not too large\n");
+    if (fb_decode_chunked("3e8\r\n", 5, o, 1000, &bl) != FB_CHUNK_NEED_MORE) FAIL("1000-byte chunk under a 1000-byte limit not accepted\n"); }
   // a pipelined request right behind the body: the returned length is where it starts
-  { const char *s = "5\r\nhello\r\n0\r\n\r\nGET / HTTP/1.1\r\n\r\n"; int bl; char out[64];
+  { const char *s = "5\r\nhello\r\n0\r\n\r\nGET / HTTP/1.1\r\n\r\n"; int bl; char out[100];
     if (fb_decode_chunked(s, (int)strlen(s), out, 100, &bl) != 15 || bl != 5) FAIL("pipelined: consumed length wrong\n"); }
   // 2. generated bodies and their mutations against pico
   static char buf[32768]; long accepted = 0, rejected = 0;
@@ -99,7 +103,7 @@ int main(int argc, char **argv) {
     if (it & 1) for (int j = 0; j < m; j++) buf[rnd() % n] = "\r\n ;0aAgG\t\x00\x7f-+x"[rnd() % 15];
     if (rnd() % 4 == 0) n = rnd() % (n + 1);
     if (fz_check_chunked(buf, n, err, sizeof err)) { FAIL("generated %d (%d bytes): %s\n", it, n, err); continue; }
-    static char out[32768]; int bl; if (fb_decode_chunked(buf, n, out, 1 << 20, &bl) > 0) accepted++; else rejected++;
+    static char out[32768]; int bl; if (fb_decode_chunked(buf, n, out, sizeof out, &bl) > 0) accepted++; else rejected++;
   }
   printf("chunked: %d exact cases, %d generated bodies (%ld complete, %ld incomplete or rejected)\nTOTAL FAILURES: %d\n", NCC, N, accepted, rejected, fails);
   return fails != 0;
