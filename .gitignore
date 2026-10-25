@@ -16,3 +16,5 @@ core
 *.bin
 .DS_Store
 /third_party/
+__pycache__/
+.hypothesis/

@@ -8,6 +8,9 @@
 #   make compare-all  + uWebSockets, httparse, hparse (fetched at pinned commits; rustc / zig optional)
 #   make compare-go   + fasthttp (Go >= 1.26) on the same corpora
 #   make conformance  third-party conformance suites (fetched at pinned commits)
+#   make fuzz         libFuzzer: fbparse / fastparse / batchparse differential targets (clang with libFuzzer;
+#                     FUZZ_TIME=s per target, default 30)
+#   make hypothesis   Hypothesis properties on grammar-built requests (venv in build/; HYP_EXAMPLES, default 300)
 #   make gen          regenerate build/fastparse_gen.h and build/fastparse_pgo.h from gen/example_spec.json
 # Everything is built into build/. The library itself is header-only: include/*.h.
 CC ?= cc
@@ -106,7 +109,7 @@ example-check: $(B)/read_loop
 GENVECTORS ?= 200000
 FBMODE ?=
 RUN := ./scripts/run_test.sh
-test: all gencheck example-check
+test: all gencheck example-check fuzz-replay
 	@set -e; for t in $(FP_BINS); do $(RUN) 1 $$t nobench; done
 	@set -e; $(RUN) 2 $(B)/test_fbparse $(FBMODE); \
 	  for t in test_fbparse_scalar test_fbparse_emu512 test_fbparse_emuzmm; do $(RUN) 1 $(B)/$$t quick; done
@@ -199,6 +202,42 @@ mutants:
 	EMU=1 ./scripts/mutants_fbparse.sh | grep -i 'avx512\|SELF'
 	./scripts/mutants_batch.sh
 
+# ---- fuzzing (fuzz/): differential oracles shared by libFuzzer targets and Hypothesis properties ----
+FUZZ_T := fbparse fastparse batchparse
+FUZZ_TIME ?= 30
+FUZZ_CC ?= clang
+FUZZ_SAN := -O1 -g -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all
+FZ_INC := $(INC) -Ifuzz
+FZ_DEPS := $(HDRS) fuzz/oracle.h fuzz/fuzz.h
+$(B)/fuzz_seeds: fuzz/seeds.c $(HDRS) | $(B)
+	$(CC_T) $< $(PICO) -o $@
+$(B)/fuzz-seeds/.done: $(B)/fuzz_seeds
+	mkdir -p $(B)/fuzz-seeds && ./$(B)/fuzz_seeds $(B)/fuzz-seeds && touch $@
+# any compiler: the targets with a replay main(), on the seeds and the saved regressions
+$(B)/replay_%: fuzz/fuzz_%.c fuzz/replay.c $(FZ_DEPS) | $(B)
+	$(CC) $(CFLAGS) $(WARN) $(MARCH) $(FZ_INC) $< fuzz/replay.c $(PICO) -o $@
+fuzz-replay: $(addprefix $(B)/replay_,$(FUZZ_T)) $(B)/fuzz-seeds/.done
+	@set -e; for t in $(FUZZ_T); do ./$(B)/replay_$$t $(B)/fuzz-seeds fuzz/regressions; done
+$(B)/fuzz_%: fuzz/fuzz_%.c $(FZ_DEPS) | $(B)
+	$(FUZZ_CC) $(FUZZ_SAN) $(WARN) $(MARCH) $(FZ_INC) $< $(PICO) -o $@
+fuzz: $(addprefix $(B)/fuzz_,$(FUZZ_T)) $(B)/fuzz-seeds/.done
+	@for t in $(FUZZ_T); do mkdir -p $(B)/fuzz-corpus/$$t; \
+	  ./$(B)/fuzz_$$t -max_total_time=$(FUZZ_TIME) -max_len=8192 -dict=fuzz/http.dict -print_final_stats=1 \
+	    -artifact_prefix=$(B)/fuzz-$$t- $(B)/fuzz-corpus/$$t $(B)/fuzz-seeds fuzz/regressions > $(B)/fuzz-$$t.log 2>&1; rc=$$?; \
+	  echo "$$t: $$(grep -h 'stat::number_of_executed_units' $(B)/fuzz-$$t.log | awk '{print $$2}') runs, corpus $$(ls $(B)/fuzz-corpus/$$t | wc -l | tr -d ' ')"; \
+	  if [ $$rc != 0 ]; then grep -A3 -E "MISMATCH|ERROR: " $(B)/fuzz-$$t.log | head -20; echo "FUZZ FAILED: $$t (input saved as $(B)/fuzz-$$t-*, log $(B)/fuzz-$$t.log)"; exit 1; fi; done
+	@echo "FUZZ: no mismatch"
+# Hypothesis (pinned in fuzz/hyp/requirements.txt), through the oracle as a shared library
+$(B)/libfuzzoracle.so: fuzz/oracle_lib.c $(FZ_DEPS) | $(B)
+	$(CC) -O1 -g -shared -fPIC $(WARN) $(MARCH) $(FZ_INC) $< $(PICO) -o $@
+$(B)/venv/.done: fuzz/hyp/requirements.txt | $(B)
+	$(PYTHON) -m venv $(B)/venv && $(B)/venv/bin/pip -q install -r $< && touch $@
+hypothesis: $(B)/libfuzzoracle.so $(B)/venv/.done
+	$(B)/venv/bin/python fuzz/hyp/props.py
+# the planted fbparse.h bugs against the Hypothesis properties (MUT_ONLY=regex for a subset)
+mutants-fuzz: $(B)/venv/.done
+	./scripts/mutants_fuzz.sh
+
 clean:
 	rm -rf $(B)
-.PHONY: all gen gencheck test test-quick asan bench avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check clean
+.PHONY: all gen gencheck test test-quick asan bench avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check fuzz fuzz-replay hypothesis mutants-fuzz clean

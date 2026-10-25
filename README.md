@@ -403,6 +403,8 @@ make test         # every differential test, all backends the host can run + emu
 make test-quick   # smaller fuzz counts (CI)
 make asan         # ASan + UBSan builds (quick mode)
 make mutants      # planted bugs: each must make a test fail (read the output)
+make fuzz         # libFuzzer differential targets, FUZZ_TIME=30 s each (clang with libFuzzer, e.g. the Docker image)
+make hypothesis   # Hypothesis properties on grammar-built requests, HYP_EXAMPLES=300 each (venv in build/)
 make bench        # benchmarks (below)
 make avx512       # real AVX-512 builds; `make avx512-run` on AVX-512 hardware
 
@@ -499,6 +501,26 @@ cases to `tests/test_fbparse.c` (`FB_CASES`), where fbparse must match pico exac
 The 7 inputs accepted against some reference's rejection don't affect framing or any returned field (for example
 `Connection : upgrade`, or a form feed in a header value). The report lists each one in
 `build/conformance-report.txt`.
+
+**Fuzzing.** The same rules as the unit tests are in [fuzz/oracle.h](fuzz/oracle.h), and two tools use it:
+- **libFuzzer** (`make fuzz`): three targets, each an exact comparison.
+  - fbparse.h against pico, in every variant and with input-derived header limits and `last_len`.
+  - fastparse.h's contract: it may disagree with pico + logic only by falling back, no prefix of a complete
+    request completes, and `fast_parse_many` equals repeated calls.
+  - Every batchparse.h lane against `fast_parse`.
+  - A mismatch aborts, so libFuzzer saves the input. Seeds come from the test generators, and a dictionary
+    holds the HTTP syntax. `make test` replays the seeds and `fuzz/regressions/` with any compiler.
+- **Hypothesis** (`make hypothesis`, [fuzz/hyp/props.py](fuzz/hyp/props.py)): requests are built from an HTTP
+  grammar rather than by mutating bytes.
+  - Values and padding headers are sized to land line ends on 16/32/64-byte boundaries and in the long-value
+    skip windows.
+  - Damage goes into one named field at a time (path, value, name, version, method, line end), because a
+    second fault can hide the first.
+  - Besides the oracles, two properties check fbparse.h and fastparse.h against an independent Python model:
+    head length, every header name and value, route, id, Bearer token and body framing.
+  - Hypothesis shrinks a failure to a minimal request and keeps it for the next run.
+  - `make mutants-fuzz` runs the planted fbparse.h bugs against these properties. `MUT_ONLY=regex` runs a
+    subset, for a quick check while developing.
 
 **Platforms run:**
 
