@@ -36,7 +36,7 @@ FP_BINS := $(B)/test_fastparse $(B)/test_fastparse_scalar $(B)/test_fastparse_em
 FB_BINS := $(B)/test_fbparse $(B)/test_fbparse_scalar $(B)/test_fbparse_emu512 $(B)/test_fbparse_emuzmm
 BP_BINS := $(B)/test_batch $(B)/test_batch_emu $(B)/test_batch_gen $(B)/test_batch_spec
 GENCHECK := $(B)/check_example_spec $(B)/check_toy_spec
-PR_BINS := $(B)/test_probe $(B)/test_probe_scalar $(B)/test_probe_emu512
+PR_BINS := $(B)/test_probe $(B)/test_probe_scalar $(B)/test_probe_emu512 $(B)/test_chunked
 
 # ---- include/chp.h: every backend in one library, picked at load time (src/chp.c) ----
 # Each backend's object gets exactly the flags src/chp.c checks the CPU for; the rest is built for the
@@ -87,8 +87,13 @@ $(B)/test_probe: $(PR_DEPS)
 	$(CC_T) $(PR_W) -Ifuzz $< $(B)/pico.o -o $@
 $(B)/test_probe_scalar: $(PR_DEPS)
 	$(CC_T) $(PR_W) -Ifuzz -DFP_FORCE_SCALAR $< $(B)/pico.o -o $@
+# the AVX-512 logic on C stand-ins; batchparse's x86 variants need the real intrinsics, so canon lanes only here
+# (test_batch_emu covers the emulated zmm lanes)
 $(B)/test_probe_emu512: $(PR_DEPS)
-	$(CC_T) $(PR_W) -Ifuzz -DFP_AVX512_EMU -DBP_AVX512_EMU $< $(B)/pico.o -o $@
+	$(CC_T) $(PR_W) -Ifuzz -DFP_AVX512_EMU -DBP_CANON_ONLY $< $(B)/pico.o -o $@
+# fb_decode_chunked vs picohttpparser's decoder (plain C: one build)
+$(B)/test_chunked: tests/test_chunked.c fuzz/oracle.h $(HDRS) $(B)/pico.o
+	$(CC_T) -Ifuzz $< $(B)/pico.o -o $@
 $(B)/test_probe_sse2: tests/test_probe.c tests/probe_cases.h fuzz/oracle.h $(HDRS) $(B)/pico_base.o
 	$(CC) $(CFLAGS) $(WARN) $(PR_W) $(CHP_BASE) $(INC) -Ifuzz $< $(B)/pico_base.o -o $@
 
@@ -170,7 +175,7 @@ test: all gencheck example-check fuzz-replay
 	@set -e; $(RUN) 2 $(B)/test_fbparse $(FBMODE); \
 	  for t in $(notdir $(filter-out $(B)/test_fbparse,$(FB_BINS))); do $(RUN) 1 $(B)/$$t quick; done
 	@set -e; for t in $(BP_BINS); do $(RUN) 1 $$t; done
-	@set -e; for t in $(PR_BINS); do $(RUN) 1 $$t; done
+	@set -e; for t in $(PR_BINS); do $(RUN) 1 $$t $(FBMODE); done
 	@set -e; $(RUN) 1 $(B)/test_chp $(FBMODE)
 	@echo "ALL TESTS PASSED"
 test-quick:
@@ -183,11 +188,14 @@ $(B)/asan_fbparse: tests/test_fbparse.c $(HDRS) | $(B)
 	$(CC) $(SAN) $(WARN) $(MARCH) $(INC) $< $(PICO) -o $@
 $(B)/asan_fbparse_emu: tests/test_fbparse.c $(HDRS) | $(B)
 	$(CC) $(SAN) $(WARN) $(MARCH) $(INC) -DFP_AVX512_EMU $< $(PICO) -o $@
+$(B)/asan_chunked: tests/test_chunked.c fuzz/oracle.h $(HDRS) | $(B)
+	$(CC) $(SAN) $(WARN) $(MARCH) $(INC) -Ifuzz $< $(PICO) -o $@
 $(B)/asan_batch: tests/test_batch.c $(HDRS) | $(B)
 	$(CC) $(SAN) $(WARN) $(MARCH) $(INC) -DBP_AVX512_EMU $< $(PICO) -o $@
-asan: $(B)/asan_fastparse $(B)/asan_fbparse $(B)/asan_fbparse_emu $(B)/asan_batch
+asan: $(B)/asan_fastparse $(B)/asan_fbparse $(B)/asan_fbparse_emu $(B)/asan_batch $(B)/asan_chunked
 	@set -e; export ASAN_OPTIONS=detect_leaks=0; $(RUN) 1 $(B)/asan_fastparse nobench; \
-	  $(RUN) 1 $(B)/asan_fbparse quick; $(RUN) 1 $(B)/asan_fbparse_emu quick; $(RUN) 1 $(B)/asan_batch
+	  $(RUN) 1 $(B)/asan_fbparse quick; $(RUN) 1 $(B)/asan_fbparse_emu quick; $(RUN) 1 $(B)/asan_batch; \
+	  $(RUN) 1 $(B)/asan_chunked quick
 	@echo "ASAN/UBSAN CLEAN"
 
 # ---- benchmarks ----
@@ -273,7 +281,7 @@ mutants:
 	./scripts/mutants_batch.sh
 
 # ---- fuzzing (fuzz/): differential oracles shared by libFuzzer targets and Hypothesis properties ----
-FUZZ_T := fbparse fastparse batchparse
+FUZZ_T := fbparse fastparse batchparse chunked
 FUZZ_TIME ?= 30
 FUZZ_CC ?= clang
 FUZZ_SAN := -O1 -g -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=all

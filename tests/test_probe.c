@@ -4,7 +4,7 @@
 //                                    id, Bearer token, body framing; HTTP/1.0 requests are filled with their size
 //   fast_parse                       the same answer, or FP_FALLBACK (never on HTTP/1.1 API requests)
 //   fb_parse_request (pico API)      the head length on every request with a complete head; -1 on a non-request
-//   chunked bodies                   the head from fbparse, the body decoded by picohttpparser's phr_decode_chunked
+//   chunked bodies                   the head from fbparse, the body decoded in place by fb_decode_chunked
 //   pipelined pairs                  fast_parse_many returns both, fbparse parses the second at its offset
 // and every case and every truncation through fuzz/oracle.h (pico, all backends, batchparse). Any difference fails.
 //   make test   ./test_probe
@@ -48,13 +48,12 @@ static void check_case(const probe_case_t *c) {
   const char *m, *p; size_t ml, pl, nh = 64; int mv; struct fb_header h[64];
   int ph = fb_parse_request(b, len, &m, &ml, &p, &pl, &mv, h, &nh, 0);
   if (c->cls == PC_INVALID ? ph != -1 : ph != head) FAIL("%s: fb_parse_request %d, want %d\n", c->name, ph, c->cls == PC_INVALID ? -1 : head);
-  // a chunked body: the caller decodes it after the head (phr_decode_chunked works in place)
+  // a chunked body: the caller decodes it after the head, here in place, as a server would
   if (c->cls == PC_TE && c->decoded) {
     char *body2 = malloc(len - head + 1); memcpy(body2, b + head, len - head);
-    struct phr_chunked_decoder d; memset(&d, 0, sizeof d); d.consume_trailer = 1; size_t sz = len - head;
-    ssize_t rest = phr_decode_chunked(&d, body2, &sz);
-    size_t dl = strlen(c->decoded);
-    if (rest < 0 || sz != dl || memcmp(body2, c->decoded, dl)) FAIL("%s: chunked body decoded to %zd / %zu bytes, want %zu\n", c->name, rest, sz, dl);
+    int dl = (int)strlen(c->decoded), bl = -1, used = fb_decode_chunked(body2, len - head, body2, 500, &bl);
+    if (used != len - head || bl != dl || memcmp(body2, c->decoded, dl)) FAIL("%s: chunked body: %d of %d bytes, decoded %d, want %d\n", c->name, used, len - head, bl, dl);
+    if (fz_check_chunked(b + head, len - head, err, sizeof err)) FAIL("%s: chunked: %s\n", c->name, err);
     free(body2);
   }
   // every truncation, and the whole request, through the oracles (pico, every backend, batchparse)

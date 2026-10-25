@@ -159,11 +159,27 @@ if (req.auth)  printf("bearer token is %.*s\n", req.tok_len, req.tok);
 printf("body is %d bytes at offset %d\n", req.body_len, req.body_off);
 ```
 
-**Chunked bodies** (`Transfer-Encoding: chunked`). The parsers frame the head and report the chunking
-(`info.flags & FB_TE`), but they don't decode bodies. RFC 9112 (7.1) says a server must accept a valid chunked
-body. To do that, take the head length from `fb_parse_request` and decode the rest with picohttpparser's
-`phr_decode_chunked` (in `vendor/pico/`), which works in place. `tests/test_probe.c` does exactly this. The
-example above answers 400 instead, which is acceptable only if your API documents that it refuses chunked bodies.
+**Chunked bodies** (`Transfer-Encoding: chunked`). RFC 9112 (7.1) says a server must accept a valid chunked
+body. `fb_parse_req_ex` reports one (`info.flags & FB_TE`); take the head length from `fb_parse_request` and decode
+the rest with `fb_decode_chunked`:
+
+```c
+int body_len, used = fb_decode_chunked(buf + head, buflen - head, out, 4096, &body_len);
+//   > 0: the chunked body ends at buf + head + used (a pipelined request may follow); out holds body_len bytes
+//        (out may be buf + head: it decodes in place)
+//   FB_CHUNK_NEED_MORE: read more and call again (stateless)
+//   FB_CHUNK_INVALID: 400 and close
+//   FB_CHUNK_TOO_LARGE: over your limit (4096 here), 413 and close
+```
+
+- **Strict where request smuggling lives:** sizes are 1–16 hex digits, every line ends in CRLF, each chunk's data
+  is followed by exactly CRLF, and extensions are ignored but must hold no control bytes. Trailer fields are
+  refused.
+- **Never more lenient than pico's decoder:** whatever it accepts, picohttpparser's `phr_decode_chunked` accepts
+  with the same body and length (`tests/test_chunked.c`, `fuzz/fuzz_chunked.c`).
+- **Content-Length together with chunked is the server's call:** RFC 9112 says to treat it as an error (6.3).
+
+The example above answers 400 for chunked bodies, which is right only if your API documents that it refuses them.
 
 **Many connections at once:**
 
@@ -546,6 +562,13 @@ routing logic on top. Any difference fails the test, except where the expected d
   `fast_parse` must give the same answer, or fall back. The chunked body must decode with `phr_decode_chunked`.
 - Every case and every truncation also runs through the fuzz oracles, against pico, on every backend. All the
   cases are fuzz seeds too.
+
+**fb_decode_chunked** (`tests/test_chunked.c`, `fuzz/fuzz_chunked.c`)
+- One exact case per rule (sizes, CRLF, data framing, extensions, trailers, limits), and every truncation of each:
+  incomplete until the end, or until the first bad byte and invalid from there.
+- 200k generated bodies (20k in quick mode) and mutations of them, against picohttpparser's decoder: never more
+  lenient, the same body and length when it accepts, in place equal to out of place, `max_body` exact.
+- Planted bugs (trailers accepted, the CRLF after the data not checked, no hex-digit limit) each fail it.
 
 **The tests catch planted bugs.** `make mutants` plants 34 bugs in fbparse.h (including 5 in the long-value skip
 loop and 2 in the line-start name scan) and 9 in batchparse.h. Every one

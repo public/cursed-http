@@ -230,3 +230,32 @@ static int fz_check_batch(const char *d, size_t len, char *err, size_t en) {
   free(b);
   return r;
 }
+
+// ---- fbparse.h's chunked decoder vs picohttpparser's phr_decode_chunked (consume_trailer = 1) ----
+// fb_decode_chunked is the stricter of the two, so: whatever it accepts, pico accepts with the same body and the
+// same length; whatever pico rejects, it rejects; when it waits for more, so does pico. It also must not depend
+// on bytes past len, decode in place to the same bytes, and stop at max_body exactly.
+static int fz_check_chunked(const char *d, size_t n, char *err, size_t en) {
+  if (n >= (1u << 24)) return 0;
+  int len = (int)n, bl = -1, bl2 = -1, bl3 = -1;
+  char *b = fz_copy(d, n, 1), *out = malloc(n + 1), *in = fz_copy(d, n, 0), *pc = malloc(n + 1);
+  int r = fb_decode_chunked(b, len, out, 1 << 30, &bl), r2 = fb_decode_chunked(in, len, in, 1 << 30, &bl2), res = 0;
+  memcpy(pc, d, n);
+  struct phr_chunked_decoder dec; memset(&dec, 0, sizeof dec); dec.consume_trailer = 1; size_t sz = n;
+  ssize_t pr = phr_decode_chunked(&dec, pc, &sz);
+  if (r != r2 || (r > 0 && (bl != bl2 || memcmp(out, in, bl))))
+    res = fz_err(err, en, "fb_decode_chunked: in place %d (%d bytes), out of place %d (%d bytes)", r2, bl2, r, bl);
+  else if (r > 0 && (pr < 0 || (int)(n - pr) != r || (int)sz != bl || memcmp(pc, out, bl)))
+    res = fz_err(err, en, "fb_decode_chunked accepts %d bytes (body %d), pico %zd (body %zu)", r, bl, pr, sz);
+  else if (pr == -1 && r != FB_CHUNK_INVALID)
+    res = fz_err(err, en, "pico rejects, fb_decode_chunked %d", r);
+  else if (r == FB_CHUNK_NEED_MORE && pr != -2)
+    res = fz_err(err, en, "fb_decode_chunked waits for more, pico %zd", pr);
+  else if (r > 0) {   // max_body: exactly the body fits; one byte less is too large (unless the body is empty)
+    int t = fb_decode_chunked(b, len, out, bl, &bl3);
+    if (t != r || bl3 != bl) res = fz_err(err, en, "max_body = body (%d): %d", bl, t);
+    else if (bl > 0 && fb_decode_chunked(b, len, out, bl - 1, &bl3) != FB_CHUNK_TOO_LARGE) res = fz_err(err, en, "max_body = body - 1 is not too large");
+  }
+  free(b); free(out); free(in); free(pc);
+  return res;
+}

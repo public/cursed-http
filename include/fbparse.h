@@ -709,6 +709,80 @@ static inline int fb_parse_request_loop(int walk, const char *buf, size_t len, c
   return fb_core(buf, (int)len, method, method_len, path, path_len, minor_version, headers, num_headers, last_len, 0, NULL, NULL, 0, FB_BACKEND != 0);
 }
 
+// ---------------- Transfer-Encoding: chunked bodies (RFC 9112 7.1) ----------------
+// fb_decode_chunked(b, len, out, max_body, &body_len): the chunked body that starts at b (right after the head).
+//   > 0                  bytes the chunked body occupies, final CRLF included (a pipelined next request starts
+//                        there); the decoded body, *body_len bytes, is written to out (out may be b: in place)
+//   FB_CHUNK_NEED_MORE   (0) incomplete: call again with more bytes (stateless; out is not touched until complete)
+//   FB_CHUNK_INVALID     (-2) not a valid chunked body: answer 400 and close
+//   FB_CHUNK_TOO_LARGE   (-3) the decoded body would exceed max_body bytes: answer 413 and close
+// Strict where request smuggling lives:
+//   - chunk sizes are 1-16 hex digits;
+//   - every line ends in CRLF (a bare LF or a CR without LF is invalid);
+//   - each chunk's data is followed by exactly CRLF;
+//   - a chunk extension is ";..." directly after the size, or after spaces/tabs, and is ignored. It may hold
+//     visible ASCII, SP, HTAB and bytes >= 0x80, nothing else;
+//   - no trailer fields: the last chunk's line is followed by CRLF.
+// Everything it accepts, picohttpparser's phr_decode_chunked accepts with the same body and length
+// (tests/test_chunked.c). No padding is read: b[0..len) only. Each call is O(len) (stateless, like the head parsers).
+enum { FB_CHUNK_NEED_MORE = 0, FB_CHUNK_INVALID = -2, FB_CHUNK_TOO_LARGE = -3 };
+static inline int fb_chunk_hex(unsigned char c) {
+  return (unsigned)(c - '0') < 10u ? c - '0' : (unsigned)((c | 0x20) - 'a') < 6u ? (c | 0x20) - 'a' + 10 : -1;
+}
+// one pass; write = 0: validate and measure, write = 1: copy the data out (only after a validating pass)
+static inline int fb_chunked_pass(const char *b, int len, char *out, int max_body, int *body_len, const int write) {
+  int p = 0, total = 0;
+  for (;;) {
+    // chunk-size
+    int64_t size = 0; int nd = 0, h;
+    while (p < len && (h = fb_chunk_hex((unsigned char)b[p])) >= 0) {
+      if (++nd > 16) return FB_CHUNK_INVALID;
+      size = size * 16 + h;
+      if (size > (int64_t)max_body - total) return FB_CHUNK_TOO_LARGE;
+      p++;
+    }
+    if (p >= len) return FB_CHUNK_NEED_MORE;
+    if (nd == 0) return FB_CHUNK_INVALID;
+    // [BWS ";" chunk-ext] CRLF
+    int q = p;
+    while (q < len && (b[q] == ' ' || b[q] == '\t')) q++;
+    if (q >= len) return FB_CHUNK_NEED_MORE;
+    if (b[q] == ';') {
+      for (q++; q < len && b[q] != '\r'; q++) {
+        unsigned char c = (unsigned char)b[q];
+        if ((c < 0x20 && c != '\t') || c == 0x7f) return FB_CHUNK_INVALID;
+      }
+    } else if (q != p) return FB_CHUNK_INVALID;   // whitespace after the size only before a ";"
+    if (q >= len) return FB_CHUNK_NEED_MORE;
+    if (b[q] != '\r') return FB_CHUNK_INVALID;
+    if (q + 1 >= len) return FB_CHUNK_NEED_MORE;
+    if (b[q + 1] != '\n') return FB_CHUNK_INVALID;
+    p = q + 2;
+    if (size == 0) {   // last-chunk: then the empty line that ends the (empty) trailer section
+      if (p >= len) return FB_CHUNK_NEED_MORE;
+      if (b[p] != '\r') return FB_CHUNK_INVALID;    // a trailer field, or a bare LF
+      if (p + 1 >= len) return FB_CHUNK_NEED_MORE;
+      if (b[p + 1] != '\n') return FB_CHUNK_INVALID;
+      *body_len = total;
+      return p + 2;
+    }
+    // chunk-data CRLF
+    if ((int64_t)len - p < size + 2) {
+      // incomplete, but a wrong byte already in place is invalid now
+      if ((int64_t)len - p >= size + 1 && b[p + size] != '\r') return FB_CHUNK_INVALID;
+      return FB_CHUNK_NEED_MORE;
+    }
+    if (b[p + size] != '\r' || b[p + size + 1] != '\n') return FB_CHUNK_INVALID;
+    if (write) memmove(out + total, b + p, (size_t)size);   // out + total <= b + p: in place works
+    total += (int)size; p += (int)size + 2;
+  }
+}
+static inline int fb_decode_chunked(const char *b, int len, char *out, int max_body, int *body_len) {
+  int n = 0, r = fb_chunked_pass(b, len, out, max_body < 0 ? 0 : max_body, &n, 0);
+  if (r > 0) { fb_chunked_pass(b, len, out, max_body, &n, 1); *body_len = n; }
+  return r;
+}
+
 // ---------------- req_t adapter (needs fastparse.h included first) ----------------
 #if defined(FP_MAXHDR)
 // lowercase ASCII compare for names already validated as tchars: x | 0x20 only maps 'A'-'Z' onto
