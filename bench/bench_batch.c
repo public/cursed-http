@@ -2,7 +2,8 @@
 // picohttpparser (+ the same routing/header logic) called N times. Corpus as test_fastparse.c: 4096
 // requests, each in its own 1088-byte-stride buffer ("different connections"), load-test mix
 // (46% feed, 46% post-by-id, 7% like, 1% create) in random order. Best of R passes over the corpus.
-//   ./bench [passes]
+//   ./bench [passes [corpus requests]]   BP_ONLY=<method name> runs one method, BP_N=<batch> one batch size
+//   (for perf stat); the corpus size picks the cache level the buffers live in (256: L2, 4096: L3, 65536: DRAM)
 #include "batchparse.h"
 #include "picohttpparser.h"
 #include "testlib.h"
@@ -67,11 +68,15 @@ int main(int argc, char **argv) {
     for (int m = 0; m < NM; m++) printf("%11s", M[m].name);
     printf("   bp best vs fast\n");
     for (int i = 0; i < N; i++) { P[i] = mem + (size_t)i * STRIDE; L[i] = len[i]; }
+    const char *only = getenv("BP_ONLY"); int bn = getenv("BP_N") ? atoi(getenv("BP_N")) : 0;
     for (size_t b = 0; b < sizeof BS / sizeof *BS; b++) {
+      if (bn && BS[b] != bn) continue;
       printf("  N=%-10d", BS[b]); double fast = 0, best = 1e18;
-      for (int m = 0; m < NM; m++) { double t = run(M[m].f, P, L, N, BS[b]); printf("%11.1f", t); if (m == 1) fast = t; if (m >= 2 && t < best) best = t; }
-      printf("   %+.0f%%\n", 100.0 * (best - fast) / fast);
+      for (int m = 0; m < NM; m++) { if (only && strcmp(only, M[m].name)) { printf("%11s", "-"); continue; }
+        double t = run(M[m].f, P, L, N, BS[b]); printf("%11.1f", t); if (m == 1) fast = t; if (m >= 2 && t < best) best = t; }
+      if (fast > 0 && best < 1e18) printf("   %+.0f%%\n", 100.0 * (best - fast) / fast); else printf("\n");
     }
+    if (only || bn) continue;
     // per request type, N=16: GET-only and POST-only streams
     for (int kind = 0; kind < 2; kind++) {
       int n = 0; for (int i = 0; i < N; i++) { int post = mem[(size_t)i * STRIDE] == 'P'; if (post == kind) { P[n] = mem + (size_t)i * STRIDE; L[n++] = len[i]; } }
