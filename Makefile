@@ -242,6 +242,11 @@ conformance: $(B)/cases.bin all
 	./$(B)/conf $(B)/cases.bin $(B)/conformance-report.txt
 	@for t in test_fbparse test_fbparse_scalar test_fbparse_emu512; do FB_CASES=$(B)/cases.bin ./$(B)/$$t quick | grep -E "conformance|TOTAL"; done
 
+# static throughput estimates of the SIMD kernels per backend and CPU model (llvm-mca; + uiCA once
+# scripts/mca/fetch-uica.sh has fetched it): for CPUs we can't run on; see README, "Estimating other CPUs"
+mca:
+	./scripts/mca/mca.sh
+
 # planted bugs that the tests must catch (prints one line per mutant; read the output)
 mutants:
 	./scripts/mutants_fbparse.sh
@@ -286,4 +291,4 @@ mutants-fuzz: $(B)/venv/.done
 
 clean:
 	rm -rf $(B)
-.PHONY: all lib gen gencheck test test-quick asan bench avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check fuzz fuzz-replay hypothesis mutants-fuzz clean
+.PHONY: all lib mca gen gencheck test test-quick asan bench avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check fuzz fuzz-replay hypothesis mutants-fuzz clean

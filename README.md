@@ -781,6 +781,52 @@ Xeon, gocli -gzip mix, each request in its own buffer:
 picohttpparser × N with the same logic is about 2.2× slower than `bp_parse`. Of the request-line variants, per-lane
 canon is the fastest on the Xeon at every batch size. The AVX2 gather variant reaches parity and zmm trails it.
 
+### Estimating other CPUs (`make mca`)
+
+`scripts/mca/mca.sh` compiles the SIMD kernels (`scripts/mca/kernels.c`) for every backend and runs them through
+static pipeline models. They predict steady-state throughput (L1 hits, no branch mispredicts), so they rank
+kernel variants and backends, including on CPUs we can't run on. They don't predict whole requests, whose cost
+on the Xeon is mostly branches and bookkeeping.
+- **llvm-mca** (LLVM, Apache-2.0): every x86 and Arm model LLVM has, from Cascade Lake to Zen 5 and Neoverse V3.
+  LLVM 23 has no separate Granite Rapids, Zen 5 or Sierra Forest model; the script says which columns repeat.
+- **uiCA** ([uops.info](https://uops.info), AGPL-3.0, fetched by `scripts/mca/fetch-uica.sh`, never vendored):
+  Intel only, up to Ice Lake / Tiger Lake in the pinned version.
+- Regions that contain a loop are marked, because a model counts a loop body once.
+
+Calibration on the Xeon (Cascade Lake), cycles per kernel call. Measured is `perf stat` cycles of back-to-back
+calls on L1-hot data (`scripts/mca/kbench.c`), minus the call overhead:
+
+| kernel / backend | measured | uiCA | llvm-mca |
+|---|---|---|---|
+| `fb_all64` / sse2 | 83.7 | 84.5 | 47.7 |
+| `fb_all64` / avx2 | 20.8 | 18.7 | 11.8 |
+| `fb_all64` / avx512 (ymm) | 19.4 | 11.5 | 9.0 |
+| `fb_all64` / zmm | 8.4 | 11.8 | 9.0 |
+| `fp_cls64` / sse2 | 17.8 | 20.0 | 12.0 |
+| `fp_cls64` / avx2 | 8.0 | 9.2 | 6.0 |
+| `fb_nt64` / avx2 | 6.0 | 7.4 | 5.0 |
+| `fb_ctany512` / avx2 | 12.0 | 14.0 | 9.5 |
+| `fp_digits` | 14.4 | 15.5 | 7.5 |
+
+- uiCA is within about ±20% for SSE2, AVX2 and zmm.
+- llvm-mca gets the order right but is 1.2–2.2× optimistic, so read its other CPUs as relative numbers.
+- Both miss the AVX-512 ymm path, which measures 1.7–2× above them. It moves each half's mask from a `k`
+  register to a GPR and combines them; zmm doesn't.
+- Measured zmm kernels are 2–2.5× cheaper per 64-byte block than AVX2. Whole requests on zmm are still 10–15%
+  slower on Cascade Lake, which these cycle counts can't show: zmm lowers the core clock there.
+
+What the models say about the next CPUs, llvm-mca cycles per 64-byte block (relative numbers):
+
+| | AVX2 | AVX-512 zmm | |
+|---|---|---|---|
+| `fb_all64`, Sapphire Rapids | 12.5 | 9.0 | zmm without Cascade Lake's clock drop |
+| `fb_all64`, Zen 4 / Zen 5 | 10.8 | 6.0 | about 1.8× per block |
+| `fp_cls64`, Zen 4 / Zen 5 | 5.3 | 3.0 | |
+
+On Arm, NEON `fb_all64` is 34.7 cycles on Neoverse N1, 16.7 on V2 and 13.5 on V1. So a zmm tier for
+Zen 4/5 and Sapphire Rapids, and a look at the Neoverse V-series, are the first things to measure on real
+hardware.
+
 ## Limits and semantic differences
 
 fastparse.h is deliberately partial: what it doesn't check, it either ignores safely or declines with
