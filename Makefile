@@ -36,6 +36,7 @@ FP_BINS := $(B)/test_fastparse $(B)/test_fastparse_scalar $(B)/test_fastparse_em
 FB_BINS := $(B)/test_fbparse $(B)/test_fbparse_scalar $(B)/test_fbparse_emu512 $(B)/test_fbparse_emuzmm
 BP_BINS := $(B)/test_batch $(B)/test_batch_emu $(B)/test_batch_gen $(B)/test_batch_spec
 GENCHECK := $(B)/check_example_spec $(B)/check_toy_spec
+PR_BINS := $(B)/test_probe $(B)/test_probe_scalar $(B)/test_probe_emu512
 
 # ---- include/chp.h: every backend in one library, picked at load time (src/chp.c) ----
 # Each backend's object gets exactly the flags src/chp.c checks the CPU for; the rest is built for the
@@ -47,6 +48,7 @@ ifeq ($(ARCH),x86_64)
   FP_BINS += $(B)/test_fastparse_sse2
   FB_BINS += $(B)/test_fbparse_sse2
   BP_BINS += $(B)/test_batch_sse2
+  PR_BINS += $(B)/test_probe_sse2
 else ifneq ($(filter arm64 aarch64,$(ARCH)),)
   CHP_BASE :=
   CHP_T := scalar neon
@@ -78,7 +80,19 @@ $(B)/test_fbparse_sse2: tests/test_fbparse.c $(HDRS) $(B)/pico_base.o
 $(B)/test_batch_sse2: tests/test_batch.c $(HDRS) $(B)/pico_base.o
 	$(CC) $(CFLAGS) $(WARN) $(CHP_BASE) $(INC) $< $(B)/pico_base.o -o $@
 
-all: $(FP_BINS) $(FB_BINS) $(BP_BINS) $(GENCHECK) $(B)/test_chp
+# the transport-level request shapes of an HTTP/1.1 conformance probe (tests/probe_cases.h), every backend
+PR_DEPS := tests/test_probe.c tests/probe_cases.h fuzz/oracle.h $(HDRS) $(B)/pico.o
+PR_W := -Wno-missing-field-initializers
+$(B)/test_probe: $(PR_DEPS)
+	$(CC_T) $(PR_W) -Ifuzz $< $(B)/pico.o -o $@
+$(B)/test_probe_scalar: $(PR_DEPS)
+	$(CC_T) $(PR_W) -Ifuzz -DFP_FORCE_SCALAR $< $(B)/pico.o -o $@
+$(B)/test_probe_emu512: $(PR_DEPS)
+	$(CC_T) $(PR_W) -Ifuzz -DFP_AVX512_EMU -DBP_AVX512_EMU $< $(B)/pico.o -o $@
+$(B)/test_probe_sse2: tests/test_probe.c tests/probe_cases.h fuzz/oracle.h $(HDRS) $(B)/pico_base.o
+	$(CC) $(CFLAGS) $(WARN) $(PR_W) $(CHP_BASE) $(INC) -Ifuzz $< $(B)/pico_base.o -o $@
+
+all: $(FP_BINS) $(FB_BINS) $(BP_BINS) $(PR_BINS) $(GENCHECK) $(B)/test_chp
 
 $(B):
 	mkdir -p $(B)
@@ -156,6 +170,7 @@ test: all gencheck example-check fuzz-replay
 	@set -e; $(RUN) 2 $(B)/test_fbparse $(FBMODE); \
 	  for t in $(notdir $(filter-out $(B)/test_fbparse,$(FB_BINS))); do $(RUN) 1 $(B)/$$t quick; done
 	@set -e; for t in $(BP_BINS); do $(RUN) 1 $$t; done
+	@set -e; for t in $(PR_BINS); do $(RUN) 1 $$t; done
 	@set -e; $(RUN) 1 $(B)/test_chp $(FBMODE)
 	@echo "ALL TESTS PASSED"
 test-quick:

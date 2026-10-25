@@ -1,5 +1,6 @@
 // seeds.c - writes the seed corpus for the fuzzers: the edge cases, the client corpus (k6, gocli), the
-// fallback shapes (curl, Chrome, Firefox, HTTP/1.0, long heads, chunked, odd) and pipelined pairs, one file
+// fallback shapes (curl, Chrome, Firefox, HTTP/1.0, long heads, chunked, odd), pipelined pairs and the
+// conformance-probe cases (tests/probe_cases.h), one file
 // per input.   build/fuzz_seeds DIR
 #include <stdio.h>
 #include "fastparse.h"
@@ -7,6 +8,7 @@
 #include "testlib.h"
 #include "shapes.h"
 #include "edges.h"
+#include "probe_cases.h"
 
 static int nfiles;
 static void put(const char *dir, const char *d, int n) {
@@ -23,6 +25,7 @@ int main(int argc, char **argv) {
   for (int shape = 0; shape < S_NSHAPES; shape++) for (int i = 0; i < 20; i++) put(argv[1], a, gen_fb(a, shape));
   for (int i = 0; i < 40; i++) { int l = gen(a, i % 3), m = gen_fb(b, i % S_NSHAPES);   // pipelined pairs
     if (l + m < (int)sizeof a) { memcpy(a + l, b, m); put(argv[1], a, l + m); } }
+  for (int i = 0; i < N_PROBE_CASES; i++) { int h, bl; put(argv[1], a, pc_build(&PROBE_CASES[i], a, sizeof a, &h, &bl)); }
   printf("%d seeds in %s\n", nfiles, argv[1]);
   return 0;
 }

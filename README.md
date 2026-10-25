@@ -159,6 +159,12 @@ if (req.auth)  printf("bearer token is %.*s\n", req.tok_len, req.tok);
 printf("body is %d bytes at offset %d\n", req.body_len, req.body_off);
 ```
 
+**Chunked bodies** (`Transfer-Encoding: chunked`). The parsers frame the head and report the chunking
+(`info.flags & FB_TE`), but they don't decode bodies. RFC 9112 (7.1) says a server must accept a valid chunked
+body. To do that, take the head length from `fb_parse_request` and decode the rest with picohttpparser's
+`phr_decode_chunked` (in `vendor/pico/`), which works in place. `tests/test_probe.c` does exactly this. The
+example above answers 400 instead, which is acceptable only if your API documents that it refuses chunked bodies.
+
 **Many connections at once:**
 
 ```c
@@ -527,6 +533,20 @@ routing logic on top. Any difference fails the test, except where the expected d
 - On x86, the three differential tests above are also built for the baseline (`*_sse2`), so the SSE2 backend
   is checked against pico directly.
 
+**Conformance-probe cases** (`tests/test_probe.c`, `tests/probe_cases.h`)
+- These are the transport-level request shapes of Http11Probe (MIT), an HTTP/1.1 conformance probe for small JSON
+  API servers:
+  - a valid single-chunk body;
+  - HTTP/1.0 requests, with and without a body;
+  - a non-HTTP line (`GARBAGE`);
+  - pipelined pairs;
+  - the framing of its auth checks (Basic, garbage, tampered and `alg=none` tokens) and of its body checks (empty,
+    whitespace, numeric, missing, malformed, 501 characters, multibyte UTF-8).
+- Each case has an exact expected `fb_parse_req` result: route, id, token, body, or the reason it falls back.
+  `fast_parse` must give the same answer, or fall back. The chunked body must decode with `phr_decode_chunked`.
+- Every case and every truncation also runs through the fuzz oracles, against pico, on every backend. All the
+  cases are fuzz seeds too.
+
 **The tests catch planted bugs.** `make mutants` plants 34 bugs in fbparse.h (including 5 in the long-value skip
 loop and 2 in the line-start name scan) and 9 in batchparse.h. Every one
 fails on the platform it targets; the zero lines are backend-specific mutants run on another platform, plus one
@@ -886,6 +906,8 @@ This project builds on, and is measured against:
   conformance references
 * [narfindustries/http-garden](https://github.com/narfindustries/http-garden): request-smuggling payloads that
   found real framing bugs here
+* Http11Probe (Diogo Martins, MIT): the HTTP/1.1 conformance probe whose request shapes `tests/probe_cases.h`
+  rebuilds
 * [simdjson](https://github.com/simdjson/simdjson) and Geoff Langdale's and Daniel Lemire's work on bitmask
   parsing
 * [SWAR explained: parsing eight digits](https://lemire.me/blog/2022/01/21/swar-explained-parsing-eight-digits/)
