@@ -16,7 +16,7 @@ int main(int argc, char **argv) {
   if (argc < 3) { fprintf(stderr, "usage: %s KERNEL CALLS\n", argv[0]); return 2; }
   void (*f)(const char *, uint64_t *) = NULL;
   for (size_t i = 0; i < sizeof K_ / sizeof *K_; i++) if (!strcmp(K_[i].n, argv[1])) f = K_[i].f;
-  if (!f) { printf("%s: not in this build\n", argv[1]); return 0; }
+  if (!f) { printf("%s: not in this build\n", argv[1]); return 3; }   // e.g. fb_ctany512 without SIMD: nothing to time
   long calls = atol(argv[2]);
   // 8 KB of header-like bytes (L1-resident), walked in 64-byte steps; 512 extra for the 512-byte window kernel
   static char buf[8192 + 1024] __attribute__((aligned(64)));
