@@ -27,7 +27,7 @@
 // Everything except the classify step is shared portable code (64-bit masks, SWAR words).
 //
 // Stable internal API: batchparse.h builds on these, and `make test` runs its tests too:
-//   fp_quick_get, fp_reqline_canon, fp_route_auth, FP_CORE_L(b, len, r, l0), FP_BACKEND, FP_INLINE, FP_LIKELY,
+//   fp_quick_get, fp_reqline_canon, fp_route_auth, fp_route_lines, fp_hdr_reset, FP_CORE_L(b, len, r, l0), FP_BACKEND, FP_INLINE, FP_LIKELY,
 //   fp_ctz, fp_ld64, fp_c8, fp_nondigit, fp_swar8 (the last three only in batchparse's SIMD request-line variants).
 #pragma once
 #include <stdint.h>
@@ -85,11 +85,22 @@ enum { FP_NEED_MORE = 0, FP_FALLBACK = -1, FP_FULL = 1 };   // FP_FULL: fast_par
 #define FP_MAXHDR 8192
 #define FP_NCH (FP_MAXHDR / 64)
 
+// ==== BEGIN API SPEC FIELDS ====
+// Headers the API spec asks for by name (gen/httpgen.py, a route's "headers"): none in the example API.
+// With FP_NHDR > 0 this region also holds FP_H_<NAME> (the index of each in req_t.hdr) and fp_hdr_names.
+#define FP_NHDR 0
+// ==== END API SPEC FIELDS ====
+
 typedef struct {
   int route;
   int id_ok; int64_t id;          // GETPOST / LIKE: id_ok = positive integer, <= 16 digits
   int auth; const char *tok; int tok_len;   // auth: 1 = "Bearer " header present (POST routes only)
   int body_off, body_len;
+#if FP_NHDR > 0
+  // the spec's headers, on the routes that ask for them: value (into buf, trimmed of SP/HT) and length, the first
+  // line of that name wins; hdr[i] = NULL when absent (or on routes that don't ask). Index: FP_H_<NAME>.
+  const char *hdr[FP_NHDR]; int hdr_len[FP_NHDR];
+#endif
 } req_t;
 
 #define FP_INLINE static inline __attribute__((always_inline))
@@ -374,6 +385,28 @@ FP_INLINE int fp_hname(const char *s, uint64_t c0, uint64_t m0, uint64_t c1, uin
 }
 
 FP_INLINE int fp_eq(const char *a, const char *b, int n) { return memcmp(a, b, n) == 0; }
+// s[0..n) equals the lowercase literal lc[0..n), letters case-insensitively (n >= 1; lc padded with NULs to a
+// multiple of 8 bytes, as gen/httpgen.py emits it; s readable to the next multiple of 8: the padding contract)
+FP_INLINE int fp_ci_eq(const char *s, const char *lc, int n) {
+  uint64_t d = 0;
+  for (int i = 0; i < n; i += 8) { uint64_t c = fp_ld64(lc + i); d |= ((fp_ld64(s + i) | FP_LC(c)) ^ c) & fp_bytes(n - i < 8 ? n - i : 8); }
+  return d == 0;
+}
+#if FP_NHDR > 0
+// which of the spec's headers a parsed name n[0..nl) is (exact length, case-insensitive), or -1 (fbparse.h, tests)
+FP_INLINE int fp_hdr_index(const char *n, int nl) {
+  for (int i = 0; i < FP_NHDR; i++) if (nl == fp_hdr_names[i].len && fp_ci_eq(n, fp_hdr_names[i].lc, nl)) return i;
+  return -1;
+}
+#endif
+// the spec's header fields: cleared wherever the Authorization fields are
+FP_INLINE void fp_hdr_reset(req_t *r) {
+#if FP_NHDR > 0
+  for (int i = 0; i < FP_NHDR; i++) { r->hdr[i] = 0; r->hdr_len[i] = 0; }
+#else
+  (void)r;
+#endif
+}
 
 // ==== BEGIN API SPEC ====
 // Everything specific to the API lives between these markers: route ids, the general router, the
@@ -387,6 +420,10 @@ FP_INLINE int fp_route_auth(int route) { return route == R_CREATE || route == R_
 FP_INLINE int fp_spec_walk(const char *b) { return fp_ld32(b) == 0x54534f50u; }
 // learned-layout fast path worth attempting for this route
 FP_INLINE int fp_spec_learn(int route) { (void)route; return 1; }
+// headers the route asks for (bit i = FP_H_ index i), and which one a header line [s, end) is: its index, -1 =
+// none, -2 = it starts with one of the names but isn't "name:" (fall back). The example API asks for none.
+FP_INLINE unsigned fp_route_hdrs(int route) { (void)route; return 0; }
+FP_INLINE int fp_hdr_match(const char *b, int s, int end) { (void)b; (void)s; (void)end; return -1; }
 
 // Routing: methods and paths of the spec, first match wins.
 FP_INLINE void fp_route(const char *m, int ml, const char *p, int pl, req_t *r) {
@@ -440,7 +477,7 @@ FP_INLINE int fp_reqline_canon(const char *b, req_t *r) {
     r->route = route; r->id = (int64_t)fp_swar8(d, n); r->id_ok = r->id > 0;
   }
 out:
-  r->auth = 0; r->tok = 0; r->tok_len = 0;
+  r->auth = 0; r->tok = 0; r->tok_len = 0; fp_hdr_reset(r);
   return l0;
 }
 // ==== END API SPEC ====
@@ -460,10 +497,13 @@ FP_INLINE int fp_reqline(const char *b, int l0, req_t *r) {
   while (FP_UNLIKELY(pe > ps && b[pe - 1] == ' ')) pe--; // SP* before the version (as pico)
   if (pe <= ps) return FP_FALLBACK;
   fp_route(b, ml, b + ps, pe - ps, r);
-  r->auth = 0; r->tok = 0; r->tok_len = 0;
+  r->auth = 0; r->tok = 0; r->tok_len = 0; fp_hdr_reset(r);
   return 0;
 }
 FP_INLINE int fp_wants_auth(const req_t *r) { return fp_route_auth(r->route); }
+// the route needs its header lines read one by one: Authorization, or headers the spec asks for
+FP_INLINE int fp_route_lines(int route) { return fp_route_auth(route) || fp_route_hdrs(route) != 0; }
+FP_INLINE int fp_wants_lines(const req_t *r) { return fp_route_lines(r->route); }
 
 
 // header line [s, end) (end excludes CR/LF); value [*v, *ve) trimmed of SP/HT on both sides (as pico)
@@ -536,11 +576,24 @@ FP_INLINE int fp_next_lf(const uint64_t *L, int pos) {   // first LF at index >=
 // Visit every line after the request line (l0 = its LF); dispatch on the first byte. -> *cl or FP_FALLBACK.
 FP_INLINE int fp_walk(const char *b, const uint64_t *L, int k0, int nch, int l0, req_t *r, int *cl) {
   int have_cl = 0, have_auth = !fp_wants_auth(r), s = l0 + 1;
+  unsigned want = fp_route_hdrs(r->route);   // 0 unless the spec asks this route for headers
   uint64_t m = L[k0] & (L[k0] - 1);
   for (int kk = k0;;) {
     while (!m) { if (++kk >= nch) return 0; m = L[kk]; }
     int end = kk * 64 + fp_ctz(m), ls = s; m &= m - 1; s = end + 1;
     unsigned char c0 = (unsigned char)b[ls]; int c = c0 | 0x20;
+    if (want && c0 > 0x20) {   // the spec's headers: the first line of each name wins (as ref)
+      int e2 = b[end - 1] == '\r' ? end - 1 : end, i = fp_hdr_match(b, ls, e2);
+      if (i == -2) return FP_FALLBACK;
+      if (i >= 0 && (want >> i & 1)) {
+        int v = ls + 1, ve = e2; while (b[v - 1] != ':') v++;   // the name ends at its ':' (fp_hdr_match checked it)
+        fp_trim(b, &v, &ve);
+#if FP_NHDR > 0
+        r->hdr[i] = b + v; r->hdr_len[i] = ve - v;
+#endif
+        want &= ~(1u << i);
+      }
+    }
     if (FP_LIKELY(c0 > 0x20 && c != 'a' && c != 'c' && c != 't')) continue;
     if (b[end - 1] == '\r') end--;
     if (c != 'a') { if (fp_hdr_ct(b, ls, end, cl, &have_cl)) return FP_FALLBACK; }
@@ -584,7 +637,7 @@ FP_INLINE int fp_core_cand_l(const char *b, int len, req_t *r, const int simd, i
     if (fp_reqline(b, l0, r)) return FP_FALLBACK;
   }
   int cl = 0;
-  if (fp_wants_auth(r)) { if (fp_walk(b, L, k0, nch, l0, r, &cl)) return FP_FALLBACK; }
+  if (fp_wants_lines(r)) { if (fp_walk(b, L, k0, nch, l0, r, &cl)) return FP_FALLBACK; }
   else if (anyc) {
     int have_cl = 0;
     for (int kk = 0; kk < nch; kk++) for (uint64_t m = C[kk]; m; m &= m - 1) {
@@ -631,8 +684,8 @@ FP_INLINE int fp_core_walk_l(const char *b, int len, req_t *r, const int simd, i
 }
 
 // Stable entry for callers that do their own request-line work (batchparse.h): the common GET
-// shape in one shot. Precondition: the request line is canonical with a route that needs no Authorization
-// (fp_reqline_canon returned l0 > 0 and !fp_route_auth). Returns hend > 0 iff the headers end within the
+// shape in one shot. Precondition: the request line is canonical with a route that needs no header lines read
+// (fp_reqline_canon returned l0 > 0 and !fp_route_lines: no Authorization, no spec headers). Returns hend > 0 iff the headers end within the
 // first 128 bytes, the whole block is CRLF-clean (no bare CR, no bare-LF end) and no header line is one the
 // candidate core would look at (c/t/<= 0x20 start); fast_parse() then returns exactly hend with body_len 0.
 // Returns 0 otherwise: use fast_parse / FP_CORE_L. This keeps the header rules in fastparse.h only.
@@ -750,7 +803,7 @@ FP_INLINE int fp_try_layout(const char *b, int len, req_t *r, int l0, const fp_l
 // back on a c/t line without one); with equal line lengths that is all its decision looks at.
 static inline int fp_layout_build(const char *b, int l0, int hend, int route, fp_layout_t *L) {
   const int base = l0 + 1, hrel = hend - base;
-  if (hrel > 64 * FP_LAY_WORDS) return 0;
+  if (hrel > 64 * FP_LAY_WORDS || fp_route_hdrs(route)) return 0;   // a layout can't carry header values
   fp_layout_t t; memset(&t, 0, sizeof t); t.cl_i = t.auth_i = -1;
   int s = base;
   for (int p = base; p < hend; p++) {

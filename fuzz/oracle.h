@@ -91,7 +91,7 @@ static int fz_phr(const char *A, const char *Bp, size_t len, size_t max, size_t 
 static int fz_adapter(const char *A, const char *Bp, int len, char *err, size_t en) {
   req_t g, f, s; memset(&g, 0, sizeof g); memset(&f, 0, sizeof f); memset(&s, 0, sizeof s);
   int c = ref_parse(A, len, &g), a = fb_parse_req(Bp, len, &f), b = fb_parse_req_scalar(A, len, &s);
-  if (a > 0 && f.auth) f.tok = A + (f.tok - Bp);   // same() compares token pointers: rebase onto A
+  if (a > 0) req_rebase(&f, Bp, A);   // same() compares pointers: rebase onto A
   if (!same(c, &g, a, &f) || (c > 0 && g.id_ok && g.id != f.id)) return fz_err(err, en, "fb_parse_req (simd) %d, ref_parse %d", a, c);
   if (!same(c, &g, b, &s) || (c > 0 && g.id_ok && g.id != s.id)) return fz_err(err, en, "fb_parse_req (scalar) %d, ref_parse %d", b, c);
   for (int w = 0; w < 2; w++) { req_t q; memset(&q, 0, sizeof q); int x = fb_parse_req_loop(w, A, len, &q);
@@ -106,7 +106,7 @@ static int fz_adapter(const char *A, const char *Bp, int len, char *err, size_t 
     if (vp >= 0) {
       char *t = malloc(len + PAD); memcpy(t, A, len + PAD); t[vp] = '1';
       req_t g1; memset(&g1, 0, sizeof g1); int c1 = ref_parse(t, len, &g1), bad = 0;
-      if (c1 > 0 || c1 == FP_NEED_MORE) { e.tok = e.auth ? t + (e.tok - A) : 0;
+      if (c1 > 0 || c1 == FP_NEED_MORE) { if (!e.auth) e.tok = 0; req_rebase(&e, A, t);
         bad = (c1 > 0 ? !same(c1, &g1, in.total, &e) : in.total <= len) || (g1.id_ok && g1.id != e.id); }
       free(t);
       if (bad) return fz_err(err, en, "fb_parse_req_ex on HTTP/1.%c: total %d, ref_parse as HTTP/1.1 %d", A[vp], in.total, c1);
@@ -156,7 +156,7 @@ static int fz_fast_backends(const char *b, int len, int a, const req_t *f, char 
     }
   }
   // fp_quick_get (batchparse.h's GET entry): a claim must be exactly fast_parse's result, with no body
-  if (l0 && !fp_route_auth(q.route)) for (int simd = 0; simd < 2; simd++) {
+  if (l0 && !fp_route_lines(q.route)) for (int simd = 0; simd < 2; simd++) {
     int h = simd ? fp_quick_get(b, len, 1) : fp_quick_get(b, len, 0);
     if (h > 0 && (a != h || f->body_len != 0 || f->route != q.route)) return fz_err(err, en, "fp_quick_get (simd %d) %d, fast_parse %d", simd, h, a);
   }
@@ -165,7 +165,7 @@ static int fz_fast_backends(const char *b, int len, int a, const req_t *f, char 
 static int fz_fast_one(const char *b, const char *b2, int len, int prefixes, char *err, size_t en) {
   req_t f, f2, g; memset(&f, 0, sizeof f); memset(&f2, 0, sizeof f2); memset(&g, 0, sizeof g);
   int a = fast_parse(b, len, &f), a2 = fast_parse(b2, len, &f2), c = ref_parse(b, len, &g);
-  if (a2 > 0 && f2.auth) f2.tok = b + (f2.tok - b2);
+  if (a2 > 0) req_rebase(&f2, b2, b);
   if (!same(a, &f, a2, &f2) || (a > 0 && f.id != f2.id)) return fz_err(err, en, "fast_parse depends on the padding: %d vs %d", a, a2);
   if (fz_fast_backends(b, len, a, &f, err, en)) return 1;
   if (a > 0 && !fz_conn(b, f.body_off, 0))   // RFC 9112 9.6: a close (or anything but keep-alive) must reach the caller

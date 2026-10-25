@@ -52,8 +52,17 @@ static inline __attribute__((always_inline)) int ref_parse_with(phr_fn parse, co
   if (minor != 1) return FP_FALLBACK;
   ref_route(m, (int)ml, p, (int)pl, r);
   int cl = 0, have_auth = 0, have_cl = 0; r->auth = 0; r->tok = 0; r->tok_len = 0;
+#if FP_NHDR > 0
+  unsigned want = fp_route_hdrs(r->route);   // the spec's headers: first line of each name, pico's trimmed value
+  for (int j = 0; j < FP_NHDR; j++) { r->hdr[j] = 0; r->hdr_len[j] = 0; }
+#endif
   for (size_t i = 0; i < nh; i++) {
     if (!h[i].name) continue;
+#if FP_NHDR > 0
+    for (int j = 0; j < FP_NHDR; j++)
+      if ((want >> j & 1) && h[i].name_len == (size_t)fp_hdr_names[j].len && !strncasecmp(h[i].name, fp_hdr_names[j].lc, h[i].name_len)) {
+        r->hdr[j] = h[i].value; r->hdr_len[j] = (int)h[i].value_len; want &= ~(1u << j); }
+#endif
     if (h[i].name_len == 13 && !strncasecmp(h[i].name, "authorization", 13) && !have_auth) {
       have_auth = 1;
       if (h[i].value_len >= 7 && !memcmp(h[i].value, "Bearer ", 7)) { r->auth = 1; r->tok = h[i].value + 7; r->tok_len = (int)h[i].value_len - 7; }
@@ -74,8 +83,20 @@ static int ref_parse(const char *b, int len, req_t *r) { return ref_parse_with(p
 static int same(int a, const req_t *x, int b, const req_t *y) {
   if (a != b) return 0;
   if (a <= 0) return 1;
+#if FP_NHDR > 0
+  for (int j = 0; j < FP_NHDR; j++)
+    if (x->hdr[j] != y->hdr[j] || (x->hdr[j] && x->hdr_len[j] != y->hdr_len[j])) return 0;
+#endif
   return x->route == y->route && x->id_ok == y->id_ok && (!x->id_ok || x->id == y->id) && x->auth == y->auth &&
          x->tok_len == y->tok_len && (!x->auth || x->tok == y->tok) && x->body_off == y->body_off && x->body_len == y->body_len;
+}
+// a result parsed from a copy of the buffer at `from`, re-pointed at the original `to` (same() compares pointers)
+static void req_rebase(req_t *r, const char *from, const char *to) {
+  if (r->auth) r->tok = to + (r->tok - from);
+#if FP_NHDR > 0
+  for (int j = 0; j < FP_NHDR; j++) if (r->hdr[j]) r->hdr[j] = to + (r->hdr[j] - from);
+#endif
+  (void)from; (void)to;
 }
 
 // ---- corpus in k6 (Go net/http) request format ----

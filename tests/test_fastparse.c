@@ -66,7 +66,7 @@ static void check_backends(const char *b, int len, const char *what) {
   // fp_quick_get (the entry batchparse.h uses): whenever it claims a canonical non-auth request,
   // fast_parse must return exactly that, with no body; both SIMD and scalar classify
   req_t q; int l0 = fp_reqline_canon(b, &q);
-  if (l0 && !fp_route_auth(q.route)) for (int simd = 0; simd < 2; simd++) {
+  if (l0 && !fp_route_lines(q.route)) for (int simd = 0; simd < 2; simd++) {
     int h = simd ? fp_quick_get(b, len, 1) : fp_quick_get(b, len, 0);
     if (h > 0) { quick_claims++; if (a != h || f.body_len != 0 || f.route != q.route) FAIL("QUICK-GET MISMATCH simd %d len=%d: quick=%d fast=%d\n", simd, len, h, a); }
   }

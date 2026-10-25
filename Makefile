@@ -35,8 +35,8 @@ FP_BINS := $(B)/test_fastparse $(B)/test_fastparse_scalar $(B)/test_fastparse_em
            $(B)/test_fastparse_gen $(B)/test_fastparse_pgo $(B)/test_fastparse_pgo_scalar
 FB_BINS := $(B)/test_fbparse $(B)/test_fbparse_scalar $(B)/test_fbparse_emu512 $(B)/test_fbparse_emuzmm
 BP_BINS := $(B)/test_batch $(B)/test_batch_emu $(B)/test_batch_gen $(B)/test_batch_spec
-GENCHECK := $(B)/check_example_spec $(B)/check_toy_spec
-PR_BINS := $(B)/test_probe $(B)/test_probe_scalar $(B)/test_probe_emu512 $(B)/test_chunked
+GENCHECK := $(B)/check_example_spec $(B)/check_toy_spec $(B)/check_headers_spec
+PR_BINS := $(B)/test_probe $(B)/test_probe_scalar $(B)/test_probe_emu512 $(B)/test_chunked $(B)/test_hdrspec $(B)/test_hdrspec_scalar
 
 # ---- include/chp.h: every backend in one library, picked at load time (src/chp.c) ----
 # Each backend's object gets exactly the flags src/chp.c checks the CPU for; the rest is built for the
@@ -48,7 +48,7 @@ ifeq ($(ARCH),x86_64)
   FP_BINS += $(B)/test_fastparse_sse2
   FB_BINS += $(B)/test_fbparse_sse2
   BP_BINS += $(B)/test_batch_sse2
-  PR_BINS += $(B)/test_probe_sse2
+  PR_BINS += $(B)/test_probe_sse2 $(B)/test_hdrspec_sse2
 else ifneq ($(filter arm64 aarch64,$(ARCH)),)
   CHP_BASE :=
   CHP_T := scalar neon
@@ -103,6 +103,17 @@ $(B):
 	mkdir -p $(B)
 
 # ---- generated headers (gen/httpgen.py): the API-specific region of fastparse.h from a spec ----
+# a spec that asks for headers by name (req_t.hdr): tests/test_hdrspec.c
+$(B)/fastparse_hdr.h: gen/headers_spec.json gen/httpgen.py include/fastparse.h | $(B)
+	$(PYTHON) gen/httpgen.py gen gen/headers_spec.json --base include/fastparse.h -o $@
+HS_DEPS := tests/test_hdrspec.c fuzz/oracle.h $(HDRS) $(B)/fastparse_hdr.h
+HS_F := -I$(B) -Ifuzz -DBP_CANON_ONLY '-DBP_HTTP_H="fastparse_hdr.h"'
+$(B)/test_hdrspec: $(HS_DEPS) $(B)/pico.o
+	$(CC_T) $(HS_F) $< $(B)/pico.o -o $@
+$(B)/test_hdrspec_scalar: $(HS_DEPS) $(B)/pico.o
+	$(CC_T) $(HS_F) -DFP_FORCE_SCALAR $< $(B)/pico.o -o $@
+$(B)/test_hdrspec_sse2: $(HS_DEPS) $(B)/pico_base.o
+	$(CC) $(CFLAGS) $(WARN) $(CHP_BASE) $(INC) $(HS_F) $< $(B)/pico_base.o -o $@
 $(B)/fastparse_gen.h: gen/example_spec.json gen/httpgen.py include/fastparse.h | $(B)
 	$(PYTHON) gen/httpgen.py gen gen/example_spec.json --base include/fastparse.h -o $@
 $(B)/fastparse_pgo.h: gen/example_spec.json gen/example_profile.json gen/httpgen.py include/fastparse.h | $(B)
@@ -133,7 +144,7 @@ $(B)/check_%.h: gen/%.json gen/httpgen.py include/fastparse.h | $(B)
 $(B)/check_%: gen/check_gen.c $(B)/check_%.h
 	$(CC_T) -I$(B) '-DHTTP_HEADER="check_$*.h"' $< -o $@
 gencheck: $(GENCHECK)
-	for s in example_spec toy_spec; do $(PYTHON) gen/httpgen.py vectors gen/$$s.json $(GENVECTORS) 1 | $(B)/check_$$s || exit 1; done
+	for s in example_spec toy_spec headers_spec; do $(PYTHON) gen/httpgen.py vectors gen/$$s.json $(GENVECTORS) 1 | $(B)/check_$$s || exit 1; done
 
 # ---- fbparse.h vs picohttpparser ----
 $(B)/test_fbparse: tests/test_fbparse.c $(HDRS) $(B)/pico.o

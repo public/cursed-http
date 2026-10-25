@@ -419,7 +419,9 @@ Everything API-specific in `fastparse.h` lives between `==== BEGIN API SPEC ====
 - the route enum;
 - the router;
 - the canonical request-line templates;
-- three policy hooks.
+- the policy hooks.
+
+A second, small region before `req_t` (`API SPEC FIELDS`) holds the headers the spec asks for by name.
 
 The hand-written header ships with an example API ([`gen/example_spec.json`](gen/example_spec.json)): `GET /feed`,
 `GET /health`, `GET /posts/{id}`, and `POST /posts` and `POST /posts/{id}/like` with bearer auth.
@@ -452,6 +454,28 @@ The generator also checks the spec:
 - it warns about unreachable routes;
 - `make gencheck` compares the generated router with the generator's own Python model on 200k vectors, for the
   example spec and for a deliberately awkward [`gen/toy_spec.json`](gen/toy_spec.json).
+
+**Headers by name.** A route can list headers it wants:
+
+```json
+{ "name": "CREATE", "method": "POST", "path": "/posts", "auth": "bearer", "headers": ["X-Request-Id", "Idempotency-Key"] }
+```
+
+- **The fields.** Each name gets an index `FP_H_<NAME>` (`FP_H_X_REQUEST_ID`), and the generated `req_t` gains
+  `const char *hdr[FP_NHDR]; int hdr_len[FP_NHDR]`. The value points into the buffer, trimmed of SP/HT, and the
+  first line with that name wins, as with Authorization.
+- **Absent headers, and other routes, give `hdr[i] == NULL`.**
+- **Every parser fills them identically:** `fast_parse`, `fast_parse_many`, `bp_parse` and `fb_parse_req` /
+  `fb_parse_req_ex`, against a pico-based reference (`tests/test_hdrspec.c`, on
+  [`gen/headers_spec.json`](gen/headers_spec.json)).
+- **A spec that asks for no headers costs nothing:** `FP_NHDR` is 0, `req_t` keeps its layout, and every check
+  compiles away.
+- **What it costs on the routes that ask:**
+  - those routes' methods use the walk core, which reads every header line, as Authorization routes already do;
+  - the learned layout is off for them;
+  - a line that starts with a wanted name but isn't `name:` falls back.
+- **Rules:** names start with a letter and are HTTP tokens of up to 56 characters, with at most 32 per spec.
+  Content-Length, Transfer-Encoding, Connection and Authorization are handled already and can't be listed.
 
 Spec limits: at most one `{param}` per path, `positive-int` with up to 16 digits, HTTP/1.1, bearer auth only.
 

@@ -1,0 +1,14 @@
+{
+ "name": "example-posts-api-with-headers",
+ "source": "the example posts API, asking for headers by name (tests the spec's \"headers\": tests/test_hdrspec.c)",
+ "http_version": "1.1",
+ "params": {"id": {"type": "positive-int", "max_digits": 16, "invalid": "400 invalid post id"}},
+ "routes": [
+  {"name": "FEED", "method": "GET", "path": "/feed", "headers": ["If-None-Match", "Accept-Language"]},
+  {"name": "HEALTH", "method": "GET", "path": "/health"},
+  {"name": "GETPOST", "method": "GET", "path": "/posts/{id}", "headers": ["X-Request-Id", "X-Request-Id-Extra", "Cookie"]},
+  {"name": "CREATE", "method": "POST", "path": "/posts", "auth": "bearer",
+   "headers": ["X-Request-Id", "Idempotency-Key", "X-A-Very-Long-Custom-Header-Name-For-Chunked-Compares"]},
+  {"name": "LIKE", "method": "POST", "path": "/posts/{id}/like", "auth": "bearer", "headers": ["Accept-Language"]}
+ ]
+}
