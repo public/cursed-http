@@ -173,6 +173,13 @@ bp_parse(n, bufs, lens, reqs, rets);   /* rets[i] == fast_parse(bufs[i], lens[i]
 The parsers are header-only. Copy `include/` into your tree, then add `-march=native` (x86) or `-mcpu=native`
 (ARM); see the [build matrix](#build-matrix).
 
+For a binary that has to run on any x86-64 CPU (a package, a container image), link the dispatch library
+instead. It holds every backend and picks the best one at load time ([chp.h](#chph-runtime-dispatch)):
+
+```bash
+make lib    # build/libchp.a; then #include "chp.h" and call chp_fast_parse(), chp_fb_parse_request(), ...
+```
+
 For your own routes, generate the header from your spec:
 
 ```bash
@@ -325,6 +332,50 @@ bp_parse(n, buf, len, out, ret);   // ret[i] == fast_parse(buf[i], len[i], &out[
 
 One request per lane: the first one in each buffer. Use it at n ≥ 8, and `fast_parse` below that.
 
+### chp.h (runtime dispatch)
+
+```c
+#include "chp.h"   // link build/libchp.a (make lib)
+
+int chp_fast_parse(const char *buf, int len, req_t *r);           // = fast_parse
+fp_batch_t chp_fast_parse_many(const char *buf, int len, req_t *out, int max);
+int chp_fast_parse_learn(const char *buf, int len, req_t *r, fp_learn_t *T);
+int chp_fb_parse_request(...);                                    // = fb_parse_request, same arguments
+int chp_fb_parse_req(const char *buf, int len, req_t *r);
+int chp_fb_parse_req_ex(const char *buf, int len, req_t *r, fb_info_t *info);
+void chp_bp_parse(int n, const char *const *buf, const int *len, req_t *out, int *ret);
+
+const char *chp_backend(void);             // the backend in use
+int chp_select(const char *name);          // 0, or -1 if unknown/unsupported; call before any thread parses
+const char *const *chp_backends(void);     // what this CPU supports, best first
+```
+
+- **Backends:** x86-64 has `avx512` (AVX-512BW/VL on ymm), `avx2`, `sse2` and `scalar`; AArch64 has `neon` and
+  `scalar`.
+- **One check at load time.** A constructor reads the CPU features once with `__builtin_cpu_supports`, which
+  also checks that the OS enables the AVX/AVX-512 registers, and stores one table pointer. Each call is then one
+  pointer load and one indirect call.
+- **Each backend is its own object file,** built with exactly the `-m` flags the check asks for. The rest of
+  the library is built for the architecture's baseline, so it never executes an instruction the CPU lacks.
+- **Override:** `CHP_BACKEND=sse2 ./server`. An unknown or unsupported name prints a note on stderr and uses the
+  best backend.
+- **Same results everywhere.** `tests/test_chp.c` checks every supported backend against `scalar` on every
+  entry point, pointers included.
+
+Cost on the Xeon, ns/request through `chp_*`, against the inline headers built with `-march=native` (one run,
+one code layout):
+
+| | inline (AVX2) | `avx512` | `avx2` | `sse2` | `scalar` |
+|---|---|---|---|---|---|
+| API mix, `fast_parse` | 53.5 | 56.3 | 55.1 | 63.1 | 101.1 |
+| `bp_parse`, N = 16 | 47.3 | 48.2 | 48.3 | 55.0 | 125.0 |
+| curl, `fb_parse_request` | 103.8 | 110.6 | 111.4 | 185.1 | 506.9 |
+| Chrome | 415.5 | 431.2 | 422.8 | 652.2 | 1,927.2 |
+| long headers | 625.9 | 642.4 | 643.5 | 885.3 | 5,417.0 |
+
+The indirect call costs 1–7%. `avx512` is level with `avx2` on Cascade Lake; it's picked first because it's no
+slower there. When you control the build machine, the inline headers with `-march=native` are still the fastest.
+
 ## The spec and the generator
 
 Everything API-specific in `fastparse.h` lives between `==== BEGIN API SPEC ====` and `==== END API SPEC ====`:
@@ -373,15 +424,17 @@ hand-specialised to the example routes, so build with `-DBP_CANON_ONLY` for othe
 
 ## Build matrix
 
-The backend is picked at compile time from the target flags.
+The headers pick their backend at compile time from the target flags. `libchp.a` builds each backend with its
+own flags and picks one at load time ([chp.h](#chph-runtime-dispatch)).
 
 | target | flags | backend (`FP_BACKEND_NAME`) | status |
 |---|---|---|---|
 | x86-64 with AVX2 | `-march=haswell` or newer, `-march=native` | `avx2` | **recommended on x86**, fastest on Cascade Lake |
 | x86-64 with AVX-512BW/VL | `-march=cascadelake -DFP_USE_AVX512` | `avx512bw-ymm` | tested on a Xeon Platinum 8260; correct, 3 ns slower than AVX2 there |
 | same, 512-bit registers | `... -DFP_USE_AVX512 -DFP_USE_ZMM` | `avx512bw-zmm` | tested; slower on small requests, and zmm triggers frequency-licence drops |
+| x86-64 baseline | default flags, `-march=x86-64` (no `-mavx2`) | `sse2` | tested on the Xeon; 1.2–1.7× slower than AVX2, 1.6–6× faster than scalar |
 | AArch64 | (default) / `-mcpu=native` | `neon` | tested on Apple M5 (macOS) and Linux arm64 |
-| anything else | `-DFP_FORCE_SCALAR` or no SIMD | `scalar` | tested everywhere; 2× slower than SIMD |
+| anything else | `-DFP_FORCE_SCALAR` or no SIMD | `scalar` | tested everywhere; 2–9× slower than SIMD |
 
 Other switches:
 - `-DFP_WALK_ONLY`: SIMD backends use the walk core only (an A/B knob).
@@ -466,6 +519,14 @@ routing logic on top. Any difference fails the test, except where the expected d
 - Every lane must equal `fast_parse`.
 - The same check runs on the generated header, and on the toy spec with `-DBP_CANON_ONLY`.
 
+**chp.h** (`tests/test_chp.c`)
+- Every backend the CPU supports against `scalar`, through the dispatcher, on every entry point: return codes,
+  every field and every pointer.
+- Inputs: the edge cases and their truncations, the client corpus, the fallback shapes, 200k mutations (20k in
+  quick mode) and pipelined pairs.
+- On x86, the three differential tests above are also built for the baseline (`*_sse2`), so the SSE2 backend
+  is checked against pico directly.
+
 **The tests catch planted bugs.** `make mutants` plants 34 bugs in fbparse.h (including 5 in the long-value skip
 loop and 2 in the line-start name scan) and 9 in batchparse.h. Every one
 fails on the platform it targets; the zero lines are backend-specific mutants run on another platform, plus one
@@ -529,7 +590,7 @@ The 7 inputs accepted against some reference's rejection don't affect framing or
 | macOS arm64 (Apple M5 Pro) | Apple clang 21 | all tests, ASan/UBSan, mutants |
 | Linux arm64 (Ubuntu 24.04, Docker) | gcc 13.3, clang 18.1 | all tests, ASan/UBSan |
 | Linux amd64 (Ubuntu 24.04, Docker) | gcc 13.3, clang 18.1 | all tests (AVX2), ASan/UBSan, AVX-512 builds compile |
-| Intel Xeon Platinum 8260 (Ubuntu 24.04, kernel 6.8) | gcc 13.3, clang 18.1 | all tests on real AVX2, AVX-512 ymm and zmm |
+| Intel Xeon Platinum 8260 (Ubuntu 24.04, kernel 6.8) | gcc 13.3, clang 18.1 | all tests on real AVX2, AVX-512 ymm and zmm; `chp.h` dispatch with avx512, avx2 and sse2 against scalar (gcc) |
 
 ## Benchmarks
 

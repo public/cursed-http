@@ -51,6 +51,8 @@
 #define FB_BACKEND 2
 #elif defined(__aarch64__) && defined(__ARM_NEON)
 #define FB_BACKEND 1
+#elif (defined(__x86_64__) || defined(__i386__)) && defined(__SSE2__)
+#define FB_BACKEND 4   // the x86-64 baseline: 16-byte SSE2
 #else
 #define FB_BACKEND 0
 #endif
@@ -62,6 +64,8 @@
 #include <arm_neon.h>
 #elif defined(FP_AVX512_EMU)
 #include "fb_avx512_emu.h"
+#elif FB_BACKEND == 4
+#include <emmintrin.h>
 #elif FB_BACKEND >= 2
 #include <immintrin.h>
 #endif
@@ -72,6 +76,8 @@
 #define FB_BACKEND_NAME "neon"
 #elif FB_BACKEND == 2
 #define FB_BACKEND_NAME "avx2"
+#elif FB_BACKEND == 4
+#define FB_BACKEND_NAME "sse2"
 #elif defined(FP_USE_ZMM)
 #define FB_BACKEND_NAME "avx512bw-zmm" FB_EMU_TAG
 #else
@@ -339,6 +345,63 @@ FB_INLINE void fb_all64_simd(const char *p, uint64_t *m) { m[0] = fb_nt64_simd(p
 #undef FB_EQ
 #undef FB_LE
 #undef FB_NTM
+#elif FB_BACKEND == 4
+// SSE2 (the x86-64 baseline): four 16-byte vectors per 64-byte block, one movemask each. There is no pshufb,
+// so "not a token character" is the complement of pico's token_char_map as its nine ranges: 0x21,
+// 0x23-0x27, 0x2a-0x2b, 0x2d-0x2e, 0x30-0x39, 0x41-0x5a, 0x5e-0x7a, 0x7c, 0x7e.
+FB_INLINE uint64_t fb_mm4(__m128i a, __m128i b, __m128i c, __m128i d) {
+  return (uint64_t)(uint16_t)_mm_movemask_epi8(a) | (uint64_t)(uint16_t)_mm_movemask_epi8(b) << 16 |
+         (uint64_t)(uint16_t)_mm_movemask_epi8(c) << 32 | (uint64_t)(uint16_t)_mm_movemask_epi8(d) << 48;
+}
+// lo <= x <= hi (unsigned) <=> min(x - lo, hi - lo) == x - lo
+#define FB_IN16(v, lo, hi) _mm_cmpeq_epi8(_mm_min_epu8(_mm_sub_epi8(v, _mm_set1_epi8(lo)), _mm_set1_epi8((hi) - (lo))), _mm_sub_epi8(v, _mm_set1_epi8(lo)))
+#define FB_EQ16(v, c) _mm_cmpeq_epi8(v, _mm_set1_epi8(c))
+FB_INLINE __m128i fb_nt16(__m128i v) {
+  __m128i t = _mm_or_si128(_mm_or_si128(FB_EQ16(v, 0x21), FB_IN16(v, 0x23, 0x27)), _mm_or_si128(FB_IN16(v, 0x2a, 0x2b), FB_IN16(v, 0x2d, 0x2e)));
+  t = _mm_or_si128(t, _mm_or_si128(_mm_or_si128(FB_IN16(v, 0x30, 0x39), FB_IN16(v, 0x41, 0x5a)), FB_IN16(v, 0x5e, 0x7a)));
+  t = _mm_or_si128(t, _mm_or_si128(FB_EQ16(v, 0x7c), FB_EQ16(v, 0x7e)));
+  return _mm_cmpeq_epi8(t, _mm_setzero_si128());
+}
+FB_INLINE __m128i fb_le16(__m128i v, char c) { return _mm_cmpeq_epi8(_mm_min_epu8(v, _mm_set1_epi8(c)), v); }
+FB_INLINE __m128i fb_ct16(__m128i v) { return _mm_or_si128(_mm_andnot_si128(FB_EQ16(v, '\t'), fb_le16(v, 0x1f)), FB_EQ16(v, 0x7f)); }
+FB_INLINE __m128i fb_pe16(__m128i v) { return _mm_or_si128(fb_le16(v, 0x20), FB_EQ16(v, 0x7f)); }
+FB_INLINE __m128i fb_lf16(__m128i v) { return FB_EQ16(v, '\n'); }
+#define FB_LD4 __m128i v0 = _mm_loadu_si128((const __m128i *)p), v1 = _mm_loadu_si128((const __m128i *)(p + 16)), \
+                       v2 = _mm_loadu_si128((const __m128i *)(p + 32)), v3 = _mm_loadu_si128((const __m128i *)(p + 48))
+#define FB_M4(P) fb_mm4(P(v0), P(v1), P(v2), P(v3))
+FB_INLINE uint64_t fb_nt64_simd(const char *p) { FB_LD4; return FB_M4(fb_nt16); }
+FB_INLINE uint64_t fb_ct64_simd(const char *p) { FB_LD4; return FB_M4(fb_ct16); }
+FB_INLINE uint64_t fb_pe64_simd(const char *p) { FB_LD4; return FB_M4(fb_pe16); }
+FB_INLINE uint64_t fb_lf64_simd(const char *p) { FB_LD4; return FB_M4(fb_lf16); }
+FB_INLINE void fb_ntct64_simd(const char *p, uint64_t *nt, uint64_t *ct) { FB_LD4; *nt = FB_M4(fb_nt16); *ct = FB_M4(fb_ct16); }
+FB_INLINE void fb_lfct64_simd(const char *p, uint64_t *lf, uint64_t *ct) { FB_LD4; *lf = FB_M4(fb_lf16); *ct = FB_M4(fb_ct16); }
+FB_INLINE void fb_all64_simd(const char *p, uint64_t *m) { FB_LD4; m[0] = FB_M4(fb_nt16); m[1] = FB_M4(fb_ct16); m[2] = FB_M4(fb_pe16); m[3] = FB_M4(fb_lf16); }
+#undef FB_LD4
+#undef FB_M4
+#undef FB_IN16
+#undef FB_EQ16
+#ifndef FB_NO_CTANY
+// the long-value skip test (see the NEON one above), SSE2 has no signed byte min: OR of (0x21 > (int8)(x + 1))
+#define FB_HAVE_CTANY 1
+#ifndef FB_CTANY_BLOCKS
+#define FB_CTANY_BLOCKS 8
+#endif
+#ifndef FB_CTANY_AFTER
+#define FB_CTANY_AFTER 2
+#endif
+#ifndef FB_CTANY_PREFETCH
+#define FB_CTANY_PREFETCH 3072
+#endif
+FB_INLINE int fb_ctany_simd(const char *p, const int nb) {
+  const __m128i ONE = _mm_set1_epi8(1), LIM = _mm_set1_epi8(0x21);
+  __m128i h0 = _mm_setzero_si128(), h1 = h0;
+  for (int i = 0; i < 4 * nb; i += 2) {
+    h0 = _mm_or_si128(h0, _mm_cmpgt_epi8(LIM, _mm_add_epi8(_mm_loadu_si128((const __m128i *)(p + 16 * i)), ONE)));
+    h1 = _mm_or_si128(h1, _mm_cmpgt_epi8(LIM, _mm_add_epi8(_mm_loadu_si128((const __m128i *)(p + 16 * i + 16)), ONE)));
+  }
+  return _mm_movemask_epi8(_mm_or_si128(h0, h1)) != 0;
+}
+#endif
 #endif
 
 #if (FB_BACKEND == 2 || FB_BACKEND == 3) && !defined(FP_AVX512_EMU) && !defined(FB_NO_CTANY)

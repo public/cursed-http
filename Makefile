@@ -11,6 +11,7 @@
 #   make fuzz         libFuzzer: fbparse / fastparse / batchparse differential targets (clang with libFuzzer;
 #                     FUZZ_TIME=s per target, default 30)
 #   make hypothesis   Hypothesis properties on grammar-built requests (venv in build/; HYP_EXAMPLES, default 300)
+#   make lib          build/libchp.a: every backend of this architecture, picked at load time (include/chp.h)
 #   make gen          regenerate build/fastparse_gen.h and build/fastparse_pgo.h from gen/example_spec.json
 # Everything is built into build/. The library itself is header-only: include/*.h.
 CC ?= cc
@@ -36,7 +37,48 @@ FB_BINS := $(B)/test_fbparse $(B)/test_fbparse_scalar $(B)/test_fbparse_emu512 $
 BP_BINS := $(B)/test_batch $(B)/test_batch_emu $(B)/test_batch_gen $(B)/test_batch_spec
 GENCHECK := $(B)/check_example_spec $(B)/check_toy_spec
 
-all: $(FP_BINS) $(FB_BINS) $(BP_BINS) $(GENCHECK)
+# ---- include/chp.h: every backend in one library, picked at load time (src/chp.c) ----
+# Each backend's object gets exactly the flags src/chp.c checks the CPU for; the rest is built for the
+# architecture's baseline, so libchp.a and test_chp run on any CPU of the architecture.
+ifeq ($(ARCH),x86_64)
+  CHP_BASE := -march=x86-64 -mtune=generic
+  CHP_T := scalar sse2 avx2 avx512
+  # the x86 baseline (SSE2) builds of the differential tests: the backend a default-flags build gets
+  FP_BINS += $(B)/test_fastparse_sse2
+  FB_BINS += $(B)/test_fbparse_sse2
+  BP_BINS += $(B)/test_batch_sse2
+else ifneq ($(filter arm64 aarch64,$(ARCH)),)
+  CHP_BASE :=
+  CHP_T := scalar neon
+else
+  CHP_BASE :=
+  CHP_T := scalar
+endif
+CHP_FLAGS_scalar := -DFP_FORCE_SCALAR
+CHP_FLAGS_sse2 :=
+CHP_FLAGS_neon :=
+CHP_FLAGS_avx2 := -mavx2 -mbmi -mbmi2 -mpopcnt
+CHP_FLAGS_avx512 := $(CHP_FLAGS_avx2) -mavx512f -mavx512bw -mavx512vl -mavx512cd -mavx512dq -DFP_USE_AVX512
+CHP_OBJ := $(B)/chp.o $(foreach t,$(CHP_T),$(B)/chp_$(t).o)
+$(B)/chp_%.o: src/chp_%.c src/chp_impl.h src/chp_table.h $(HDRS) | $(B)
+	$(CC) $(CFLAGS) $(WARN) $(CHP_BASE) $(CHP_FLAGS_$*) -Iinclude -Isrc -c $< -o $@
+$(B)/chp.o: src/chp.c include/chp.h src/chp_table.h $(HDRS) | $(B)
+	$(CC) $(CFLAGS) $(WARN) $(CHP_BASE) -Iinclude -Isrc -c $< -o $@
+$(B)/libchp.a: $(CHP_OBJ)
+	rm -f $@ && ar rcs $@ $(CHP_OBJ)
+lib: $(B)/libchp.a
+$(B)/pico_base.o: $(PICO) | $(B)
+	$(CC) -O3 $(CHP_BASE) -c $(PICO) -o $@
+$(B)/test_chp: tests/test_chp.c include/chp.h $(HDRS) $(B)/libchp.a $(B)/pico_base.o
+	$(CC) $(CFLAGS) $(WARN) $(CHP_BASE) $(INC) $< $(B)/pico_base.o $(B)/libchp.a -o $@
+$(B)/test_fastparse_sse2: tests/test_fastparse.c $(HDRS) $(B)/pico_base.o
+	$(CC) $(CFLAGS) $(WARN) $(CHP_BASE) $(INC) $< $(B)/pico_base.o -o $@
+$(B)/test_fbparse_sse2: tests/test_fbparse.c $(HDRS) $(B)/pico_base.o
+	$(CC) $(CFLAGS) $(WARN) $(CHP_BASE) $(INC) $< $(B)/pico_base.o -o $@
+$(B)/test_batch_sse2: tests/test_batch.c $(HDRS) $(B)/pico_base.o
+	$(CC) $(CFLAGS) $(WARN) $(CHP_BASE) $(INC) $< $(B)/pico_base.o -o $@
+
+all: $(FP_BINS) $(FB_BINS) $(BP_BINS) $(GENCHECK) $(B)/test_chp
 
 $(B):
 	mkdir -p $(B)
@@ -112,8 +154,9 @@ RUN := ./scripts/run_test.sh
 test: all gencheck example-check fuzz-replay
 	@set -e; for t in $(FP_BINS); do $(RUN) 1 $$t nobench; done
 	@set -e; $(RUN) 2 $(B)/test_fbparse $(FBMODE); \
-	  for t in test_fbparse_scalar test_fbparse_emu512 test_fbparse_emuzmm; do $(RUN) 1 $(B)/$$t quick; done
+	  for t in $(notdir $(filter-out $(B)/test_fbparse,$(FB_BINS))); do $(RUN) 1 $(B)/$$t quick; done
 	@set -e; for t in $(BP_BINS); do $(RUN) 1 $$t; done
+	@set -e; $(RUN) 1 $(B)/test_chp $(FBMODE)
 	@echo "ALL TESTS PASSED"
 test-quick:
 	$(MAKE) test FBMODE=quick GENVECTORS=50000
@@ -149,11 +192,14 @@ $(B)/bench_fbparse: bench/bench_fbparse.c $(HDRS) $(B)/pico.o $(LLHTTP_O) $(B)/l
 	$(CC_T) $< $(B)/pico.o $(LLHTTP_O) $(B)/llhttp_shim.o -o $@
 $(B)/bench_batch: bench/bench_batch.c $(HDRS) $(B)/pico.o
 	$(CC_T) $< $(B)/pico.o -o $@
-bench: $(B)/test_fastparse $(B)/compare $(B)/bench_fbparse $(B)/bench_batch
+$(B)/bench_chp: bench/bench_chp.c include/chp.h $(HDRS) $(B)/libchp.a $(B)/pico.o
+	$(CC_T) $< $(B)/pico.o $(B)/libchp.a -o $@
+bench: $(B)/test_fastparse $(B)/compare $(B)/bench_fbparse $(B)/bench_batch $(B)/bench_chp
 	./$(B)/test_fastparse benchonly
 	./$(B)/compare
 	./$(B)/bench_fbparse
 	./$(B)/bench_batch
+	./$(B)/bench_chp
 
 # ---- real AVX-512 (compile anywhere with gcc/clang; run only on AVX-512BW/VL hardware) ----
 AVX512 := -march=cascadelake
@@ -240,4 +286,4 @@ mutants-fuzz: $(B)/venv/.done
 
 clean:
 	rm -rf $(B)
-.PHONY: all gen gencheck test test-quick asan bench avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check fuzz fuzz-replay hypothesis mutants-fuzz clean
+.PHONY: all lib gen gencheck test test-quick asan bench avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check fuzz fuzz-replay hypothesis mutants-fuzz clean
