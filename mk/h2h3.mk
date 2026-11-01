@@ -7,7 +7,7 @@ N3 := $(TP)/nghttp3/lib
 H2B := $(B)/h2h3
 N2INC := -I$(N2)/includes -I$(H2B)/gen -I$(N2) -DNGHTTP2_STATICLIB -DHAVE_ARPA_INET_H -DHAVE_NETINET_IN_H
 N3INC := -I$(N3)/includes -I$(H2B)/gen -I$(N3) -DNGHTTP3_STATICLIB -DHAVE_ARPA_INET_H -DHAVE_NETINET_IN_H
-H2HDRS := include/hfield.h include/hpack.h $(wildcard include/h2.h include/qpack.h include/h3.h)
+H2HDRS := include/hfield.h include/hpack.h include/hreq.h $(wildcard include/h2.h include/qpack.h include/h3.h include/quic.h)
 H2CC = $(CC) $(CFLAGS) $(WARN) $(MARCH) -Iinclude -Itests
 
 $(H2B)/gen/nghttp2/nghttp2ver.h: $(N2)/includes/nghttp2/nghttp2ver.h.in
@@ -40,7 +40,12 @@ $(H2B)/test_h2_scalar: tests/test_h2.c $(H2HDRS) $(H2B)/libnghttp2.a
 $(H2B)/test_h2_asan: tests/test_h2.c $(H2HDRS) $(H2B)/libnghttp2.a
 	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(N2INC) $< $(H2B)/libnghttp2.a -o $@
 
-H2TESTS := $(H2B)/test_hpack $(H2B)/test_hpack_scalar $(H2B)/test_h2 $(H2B)/test_h2_scalar
+$(H2B)/test_qpack: tests/test_qpack.c $(H2HDRS) $(H2B)/libnghttp3.a
+	$(H2CC) $(N3INC) $< $(H2B)/libnghttp3.a -o $@
+$(H2B)/test_qpack_asan: tests/test_qpack.c $(H2HDRS) $(H2B)/libnghttp3.a
+	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(N3INC) $< $(H2B)/libnghttp3.a -o $@
+
+H2TESTS := $(H2B)/test_qpack $(H2B)/test_hpack $(H2B)/test_hpack_scalar $(H2B)/test_h2 $(H2B)/test_h2_scalar
 test-h2h3: $(H2TESTS)
 	@for t in $(H2TESTS); do echo "== $$t"; $$t || exit 1; done
 .PHONY: test-h2h3
