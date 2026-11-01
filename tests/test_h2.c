@@ -206,10 +206,11 @@ static void run_conn(int kind, int nreq, uint32_t cli_window) {
     }
     const uint8_t *d;
     nghttp2_ssize n;
+    /* backpressured tail */
     if (feed(&C, NULL, 0) < 0) {
       CHECK(0, "server failed the connection (kind %d)", kind);
       goto out;
-    } /* backpressured tail */
+    }
     while ((n = nghttp2_session_mem_send2(cli, &d)) > 0)
       if (feed(&C, d, (size_t)n) < 0) {
         CHECK(0, "server failed the connection (kind %d)", kind);

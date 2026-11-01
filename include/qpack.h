@@ -445,10 +445,11 @@ static inline uint8_t *qp__put_str(uint8_t *p, int nbits, uint8_t first, const u
   memcpy(p, s, n);
   return p + n;
 }
+/* RIC 0, base 0 */
 static inline size_t qp_enc_prefix(uint8_t *dst) {
   dst[0] = 0, dst[1] = 0;
   return 2;
-} /* RIC 0, base 0 */
+}
 static inline int qp__static_find(const uint8_t *n, size_t nl, const uint8_t *v, size_t vl, int *name_only) {
   int name_idx = -1;
   for (int i = 0; i < 99; i++)

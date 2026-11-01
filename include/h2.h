@@ -171,10 +171,11 @@ static inline uint8_t *h2__stage(h2_conn *c, size_t n) {
 }
 static inline void h2__ctrl(h2_conn *c, uint8_t type, uint8_t flags, uint32_t sid, const uint8_t *payload, uint32_t n) {
   uint8_t *p = h2__stage(c, 9 + n);
+  /* control frames are tiny; a full stage means a stuck peer */
   if (!p) {
     c->closed = 1;
     return;
-  } /* control frames are tiny; a full stage means a stuck peer */
+  }
   h2__hdr(p, n, type, flags, sid);
   if (n) memcpy(p + 9, payload, n);
 }
@@ -288,10 +289,11 @@ static inline int h2__header_block(h2_conn *c, h2_scratch *sc, uint32_t sid, uin
   }
   if (sid <= c->last_sid) return h2__fail(c, H2_STREAM_CLOSED); /* HEADERS on a closed stream */
   c->last_sid = sid;
+  /* §5.3.1 */
   if (self_dep) {
     h2_reset(c, sid, H2_PROTOCOL_ERROR);
     return 0;
-  } /* §5.3.1 */
+  }
   if (c->goaway_sent) return 0;
   if (c->nactive >= H2_MAX_STREAMS) {
     h2_reset(c, sid, H2_REFUSED_STREAM);
@@ -653,10 +655,11 @@ static inline size_t h2_send(h2_conn *c, uint8_t *out, size_t cap) {
     if ((int64_t)m > s->send_win) m = s->send_win > 0 ? (size_t)s->send_win : 0;
     if ((int64_t)m > c->conn_send_win) m = c->conn_send_win > 0 ? (size_t)c->conn_send_win : 0;
     if (m > cap - w - 9) m = cap - w - 9;
+    /* blocked by flow control or space */
     if (!m && left) {
       h2__enqueue(c, s), idle++;
       continue;
-    } /* blocked by flow control or space */
+    }
     idle = 0;
     int last = m == left;
     uint8_t fl = last && fin_flag && !trl ? H2_FL_END_STREAM : 0;
