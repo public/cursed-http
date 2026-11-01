@@ -4,7 +4,7 @@
  * The TLS 1.3 handshake is picotls's (MIT, linked: third_party/picotls lib/picotls.c + lib/openssl.c,
  * with OpenSSL libcrypto); everything else is here: packets and coalescing, packet protection
  * (AEAD through picotls, header protection through qhp.h's AES-NI / ARMv8 AES / ChaCha20 kernels),
- * CRYPTO and STREAM reassembly, flow control, ACKs, loss detection and NewReno congestion control
+ * CRYPTO and STREAM reassembly, flow control, ACKs, loss detection and CUBIC congestion control
  * (RFC 9002 Appendix A/B), transport parameters, peer-initiated key updates, connection close.
  *
  * Memory: the connection struct is the caller's; stream buffers come from ctx->alloc (realloc-like,
@@ -361,6 +361,7 @@ typedef struct {
   int64_t sent_at;
   uint16_t size;
   uint8_t ack_eliciting, in_flight, nf, acked, lost;
+  int64_t lost_at;      /* kept after being declared lost, so a late ACK reveals a spurious loss */
   uint64_t largest_ack; /* largest pn this packet acknowledged (for trimming our ACK ranges) */
   quic_frec f[QUIC_FREC_MAX];
 } quic_sent;
@@ -422,6 +423,19 @@ struct quic_conn {
   uint8_t rtt_sampled;
   uint32_t pto_count, probes_due;
   uint64_t bytes_in_flight, cwnd, ssthresh;
+  /* CUBIC (RFC 9438) */
+  double cubic_wmax, cubic_k, cubic_west; /* in bytes, seconds, bytes */
+  int64_t cubic_epoch;                    /* start of the current congestion-avoidance epoch, or 0 */
+  /* spurious-loss handling: adaptive reordering thresholds and undo of a congestion event that
+   * turned out to be reordering */
+  uint32_t pkt_thresh, time_thresh_8; /* packet threshold; time threshold in eighths of an RTT */
+  uint64_t undo_cwnd, undo_ssthresh;
+  double undo_wmax, undo_k;
+  uint32_t episode_lost, episode_spurious;
+  uint64_t spurious_losses, cc_undos;
+  /* pacing (RFC 9002 §7.7): a token bucket refilled at 1.25 cwnd / srtt */
+  double pace_tokens;
+  int64_t pace_at;
   int64_t recovery_start;
   uint64_t bytes_recv, bytes_sent; /* before address validation: 3x limit */
   uint64_t undecryptable;          /* packets dropped because they failed to decrypt */
@@ -514,9 +528,14 @@ static inline void quic__rtt_sample(quic_conn *c, int64_t latest, int64_t ack_de
 static inline quic_sent *quic__sent_at(quic_space *sp, uint32_t i) {
   return &sp->sent[(sp->shead + i) % QUIC_SENT_MAX];
 }
-static inline void quic__sent_pop_acked(quic_space *sp) {
-  while (sp->nsent && (quic__sent_at(sp, 0)->acked || quic__sent_at(sp, 0)->lost))
+/* drop records from the head that are acked, or lost long enough ago that an ACK for them would no
+ * longer be expected (a late ACK of a lost packet marks a spurious loss) */
+static inline void quic__sent_pop_acked(quic_space *sp, int64_t now, int64_t keep) {
+  while (sp->nsent) {
+    quic_sent *p = quic__sent_at(sp, 0);
+    if (!p->acked && !(p->lost && (now - p->lost_at > keep || sp->nsent > QUIC_SENT_MAX - 64))) break;
     sp->shead = (sp->shead + 1) % QUIC_SENT_MAX, sp->nsent--;
+  }
 }
 
 static inline void quic__frame_acked(quic_conn *c, quic_space *sp, const quic_frec *f) {
@@ -560,21 +579,66 @@ static inline void quic__frame_lost(quic_conn *c, quic_space *sp, const quic_fre
   }
 }
 
-/* NewReno (RFC 9002 §7, Appendix B) */
-static inline void quic__cc_acked(quic_conn *c, const quic_sent *p) {
+/* CUBIC (RFC 9438): cwnd in bytes, time in seconds; C = 0.4 segments/s^3, beta = 0.7 */
+#define QUIC_CUBIC_C    0.4
+#define QUIC_CUBIC_BETA 0.7
+static inline double quic__cbrt(double x) { /* Newton's method: no libm needed */
+  if (x <= 0) return 0;
+  double r = x > 1 ? x / 3 : 1;
+  for (int i = 0; i < 40; i++) r = (2 * r + x / (r * r)) / 3;
+  return r;
+}
+static inline void quic__cc_acked(quic_conn *c, const quic_sent *p, int64_t now) {
   if (!p->in_flight) return;
   c->bytes_in_flight -= p->size;
   if (p->sent_at <= c->recovery_start) return; /* in recovery */
-  if (c->cwnd < c->ssthresh) c->cwnd += p->size;
-  else c->cwnd += (uint64_t)QUIC_SEND_MAX * p->size / c->cwnd;
+  if (c->cwnd < c->ssthresh) {                 /* slow start */
+    c->cwnd += p->size;
+    return;
+  }
+  double mss = QUIC_SEND_MAX;
+  if (!c->cubic_epoch) { /* first ACK of congestion avoidance (or after slow start) */
+    c->cubic_epoch = now;
+    if (c->cubic_wmax < (double)c->cwnd) c->cubic_wmax = (double)c->cwnd, c->cubic_k = 0;
+    c->cubic_west = (double)c->cwnd;
+  }
+  double t = (double)(now - c->cubic_epoch + (c->rtt_sampled ? c->smoothed_rtt : 0)) / 1000.0;
+  double target = QUIC_CUBIC_C * (t - c->cubic_k) * (t - c->cubic_k) * (t - c->cubic_k) * mss + c->cubic_wmax;
+  /* the Reno-friendly estimate (alpha = 3 (1 - beta) / (1 + beta)) */
+  c->cubic_west += 3.0 * (1 - QUIC_CUBIC_BETA) / (1 + QUIC_CUBIC_BETA) * mss * p->size / (double)c->cwnd;
+  if (target < c->cubic_west) target = c->cubic_west;
+  if (target > 1.5 * (double)c->cwnd) target = 1.5 * (double)c->cwnd; /* at most 50% growth per RTT */
+  if (target > (double)c->cwnd) c->cwnd += (uint64_t)((target - (double)c->cwnd) * p->size / (double)c->cwnd);
 }
 static inline void quic__cc_lost(quic_conn *c, const quic_sent *p, int64_t now) {
   if (!p->in_flight) return;
   c->bytes_in_flight -= p->size;
-  if (p->sent_at > c->recovery_start) {
-    c->recovery_start = now;
-    c->cwnd = c->cwnd / 2 > 2 * QUIC_SEND_MAX ? c->cwnd / 2 : 2 * QUIC_SEND_MAX;
-    c->ssthresh = c->cwnd;
+  c->episode_lost++;
+  if (p->sent_at <= c->recovery_start) return; /* one reduction per episode */
+  /* a new congestion event: remember the state for undo, then reduce */
+  c->undo_cwnd = c->cwnd, c->undo_ssthresh = c->ssthresh, c->undo_wmax = c->cubic_wmax, c->undo_k = c->cubic_k;
+  c->episode_lost = 1, c->episode_spurious = 0;
+  c->recovery_start = now;
+  double w = (double)c->cwnd;
+  c->cubic_wmax = w < c->cubic_wmax ? w * (1 + QUIC_CUBIC_BETA) / 2 : w; /* fast convergence */
+  c->cwnd = (uint64_t)(w * QUIC_CUBIC_BETA) > 2 * QUIC_SEND_MAX ? (uint64_t)(w * QUIC_CUBIC_BETA) : 2 * QUIC_SEND_MAX;
+  c->ssthresh = c->cwnd;
+  c->cubic_k = quic__cbrt(c->cubic_wmax * (1 - QUIC_CUBIC_BETA) / (QUIC_CUBIC_C * QUIC_SEND_MAX));
+  c->cubic_epoch = 0;
+}
+/* a packet we declared lost was acknowledged after all: the network reordered, it did not drop */
+static inline void quic__cc_spurious(quic_conn *c, const quic_sent *p, int64_t largest_acked) {
+  c->spurious_losses++, c->episode_spurious++;
+  /* reorder more before calling loss (RACK-like): packet threshold up to the observed displacement,
+   * time threshold up by 1/8 RTT, to 2 RTT at most */
+  uint64_t disp = (uint64_t)largest_acked > p->pn ? (uint64_t)largest_acked - p->pn + 1 : 3;
+  if (disp > c->pkt_thresh) c->pkt_thresh = disp > 256 ? 256 : (uint32_t)disp;
+  if (c->time_thresh_8 < 16) c->time_thresh_8++;
+  /* every loss of this congestion event was spurious: undo the reduction */
+  if (p->lost_at >= c->recovery_start && c->episode_spurious >= c->episode_lost && c->undo_cwnd) {
+    if (c->undo_cwnd > c->cwnd) c->cwnd = c->undo_cwnd;
+    c->ssthresh = c->undo_ssthresh, c->cubic_wmax = c->undo_wmax, c->cubic_k = c->undo_k;
+    c->recovery_start = INT64_MIN, c->undo_cwnd = 0, c->cubic_epoch = 0, c->cc_undos++;
   }
 }
 
@@ -583,12 +647,12 @@ static inline void quic__detect_lost(quic_conn *c, int space, int64_t now) {
   sp->loss_time = 0;
   if (!sp->any_acked) return;
   int64_t rtt = c->latest_rtt > c->smoothed_rtt ? c->latest_rtt : c->smoothed_rtt;
-  int64_t delay = rtt * 9 / 8 > 1 ? rtt * 9 / 8 : 1;
+  int64_t delay = rtt * (int64_t)c->time_thresh_8 / 8 > 1 ? rtt * (int64_t)c->time_thresh_8 / 8 : 1;
   for (uint32_t i = 0; i < sp->nsent; i++) {
     quic_sent *p = quic__sent_at(sp, i);
     if (p->acked || p->lost || p->pn > sp->largest_acked) continue;
-    if (p->sent_at <= now - delay || sp->largest_acked >= p->pn + 3) {
-      p->lost = 1;
+    if (p->sent_at <= now - delay || sp->largest_acked >= p->pn + c->pkt_thresh) {
+      p->lost = 1, p->lost_at = now;
       for (int k = 0; k < p->nf; k++) quic__frame_lost(c, sp, &p->f[k]);
       quic__cc_lost(c, p, now);
     } else {
@@ -596,7 +660,7 @@ static inline void quic__detect_lost(quic_conn *c, int space, int64_t now) {
       if (!sp->loss_time || t < sp->loss_time) sp->loss_time = t;
     }
   }
-  quic__sent_pop_acked(sp);
+  quic__sent_pop_acked(sp, now, 4 * (rtt > 1 ? rtt : 1) + 100);
 }
 
 static inline void quic__discard_space(quic_conn *c, int space) {
@@ -856,14 +920,18 @@ static inline void quic__on_ack(quic_conn *c, int space, uint64_t largest, uint6
   int64_t largest_sent_at = 0;
   for (uint32_t i = 0; i < sp->nsent; i++) {
     quic_sent *p = quic__sent_at(sp, i);
-    if (p->acked || p->lost) continue;
+    if (p->acked) continue;
     int in = 0;
     for (int k = 0; k < nrng && !in; k++) in = p->pn >= rng[2 * k] && p->pn <= rng[2 * k + 1];
     if (!in) continue;
     p->acked = 1;
+    for (int k = 0; k < p->nf; k++) quic__frame_acked(c, sp, &p->f[k]); /* also for a "lost" one: its data arrived */
+    if (p->lost) { /* declared lost earlier, but it arrived: reordering (its bytes left flight then) */
+      if (space == QUIC_SP_APP) quic__cc_spurious(c, p, (int64_t)largest);
+      continue;
+    }
     if (p->pn == largest && p->ack_eliciting) newly_largest = 1, largest_sent_at = p->sent_at;
-    for (int k = 0; k < p->nf; k++) quic__frame_acked(c, sp, &p->f[k]);
-    quic__cc_acked(c, p);
+    quic__cc_acked(c, p, now);
   }
   if (!sp->any_acked || largest > sp->largest_acked) sp->largest_acked = largest, sp->any_acked = 1;
   if (newly_largest)
@@ -871,7 +939,6 @@ static inline void quic__on_ack(quic_conn *c, int space, uint64_t largest, uint6
                      space == QUIC_SP_APP ? (int64_t)((delay << c->peer_ack_delay_exp) / 1000) : 0);
   c->pto_count = 0;
   quic__detect_lost(c, space, now);
-  quic__sent_pop_acked(sp);
   /* streams whose fin is acked are done sending */
   for (int i = 0; i < QUIC_MAX_STREAMS; i++) {
     quic_stream *s = &c->s[i];
@@ -1332,6 +1399,7 @@ static inline int quic_accept(quic_conn *c, quic_ctx *x, uint8_t *d, size_t len,
   c->peer_max_ack_delay = 25, c->peer_ack_delay_exp = 3;
   c->next_uni_id = 3;
   c->cwnd = 10 * QUIC_SEND_MAX, c->ssthresh = UINT64_MAX, c->recovery_start = INT64_MIN;
+  c->pkt_thresh = 3, c->time_thresh_8 = 9; /* RFC 9002 §6.1: 3 packets, 9/8 RTT, adapted on spurious losses */
   c->idle_deadline = now + QUIC_IDLE_MS;
   return quic_recv(c, d, len, now) == QUIC_E_CLOSED && c->draining ? QUIC_E_CLOSED : 0;
 }
