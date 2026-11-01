@@ -479,6 +479,10 @@ static struct lsxpack_header *lsq_prepare(void *u, struct lsxpack_header *x, siz
 static int lsq_process(void *u, struct lsxpack_header *x) {
   lsq_ctx *c = u;
   sink += x->val_len;
+#ifdef LSVAL /* -DLSVAL: the same per-field checks qpack.h does (name class, RFC 9113 value rules) */
+  sink += hp__nclass((const uint8_t *)x->buf + x->name_offset, x->name_len) +
+          hv_check_value_rfc9113((const uint8_t *)x->buf + x->val_offset, x->val_len);
+#endif
   if (c->chk) gate(c->s, c->i, c->k, x->buf + x->name_offset, x->name_len, x->buf + x->val_offset, x->val_len);
   c->k++;
   return 0;
