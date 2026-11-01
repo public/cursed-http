@@ -33,7 +33,34 @@ $(H2B)/test_hpack: tests/test_hpack.c tests/rfc7541_vectors.h $(H2HDRS) $(H2B)/l
 $(H2B)/test_hpack_scalar: tests/test_hpack.c tests/rfc7541_vectors.h $(H2HDRS) $(H2B)/libnghttp2.a
 	$(H2CC) -DHV_FORCE_SCALAR $(N2INC) $< $(H2B)/libnghttp2.a -o $@
 
-H2TESTS := $(H2B)/test_hpack $(H2B)/test_hpack_scalar
+$(H2B)/test_h2: tests/test_h2.c $(H2HDRS) $(H2B)/libnghttp2.a
+	$(H2CC) $(N2INC) $< $(H2B)/libnghttp2.a -o $@
+$(H2B)/test_h2_scalar: tests/test_h2.c $(H2HDRS) $(H2B)/libnghttp2.a
+	$(H2CC) -DHV_FORCE_SCALAR $(N2INC) $< $(H2B)/libnghttp2.a -o $@
+$(H2B)/test_h2_asan: tests/test_h2.c $(H2HDRS) $(H2B)/libnghttp2.a
+	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(N2INC) $< $(H2B)/libnghttp2.a -o $@
+
+H2TESTS := $(H2B)/test_hpack $(H2B)/test_hpack_scalar $(H2B)/test_h2 $(H2B)/test_h2_scalar
 test-h2h3: $(H2TESTS)
 	@for t in $(H2TESTS); do echo "== $$t"; $$t || exit 1; done
 .PHONY: test-h2h3
+
+mutants-h2: $(H2B)/libnghttp2.a
+	python3 -I scripts/mutants_h2.py include $(H2B)/mutants
+	@for d in $(H2B)/mutants/*/; do \
+	  $(CC) $(SAN) -w $(MARCH) -I$$d -Itests $(N2INC) tests/test_h2.c $(H2B)/libnghttp2.a -o $$d/t2 && \
+	  $(CC) $(SAN) -w $(MARCH) -I$$d -Itests $(N2INC) tests/test_hpack.c $(H2B)/libnghttp2.a -o $$d/thp && \
+	  if timeout 120 $$d/t2 > $$d/out.txt 2>&1 && timeout 120 $$d/thp >> $$d/out.txt 2>&1; then echo "mutant $$d SURVIVED"; \
+	  else echo "mutant $$d killed: $$(grep -m1 FAIL $$d/out.txt | cut -c1-90)"; fi; done
+.PHONY: mutants-h2
+
+# h2spec (summerwind/h2spec, fetched at a pinned commit, built with Go) against examples/h2_server.c
+$(H2B)/h2_server: examples/h2_server.c $(H2HDRS)
+	@mkdir -p $(H2B)
+	$(CC) -O2 $(WARN) -Iinclude $< -o $@
+$(H2B)/h2spec:
+	cd $(TP)/h2spec && CGO_ENABLED=0 go build -o $(abspath $@) ./cmd/h2spec
+h2spec: $(H2B)/h2_server $(H2B)/h2spec
+	@$(H2B)/h2_server 18080 2>/dev/null & pid=$$!; sleep 0.3; \
+	$(H2B)/h2spec -h 127.0.0.1 -p 18080 -S; rc=$$?; kill $$pid; exit $$rc
+.PHONY: h2spec
