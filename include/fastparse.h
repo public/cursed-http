@@ -1,5 +1,5 @@
 // fastparse.h - SIMD fast-path HTTP/1.1 request parser for a known API (routes generated from a spec).
-// Part of cursed-http-parser. MIT licence, see LICENSE.
+// Part of cursed-http. MIT licence, see LICENSE.
 //
 // Backends: aarch64 NEON, x86-64 AVX2, AVX-512BW/VL (opt-in with -DFP_USE_AVX512, ymm by default,
 // -DFP_USE_ZMM for zmm), SSE2 (any x86-64 build without -mavx2) and a plain scalar fallback. Picked at compile

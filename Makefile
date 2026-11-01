@@ -1,4 +1,4 @@
-# cursed-http-parser
+# cursed-http (formerly cursed-http-parser)
 #   make test         every differential test (native backend, scalar, emulated AVX-512, generated headers)
 #   make test-quick   the same with smaller fuzz counts (CI)
 #   make asan         ASan + UBSan builds of the tests (quick mode)

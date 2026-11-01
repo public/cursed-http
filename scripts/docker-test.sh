@@ -7,7 +7,7 @@ cd "$(dirname "$0")/.."
 ARCH=${1:-$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')}
 [ $# -gt 0 ] && shift
 TARGETS=${*:-test-quick asan}
-IMG=cursed-http-parser-test:$ARCH
+IMG=cursed-http-test:$ARCH
 docker build -q --platform linux/$ARCH -t $IMG ci >/dev/null
 docker run --rm --platform linux/$ARCH ${DOCKER_CPUS:+--cpuset-cpus $DOCKER_CPUS} -v "$PWD":/src:ro $IMG sh -c "
   set -e; uname -sm
