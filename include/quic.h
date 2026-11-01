@@ -357,7 +357,10 @@ struct quic_conn {
   ptls_cipher_suite_t *cs;     /* negotiated suite (for key updates) */
   uint8_t app_secret_rx[PTLS_MAX_DIGEST_SIZE], app_secret_tx[PTLS_MAX_DIGEST_SIZE];
   quic_key next_rx;            /* the next key phase's read key, ready for a peer key update */
-  uint8_t key_phase, have_next_rx;
+  quic_key prev_rx;            /* the previous phase's read key, for late packets (RFC 9001 §6.5) */
+  uint8_t key_phase, have_next_rx, have_prev_rx;
+  uint64_t phase_first_pn;     /* first packet number seen in the current key phase */
+  int64_t prev_rx_until;
   /* state */
   uint8_t established, confirmed, handshake_done_pending, addr_validated, peer_tp_ok;
   uint8_t closing, draining, close_sent_once, close_app;
@@ -380,6 +383,7 @@ struct quic_conn {
   uint64_t bytes_in_flight, cwnd, ssthresh;
   int64_t recovery_start;
   uint64_t bytes_recv, bytes_sent; /* before address validation: 3x limit */
+  uint64_t undecryptable;          /* packets dropped because they failed to decrypt */
   quic_stream s[QUIC_MAX_STREAMS];
   uint32_t rr;
 };
@@ -859,6 +863,10 @@ static inline int quic__frames(quic_conn *c, int space, const uint8_t *p, const 
       int err;
       quic_stream *s = quic__peer_stream(c, a, &err);
       if (err) { quic__error(c, (uint64_t)err, type); return -1; }
+      if (s && s->recv_done && s->in.fin != UINT64_MAX && (off + len > s->in.fin || ((type & 0x01) && off + len != s->in.fin))) {
+        quic__error(c, QUIC_FINAL_SIZE_ERROR, type); /* even once all of it was received (RFC 9000 §4.5) */
+        return -1;
+      }
       if (s && !s->recv_done) {
         uint64_t before = quic__rb_top(&s->in);
         int r = quic__rb_insert(c->ctx, &s->in, off, p, (size_t)len, s->max_recv);
@@ -998,20 +1006,24 @@ static inline size_t quic__packet(quic_conn *c, uint8_t *p, uint8_t *end, int64_
   if (hl > sizeof hdr) return plen;
   memcpy(hdr, p, hl), hdr[0] = first;
   for (int i = 0; i < pnl; i++) hdr[pn_off + i] = (uint8_t)(tpn >> (8 * (pnl - 1 - i)));
-  /* key phase (short header) */
+  /* key phase (short header): a different phase bit is the next phase, or (for packets older than
+   * the current phase's first one) a late packet of the previous phase */
   int phase_flip = space == QUIC_SP_APP && ((first >> 2) & 1) != c->key_phase;
-  ptls_aead_context_t *aead = phase_flip ? (c->have_next_rx ? c->next_rx.aead : NULL) : k->aead;
+  int late = phase_flip && c->have_prev_rx && pn < c->phase_first_pn;
+  if (c->have_prev_rx && now >= c->prev_rx_until) quic__key_free(&c->prev_rx), c->have_prev_rx = 0;
+  ptls_aead_context_t *aead = late ? c->prev_rx.aead : phase_flip ? (c->have_next_rx ? c->next_rx.aead : NULL) : k->aead;
   if (!aead) return plen;
   uint8_t pt[QUIC_MAX_UDP + 64];
   size_t ctl = plen - hl;
   if (ctl > sizeof pt) return plen;
   size_t ptl = ptls_aead_decrypt(aead, pt, p + hl, ctl, pn, hdr, hl);
-  if (ptl == SIZE_MAX) return plen; /* not ours or corrupted: drop the packet only */
+  if (ptl == SIZE_MAX) { c->undecryptable++; return plen; } /* not ours or corrupted: drop the packet only */
   if ((p[0] & 0x80 ? first & 0x0c : first & 0x18)) { quic__error(c, QUIC_PROTOCOL_VIOLATION, 0); return 0; } /* reserved bits */
-  if (phase_flip) { /* the peer updated keys: rotate ours (RFC 9001 §6) */
-    ptls_aead_free(sp->rx.aead);
+  if (phase_flip && !late) { /* the peer updated keys: rotate ours (RFC 9001 §6) */
+    quic__key_free(&c->prev_rx);
+    c->prev_rx = sp->rx, c->have_prev_rx = 1, c->prev_rx_until = now + 3 * quic__pto(c, QUIC_SP_APP);
     sp->rx = c->next_rx, memset(&c->next_rx, 0, sizeof c->next_rx), c->have_next_rx = 0; /* same hp key */
-    c->key_phase ^= 1;
+    c->key_phase ^= 1, c->phase_first_pn = pn;
     if (!quic__next_secret(c->cs, c->app_secret_tx)) quic__key_update(&sp->tx, &sp->tx, c->cs, 1, c->app_secret_tx);
     if (!quic__next_secret(c->cs, c->app_secret_rx) && !quic__key_update(&c->next_rx, &sp->rx, c->cs, 0, c->app_secret_rx)) c->have_next_rx = 1;
   }
@@ -1103,7 +1115,7 @@ static inline void quic_free(quic_conn *c) {
     quic__rs_free(c->ctx, &c->sp[i].crypto_in.have);
     quic__sb_free(c->ctx, &c->sp[i].crypto_out);
   }
-  quic__key_free(&c->next_rx);
+  quic__key_free(&c->next_rx), quic__key_free(&c->prev_rx);
   for (int i = 0; i < QUIC_MAX_STREAMS; i++)
     if (c->s[i].used) quic__stream_free(c, &c->s[i]);
   quic__rs_free(c->ctx, &c->closed[0]), quic__rs_free(c->ctx, &c->closed[1]);

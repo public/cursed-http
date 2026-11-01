@@ -32,29 +32,37 @@ static long scale(void) { const char *e = getenv("FUZZ"); return e ? atol(e) : 1
 /* ------------------------------------------- clock / net ------------------------------------------- */
 static uint64_t NOW_NS = 1000000000ull;
 static int64_t now_ms(void) { return (int64_t)(NOW_NS / 1000000); }
-typedef struct { uint8_t d[1500]; size_t n; uint64_t at; } dgram;
+typedef struct { uint8_t d[1500]; size_t n; uint64_t at, seq; } dgram;
+static uint64_t SEQ;
 typedef struct { dgram q[4096]; int n; } wire;
 static wire TO_SRV, TO_CLI;
-static int LOSS, REORDER;
+static int LOSS, REORDER, BLACKHOLE; /* BLACKHOLE: drop client->server after its first datagram, for 3 s */
+static uint64_t BLACKHOLE_UNTIL;
 static long SENT_DGRAMS, LOST_DGRAMS;
 static uint64_t TO_SRV_BYTES, TO_CLI_BYTES; /* before the server validated the client's address */
 static void put(wire *w, const uint8_t *d, size_t n) {
   SENT_DGRAMS++;
+  if (BLACKHOLE && w == &TO_SRV) {
+    if (!BLACKHOLE_UNTIL) BLACKHOLE_UNTIL = NOW_NS + 3000000000ull; /* the first datagram goes through */
+    else if (NOW_NS < BLACKHOLE_UNTIL) { LOST_DGRAMS++; return; }
+  }
   if ((int)(rnd() % 100) < LOSS) { LOST_DGRAMS++; return; }
   if (REORDER && rnd() % 100 == 0 && w->n < 4095) { /* a duplicate */
     dgram *g = &w->q[w->n++];
-    memcpy(g->d, d, n), g->n = n, g->at = NOW_NS + 10000000ull + (rnd() % 8) * 3000000ull;
+    memcpy(g->d, d, n), g->n = n, g->at = NOW_NS + 10000000ull + (rnd() % 8) * 3000000ull, g->seq = SEQ++;
   }
   if (w->n == 4096 || n > 1500) return;
   dgram *g = &w->q[w->n++];
   memcpy(g->d, d, n), g->n = n;
   g->at = NOW_NS + 10000000ull + (REORDER ? (rnd() % 8) * 3000000ull : 0); /* 10 ms one way, +0..21 ms jitter */
+  g->seq = SEQ++;
 }
-/* the next datagram due by now, earliest first */
+/* the next datagram due by now: earliest arrival, then send order (no reordering unless jittered) */
 static int take(wire *w, dgram *out) {
   int best = -1;
   for (int i = 0; i < w->n; i++)
-    if (w->q[i].at <= NOW_NS && (best < 0 || w->q[i].at < w->q[best].at)) best = i;
+    if (w->q[i].at <= NOW_NS && (best < 0 || w->q[i].at < w->q[best].at || (w->q[i].at == w->q[best].at && w->q[i].seq < w->q[best].seq)))
+      best = i;
   if (best < 0) return 0;
   *out = w->q[best];
   w->q[best] = w->q[--w->n];
@@ -390,7 +398,7 @@ static int client_write(client *cl) {
 
 /* --------------------------------------------- one run --------------------------------------------- */
 static int run(int nreq, int loss, int reorder) {
-  LOSS = loss, REORDER = reorder;
+  LOSS = loss, REORDER = reorder, BLACKHOLE_UNTIL = 0;
   TO_SRV.n = TO_CLI.n = 0;
   static client cl;
   static server sv;
@@ -492,6 +500,7 @@ static int run(int nreq, int loss, int reorder) {
   CHECK(amp_ok, "anti-amplification: %llu bytes sent for %llu received before validation", (unsigned long long)TO_CLI_BYTES,
         (unsigned long long)TO_SRV_BYTES);
   CHECK(cl.key_updates == 1 && sv.q.key_phase == 1, "client key update seen by the server (phase %d)", sv.q.key_phase);
+  CHECK(sv.q.undecryptable == 0, "%llu packets failed to decrypt (nothing on this network corrupts them)", (unsigned long long)sv.q.undecryptable);
   CHECK(!cl.failed && cl.done == nreq && cl.ok == nreq, "loss %d%%: %d/%d done, %d x 200", loss, cl.done, nreq, cl.ok);
   CHECK(cl.body == cl.want_body, "loss %d%%: body %ld want %ld", loss, cl.body, cl.want_body);
   CHECK(!sv.q.closing && !sv.q.draining, "server closed the connection: code 0x%llx frame 0x%llx", (unsigned long long)sv.q.close_code,
@@ -520,6 +529,9 @@ int main(int argc, char **argv) {
       run(100, 0, 1);
       run(100, 2, 1);
       run(60, 10, 1);
+      BLACKHOLE = 1; /* the server retransmits its first flight while the client is silent: 3x limit */
+      run(20, 0, 0);
+      BLACKHOLE = 0;
     }
   printf("%s: %ld failures / %ld checks\n", fails ? "FAILED" : "PASS", fails, checks);
   return fails != 0;

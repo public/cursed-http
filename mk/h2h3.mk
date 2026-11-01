@@ -106,3 +106,15 @@ $(H2B)/test_quic_interop: tests/test_quic_interop.c $(H2HDRS) include/qhp.h $(H2
 	$(H2CC) $(QINC) $(N3INC) $(NTINC) $< $(H2B)/libngtcp2.a $(H2B)/libnghttp3.a $(H2B)/libpicotls.a -lcrypto -o $@
 $(H2B)/test_quic_interop_asan: tests/test_quic_interop.c $(H2HDRS) include/qhp.h $(H2B)/libngtcp2.a $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
 	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(QINC) $(N3INC) $(NTINC) $< $(H2B)/libngtcp2.a $(H2B)/libnghttp3.a $(H2B)/libpicotls.a -lcrypto -o $@
+
+mutants-quic: $(H2B)/libngtcp2.a $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
+	python3 -I scripts/mutants_quic.py include $(H2B)/mutq
+	@for d in $(H2B)/mutq/*/; do \
+	  $(CC) -O2 -w $(MARCH) -I$$d -Itests $(QINC) tests/test_quic.c $(H2B)/libpicotls.a -lcrypto -o $$d/tq && \
+	  $(CC) -O2 -w $(MARCH) -I$$d -Itests $(QINC) $(N3INC) $(NTINC) tests/test_quic_interop.c $(H2B)/libngtcp2.a $(H2B)/libnghttp3.a $(H2B)/libpicotls.a -lcrypto -o $$d/ti && \
+	  if timeout 300 $$d/tq > $$d/out.txt 2>&1 && timeout 300 $$d/ti >> $$d/out.txt 2>&1; then echo "mutant $$d SURVIVED"; \
+	  else echo "mutant $$d killed: $$(grep -m1 FAIL $$d/out.txt | cut -c1-100)"; fi; done
+.PHONY: mutants-quic
+
+$(H2B)/h3_server: examples/h3_server.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls.a
+	$(CC) -O2 $(WARN) $(MARCH) -Iinclude $(QINC) $< $(H2B)/libpicotls.a -lcrypto -o $@

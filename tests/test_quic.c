@@ -95,6 +95,9 @@ static void test_blocks(void) {
   }
   /* packet number decoding: RFC 9000 A.3's example, and random round trips */
   CHECK(quic__decode_pn(0xa82f30ea, 0x9b32, 16) == 0xa82f9b32, "RFC 9000 A.3 example");
+  /* the boundaries of the window: candidate exactly half a window below / above the expected pn */
+  CHECK(quic__decode_pn(1000, 105, 8) == 1129, "pn: candidate == expected - hwin goes up a window");
+  CHECK(quic__decode_pn(1000, 106, 8) == 874, "pn: just inside the window");
   for (int i = 0; i < 100000; i++) {
     uint64_t largest = rnd() % (1ull << 40), pn = largest + 1 + rnd() % 30000;
     int bits = 16;
@@ -168,8 +171,100 @@ static void test_blocks(void) {
   printf("building blocks: %s\n", fails == before ? "ok" : "FAILED");
 }
 
+/* ------------------------------ frame-level errors (RFC 9000 §19, §4, §3) ------------------------------ */
+static int64_t eat_all(quic_conn *c, uint64_t sid, uint64_t off, const uint8_t *d, size_t len, int fin, void *u) {
+  (void)c, (void)sid, (void)off, (void)d, (void)fin, (void)u;
+  return (int64_t)len;
+}
+static quic_ctx FX = {NULL, quic__default_alloc};
+static void fresh(quic_conn *c) {
+  for (int i = 0; i < QUIC_MAX_STREAMS; i++) if (c->s[i].used) quic__stream_free(c, &c->s[i]);
+  quic__rs_free(&FX, &c->closed[0]), quic__rs_free(&FX, &c->closed[1]);
+  memset(c, 0, sizeof *c);
+  c->ctx = &FX, c->cb.on_stream = eat_all;
+  c->max_data_local = 1000, c->max_streams_bidi_local = 4, c->max_streams_uni_local = 4;
+  c->established = 1, c->sp[QUIC_SP_APP].next_pn = 10, c->peer_bidi_local = 1 << 20;
+}
+static uint64_t frames(quic_conn *c, int space, const uint8_t *f, size_t n) {
+  int ae;
+  quic__frames(c, space, f, f + n, 1000, &ae);
+  return c->closing ? c->close_code : 0;
+}
+static void test_frames(void) {
+  long before = fails;
+  static quic_conn C;
+  static uint8_t big[2000];
+  uint8_t f[64], *p;
+  struct { const char *what; int space; const char *hex; uint64_t want; } t[] = {
+    {"STREAM on our own uni stream", QUIC_SP_APP, "0b0301" "78", QUIC_STREAM_STATE_ERROR},
+    {"STREAM beyond MAX_STREAMS", QUIC_SP_APP, "0b1001" "78", QUIC_STREAM_LIMIT_ERROR},
+    {"NEW_TOKEN from a client", QUIC_SP_APP, "070100", QUIC_PROTOCOL_VIOLATION},
+    {"HANDSHAKE_DONE from a client", QUIC_SP_APP, "1e", QUIC_PROTOCOL_VIOLATION},
+    {"STREAM in an Initial packet", QUIC_SP_INITIAL, "0b0001" "78", QUIC_PROTOCOL_VIOLATION},
+    {"ACK of a packet never sent", QUIC_SP_APP, "020f000000", QUIC_PROTOCOL_VIOLATION},
+    {"ACK first range beyond largest", QUIC_SP_APP, "0205000006", QUIC_FRAME_ENCODING_ERROR},
+    {"unknown frame type", QUIC_SP_APP, "4040", QUIC_FRAME_ENCODING_ERROR},
+    {"STOP_SENDING on the client's uni stream", QUIC_SP_APP, "050200", QUIC_STREAM_STATE_ERROR},
+    {"MAX_STREAM_DATA on the client's uni stream", QUIC_SP_APP, "11024000", QUIC_STREAM_STATE_ERROR},
+    {"truncated STREAM frame", QUIC_SP_APP, "0b000578", QUIC_FRAME_ENCODING_ERROR},
+    {"RETIRE_CONNECTION_ID of a CID never issued", QUIC_SP_APP, "1901", QUIC_PROTOCOL_VIOLATION},
+    {"final size changes", QUIC_SP_APP, "0f000004" "41424344" "0f0000054142434445", QUIC_FINAL_SIZE_ERROR},
+    {"data beyond the final size", QUIC_SP_APP, "0f000002" "4142" "0e00020441424344", QUIC_FINAL_SIZE_ERROR},
+    {"RESET_STREAM below data received", QUIC_SP_APP, "0a000441424344" "04000003", QUIC_FINAL_SIZE_ERROR},
+    {"an empty packet", QUIC_SP_APP, "", QUIC_PROTOCOL_VIOLATION},
+  };
+  for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) {
+    fresh(&C);
+    size_t n = hex(f, t[i].hex);
+    uint64_t got = frames(&C, t[i].space, f, n);
+    CHECK(got == t[i].want, "%s: got 0x%llx want 0x%llx", t[i].what, (unsigned long long)got, (unsigned long long)t[i].want);
+  }
+  /* connection flow control: 1001 bytes against MAX_DATA 1000 (the stream window is larger) */
+  fresh(&C);
+  p = big;
+  *p++ = 0x0a, *p++ = 0x00, p = quic__put_vi2(p, 1001), p += 1001;
+  CHECK(frames(&C, QUIC_SP_APP, big, (size_t)(p - big)) == QUIC_FLOW_CONTROL_ERROR, "connection flow control");
+  fresh(&C);
+  p = big;
+  *p++ = 0x0a, *p++ = 0x00, p = quic__put_vi2(p, 1000), p += 1000;
+  CHECK(frames(&C, QUIC_SP_APP, big, (size_t)(p - big)) == 0, "exactly MAX_DATA is fine");
+  /* stream flow control: a stream window of 256 KiB, the connection's raised to 1 MiB */
+  fresh(&C);
+  C.max_data_local = 1 << 20;
+  static uint8_t huge[300000];
+  p = huge;
+  *p++ = 0x0e, *p++ = 0x00, p = quic__put_vi(p, QUIC_STREAM_WIN - 4), *p++ = 0x08, p += 8; /* ends 4 bytes past */
+  CHECK(frames(&C, QUIC_SP_APP, huge, (size_t)(p - huge)) == QUIC_FLOW_CONTROL_ERROR, "stream flow control");
+  /* things that are fine: PADDING, PING, PATH_CHALLENGE (answered) */
+  fresh(&C);
+  size_t n = hex(f, "000000" "01" "1a0102030405060708");
+  CHECK(frames(&C, QUIC_SP_APP, f, n) == 0 && C.path_response_pending && !memcmp(C.path_response, "\1\2\3\4\5\6\7\x08", 8), "PATH_CHALLENGE");
+  fresh(&C);
+  printf("frame errors: %s\n", fails == before ? "ok" : "FAILED");
+}
+
+/* RFC 9001 A.2's client Initial through quic_accept: it must decrypt (pn 2 recorded) */
+static void test_accept_rfc(void) {
+  long before = fails;
+  static ptls_context_t tls;
+  tls.random_bytes = ptls_openssl_random_bytes, tls.get_time = &ptls_get_time;
+  tls.key_exchanges = ptls_openssl_key_exchanges, tls.cipher_suites = ptls_openssl_cipher_suites;
+  static quic_ctx qx;
+  quic_ctx_init(&qx, &tls);
+  static quic_conn c;
+  static uint8_t pkt[1500];
+  size_t n = hex(pkt, rfc9001_a2_packet);
+  static const quic_callbacks cb = {0};
+  quic_accept(&c, &qx, pkt, n, 0, &cb, NULL);
+  CHECK(c.sp[QUIC_SP_INITIAL].nrcv == 1 && c.sp[QUIC_SP_INITIAL].rcv[0].lo == 2 && !c.undecryptable, "A.2 via quic_accept: decrypted pn 2");
+  quic_free(&c);
+  printf("A.2 through quic_accept: %s\n", fails == before ? "ok" : "FAILED");
+}
+
 int main(void) {
   test_rfc9001();
+  test_accept_rfc();
+  test_frames();
   test_blocks();
   printf("%s: %ld failures / %ld checks\n", fails ? "FAILED" : "PASS", fails, checks);
   return fails != 0;
