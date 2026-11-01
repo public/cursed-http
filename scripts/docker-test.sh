@@ -4,7 +4,8 @@
 # DOCKER_CPUS sets --cpuset-cpus (e.g. DOCKER_CPUS=8-13 to keep off cores another job uses).
 set -e
 cd "$(dirname "$0")/.."
-ARCH=${1:-$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')}; [ $# -gt 0 ] && shift
+ARCH=${1:-$(uname -m | sed 's/x86_64/amd64/; s/aarch64/arm64/')}
+[ $# -gt 0 ] && shift
 TARGETS=${*:-test-quick asan}
 IMG=cursed-http-parser-test:$ARCH
 docker build -q --platform linux/$ARCH -t $IMG ci >/dev/null

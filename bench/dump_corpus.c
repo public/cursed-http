@@ -9,14 +9,23 @@
 #include "shapes.h"
 
 int main(int argc, char **argv) {
-  if (argc < 4) { fprintf(stderr, "usage: %s FILE SHAPE N\n", argv[0]); return 2; }
-  FILE *f = fopen(argv[1], "wb"); if (!f) { perror(argv[1]); return 2; }
+  if (argc < 4) {
+    fprintf(stderr, "usage: %s FILE SHAPE N\n", argv[0]);
+    return 2;
+  }
+  FILE *f = fopen(argv[1], "wb");
+  if (!f) {
+    perror(argv[1]);
+    return 2;
+  }
   int shape = atoi(argv[2]), n = atoi(argv[3]);
   static char buf[65536];
   mk_tokens();
   for (int i = 0; i < n; i++) {
     int l = shape >= 10 ? gen_fb(buf, shape - 10) : gen(buf, shape);
-    uint32_t u = (uint32_t)l; fwrite(&u, 4, 1, f); fwrite(buf, 1, (size_t)l, f);
+    uint32_t u = (uint32_t)l;
+    fwrite(&u, 4, 1, f);
+    fwrite(buf, 1, (size_t)l, f);
   }
   return fclose(f) != 0;
 }

@@ -5,13 +5,23 @@
 #include "fbparse.h"
 
 #if defined(__aarch64__)
-#define MCA(name, ...) do { __asm volatile("// LLVM-MCA-BEGIN " name ::: "memory"); __VA_ARGS__; __asm volatile("// LLVM-MCA-END " name ::: "memory"); } while (0)
+#define MCA(name, ...)                                                                                                 \
+  do {                                                                                                                 \
+    __asm volatile("// LLVM-MCA-BEGIN " name ::: "memory");                                                            \
+    __VA_ARGS__;                                                                                                       \
+    __asm volatile("// LLVM-MCA-END " name ::: "memory");                                                              \
+  } while (0)
 #else
-#define MCA(name, ...) do { __asm volatile("# LLVM-MCA-BEGIN " name ::: "memory"); __VA_ARGS__; __asm volatile("# LLVM-MCA-END " name ::: "memory"); } while (0)
+#define MCA(name, ...)                                                                                                 \
+  do {                                                                                                                 \
+    __asm volatile("# LLVM-MCA-BEGIN " name ::: "memory");                                                             \
+    __VA_ARGS__;                                                                                                       \
+    __asm volatile("# LLVM-MCA-END " name ::: "memory");                                                               \
+  } while (0)
 #endif
 #define K __attribute__((noinline)) void
 
-K k_empty(const char *p, uint64_t *o) { MCA("empty", o[0] = (uint64_t)(uintptr_t)p); }   // call overhead (kbench.c)
+K k_empty(const char *p, uint64_t *o) { MCA("empty", o[0] = (uint64_t)(uintptr_t)p); } // call overhead (kbench.c)
 
 // fastparse.h: LF + c/t/ctl masks of one 64-byte block (fp_cls64, the per-block classify of every request)
 K k_fp_cls64(const char *p, uint64_t *o) { MCA("fp_cls64", fp_cls64(FP_BACKEND != 0, p, &o[0], &o[1])); }
@@ -26,4 +36,10 @@ K k_fb_lfct64(const char *p, uint64_t *o) { MCA("fb_lfct64", fb_lfct64(FB_BACKEN
 K k_fb_ctany512(const char *p, uint64_t *o) { MCA("fb_ctany512", o[0] = (uint64_t)fb_ctany_simd(p, 8)); }
 #endif
 // fastparse.h: SWAR atoi of up to 16 digits (ids, Content-Length); the same code on every backend
-K k_fp_digits(const char *p, uint64_t *o) { MCA("fp_digits", { int ok; o[0] = (uint64_t)fp_digits(p, 12, &ok); o[1] = (uint64_t)ok; }); }
+K k_fp_digits(const char *p, uint64_t *o) {
+  MCA("fp_digits", {
+    int ok;
+    o[0] = (uint64_t)fp_digits(p, 12, &ok);
+    o[1] = (uint64_t)ok;
+  });
+}

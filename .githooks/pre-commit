@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+# pre-commit: formatting and lint checks on the staged files (scripts/lint.sh --staged). Install with `make hooks`.
+# It checks the working-tree copies of the staged files. To fix formatting: scripts/lint.sh --fix, then git add.
+exec "$(git rev-parse --show-toplevel)/scripts/lint.sh" --staged

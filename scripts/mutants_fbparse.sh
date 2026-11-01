@@ -3,15 +3,25 @@
 # a non-zero "TOTAL FAILURES". Run natively; EMU=1 runs the AVX-512 code path on C intrinsics (for the
 # AVX-512-only mutants); MUTASAN=1 builds with ASan (for the out-of-bounds mutant). The "SED SELF-CHECK" line
 # must say SED DID NOT APPLY; backend-specific mutants only bite on their platform.
-cd "$(dirname "$0")/.."; S=$(mktemp -d "${TMPDIR:-/tmp}/fb-mutants.XXXXXX"); mkdir -p $S/include
+cd "$(dirname "$0")/.." || exit 1
+S=$(mktemp -d "${TMPDIR:-/tmp}/fb-mutants.XXXXXX")
+mkdir -p $S/include
 cp include/fastparse.h $S/include/
-case "$(uname -m)" in x86_64|amd64) M=-march=haswell;; *) M=-mcpu=native;; esac
+case "$(uname -m)" in x86_64 | amd64) M=-march=haswell ;; *) M=-mcpu=native ;; esac
 F="-O2 -w ${MARCH:-$M} ${EMU:+-DFP_AVX512_EMU} ${MUTASAN:+-fsanitize=address}"
-mut() { sed "$1" include/fbparse.h > $S/include/fbparse.h
-  if cmp -s include/fbparse.h $S/include/fbparse.h; then echo "$2: SED DID NOT APPLY"; return; fi
-  rm -f $S/m; ${CC:-cc} $F -I$S/include -Itests -Ivendor/pico tests/test_fbparse.c vendor/pico/picohttpparser.c -o $S/m 2>&1 | head -3
-  $S/m quick > $S/out.txt 2>&1; r=$(grep TOTAL $S/out.txt); grep -q "ERROR: AddressSanitizer" $S/out.txt && r="caught by ASan ($(grep -m1 -o 'heap-buffer-overflow\|stack-buffer-overflow' $S/out.txt))"
-  echo "$2: ${r:-NO RESULT (build failed?)}"; }
+mut() {
+  sed "$1" include/fbparse.h >$S/include/fbparse.h
+  if cmp -s include/fbparse.h $S/include/fbparse.h; then
+    echo "$2: SED DID NOT APPLY"
+    return
+  fi
+  rm -f $S/m
+  ${CC:-cc} $F -I$S/include -Itests -Ivendor/pico tests/test_fbparse.c vendor/pico/picohttpparser.c -o $S/m 2>&1 | head -3
+  $S/m quick >$S/out.txt 2>&1
+  r=$(grep TOTAL $S/out.txt)
+  grep -q "ERROR: AddressSanitizer" $S/out.txt && r="caught by ASan ($(grep -m1 -o 'heap-buffer-overflow\|stack-buffer-overflow' $S/out.txt))"
+  echo "$2: ${r:-NO RESULT (build failed?)}"
+}
 mut 's/0x3e, 0x3e, 0x3d, 0x15, 0x34/0x3e, 0x3e, 0x3d, 0x15, 0x30/' "LUT: pipe not a tchar"
 mut 's/#define FB_HI_ROW 0, 0, 0x01/#define FB_HI_ROW 0, 0x01, 0x01/' "LUT: hi nibble 1 = hi nibble 2"
 mut 's/      if (p >= len) return p;/      if (p > len + 64) return p;/' "classifies a block past len (ASan build: MUTASAN=1)"
@@ -43,7 +53,7 @@ mut 's/FB_X64((FB_LE(v, 0x1f) \& ~FB_EQ(v, .\\t.))/FB_X64((FB_LE(v, 0x1f))/' "av
 mut 's/vbicq_u8(vcleq_u8(x, vdupq_n_u8(0x1f)), vceqq_u8(x, vdupq_n_u8(.\\t.)))/vcleq_u8(x, vdupq_n_u8(0x1f))/' "neon: HT counted as ctl (arm64 only)"
 mut 's/return vminvq_s8(vminq_s8(m0, m1)) < 0x21;/return vminvq_s8(vminq_s8(m0, m1)) < 0x20;/' "skip windows: 0x1f not seen (neon, arm64 only)"
 mut 's/__m256i hit = _mm256_cmpgt_epi8(_mm256_set1_epi8(0x21)/__m256i hit = _mm256_cmpgt_epi8(_mm256_set1_epi8(0x20)/' "skip windows: 0x1f not seen (x86 only)"
-mut 's/        a += 64 \* nb; if (nb < 8) nb \*= 2;/        a += 64 * nb + 64; if (nb < 8) nb *= 2;/' "skip windows: 64 unchecked bytes after each window"
+mut 's/        a += 64 \* nb;/        a += 64 * nb + 64;/' "skip windows: 64 unchecked bytes after each window"
 mut 's/      for (; a < end; a += 64) {/      for (a += 64; a < end; a += 64) {/' "long-line exit: first window line not scanned"
 mut 's/ne = FB_LIKELY(ntm) ? p + __builtin_ctz(ntm) :/ne = FB_LIKELY(ntm) ? p + __builtin_ctz(ntm \& (ntm - 1)) :/' "name scan (x86): second non-token byte taken as the name end (x86 only)"
 mut 's/ne = FB_LIKELY(ntm) ? p + (__builtin_ctzll(ntm) >> 2) :/ne = FB_LIKELY(ntm) ? p + (__builtin_ctzll(ntm) >> 3) :/' "name scan (neon): nibble index halved (arm64 only)"

@@ -1,0 +1,7 @@
+line-length = 120
+
+[lint]
+# pyflakes + pycodestyle errors. Line length is left to `ruff format` (it keeps long strings whole); lambdas bound
+# to names and one-letter names like `l` are fine in short scripts
+select = ["E", "F", "W"]
+ignore = ["E501", "E731", "E741"]

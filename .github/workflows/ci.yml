@@ -22,3 +22,10 @@ jobs:
         run: make CC=${{ matrix.cc }} avx512
       - if: runner.os == 'Linux' && matrix.cc == 'clang'
         run: make fuzz FUZZ_TIME=20 && make hypothesis HYP_EXAMPLES=100
+
+  lint:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -q -t lint -f ci/lint.Dockerfile ci
+      - run: docker run --rm -e LINT_LOCAL=1 -v "$PWD":/r -w /r lint bash scripts/lint.sh

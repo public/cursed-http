@@ -2,7 +2,7 @@
 // symbols). Built several times with -DOURS_HDR='"..."' -DOURS=name.
 #include OURS_HDR
 #define CAT2(a, b) a##_##b
-#define CAT(a, b) CAT2(a, b)
+#define CAT(a, b)  CAT2(a, b)
 static fp_learn_t T;
 __attribute__((noinline)) int CAT(OURS, parse)(const char *b, int l, req_t *r) { return fast_parse(b, l, r); }
 __attribute__((noinline)) int CAT(OURS, learn)(const char *b, int l, req_t *r) { return fast_parse_learn(b, l, r, &T); }

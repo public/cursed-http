@@ -1,0 +1,25 @@
+BasedOnStyle: LLVM
+ColumnLimit: 120
+UseTab: Never
+BreakBeforeBraces: Attach
+PointerAlignment: Right
+IndentCaseLabels: true
+AllowShortFunctionsOnASingleLine: All
+AllowShortIfStatementsOnASingleLine: AllIfsAndElse
+AllowShortLoopsOnASingleLine: true
+AllowShortBlocksOnASingleLine: Always
+AllowShortCaseLabelsOnASingleLine: true
+AllowShortEnumsOnASingleLine: true
+AlignTrailingComments: true
+AlignConsecutiveMacros: AcrossComments
+ReflowComments: false
+SortIncludes: Never
+SpacesBeforeTrailingComments: 1
+Cpp11BracedListStyle: false
+IndentPPDirectives: None
+MaxEmptyLinesToKeep: 2
+IndentWidth: 2
+ContinuationIndentWidth: 4
+BreakStringLiterals: false
+# Macros that expand to whole definitions and are used without a trailing semicolon
+StatementMacros: [RAW, LOGIC, FBEMU_OPS, DECL_OURS, FP_MANY]

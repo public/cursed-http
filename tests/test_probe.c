@@ -12,9 +12,12 @@
 #include "probe_cases.h"
 
 static int fails;
-#define FAIL(...) do { if (fails++ < 30) printf(__VA_ARGS__); } while (0)
+#define FAIL(...)                                                                                                      \
+  do {                                                                                                                 \
+    if (fails++ < 30) printf(__VA_ARGS__);                                                                             \
+  } while (0)
 
-static const char *exp_tok(const probe_case_t *c) {   // the Bearer token the parser must hand over, or NULL
+static const char *exp_tok(const probe_case_t *c) { // the Bearer token the parser must hand over, or NULL
   if (c->raw || !c->auth || strncmp(c->auth, "Bearer ", 7) || (c->route != R_CREATE && c->route != R_LIKE)) return NULL;
   return c->auth + 7;
 }
@@ -26,43 +29,73 @@ static int fields_ok(const probe_case_t *c, const req_t *r, const char *b) {
 }
 
 static void check_case(const probe_case_t *c) {
-  static char src[8192]; int head, body, len = pc_build(c, src, sizeof src, &head, &body);
+  static char src[8192];
+  int head, body, len = pc_build(c, src, sizeof src, &head, &body);
   char *b = fz_copy(src, len, 0), err[256];
   // fb_parse_req / fb_parse_req_ex: the exact class and fields
-  req_t r; memset(&r, 0, sizeof r); fb_info_t in; memset(&in, 0, sizeof in);
-  int x = fb_parse_req_ex(b, len, &r, &in), y; req_t r2; y = fb_parse_req(b, len, &r2);
-  int want = c->cls == PC_OK ? head + body : c->cls == PC_NEED_MORE ? FP_NEED_MORE : c->cls == PC_INVALID ? -2 : FP_FALLBACK;
+  req_t r;
+  memset(&r, 0, sizeof r);
+  fb_info_t in;
+  memset(&in, 0, sizeof in);
+  int x = fb_parse_req_ex(b, len, &r, &in), y;
+  req_t r2;
+  y = fb_parse_req(b, len, &r2);
+  int want = c->cls == PC_OK          ? head + body
+             : c->cls == PC_NEED_MORE ? FP_NEED_MORE
+             : c->cls == PC_INVALID   ? -2
+                                      : FP_FALLBACK;
   if (x != want || y != want) FAIL("%s: fb_parse_req_ex %d, fb_parse_req %d, want %d\n", c->name, x, y, want);
   else if (c->cls == PC_OK && (!fields_ok(c, &r, b) || r.body_off != head || r.body_len != body))
-    FAIL("%s: fields route %d id_ok %d id %lld auth %d tok_len %d body %d+%d\n", c->name, r.route, r.id_ok, (long long)r.id, r.auth, r.tok_len, r.body_off, r.body_len);
-  else if (c->cls == PC_MINOR && (in.flags != FB_MINOR || in.total != head + body || !fields_ok(c, &r, b) || r.body_len != body))
-    FAIL("%s: HTTP/1.0 flags %d total %d (want %d) route %d body_len %d\n", c->name, in.flags, in.total, head + body, r.route, r.body_len);
-  else if (c->cls == PC_TE && !(in.flags & FB_TE)) FAIL("%s: Transfer-Encoding not reported (flags %d)\n", c->name, in.flags);
+    FAIL("%s: fields route %d id_ok %d id %lld auth %d tok_len %d body %d+%d\n", c->name, r.route, r.id_ok,
+         (long long)r.id, r.auth, r.tok_len, r.body_off, r.body_len);
+  else if (c->cls == PC_MINOR &&
+           (in.flags != FB_MINOR || in.total != head + body || !fields_ok(c, &r, b) || r.body_len != body))
+    FAIL("%s: HTTP/1.0 flags %d total %d (want %d) route %d body_len %d\n", c->name, in.flags, in.total, head + body,
+         r.route, r.body_len);
+  else if (c->cls == PC_TE && !(in.flags & FB_TE))
+    FAIL("%s: Transfer-Encoding not reported (flags %d)\n", c->name, in.flags);
   // fast_parse: the same answer, or a fallback; HTTP/1.1 API requests stay on the fast path
-  req_t f; memset(&f, 0, sizeof f); int a = fast_parse(b, len, &f);
+  req_t f;
+  memset(&f, 0, sizeof f);
+  int a = fast_parse(b, len, &f);
   if (c->cls == PC_OK && (a != want || !fields_ok(c, &f, b) || f.body_off != head || f.body_len != body))
     FAIL("%s: fast_parse %d (want %d, no fallback)\n", c->name, a, want);
-  if (c->cls == PC_NEED_MORE && a != FP_NEED_MORE) FAIL("%s: fast_parse %d on an incomplete body, want NEED_MORE\n", c->name, a);
-  if ((c->cls == PC_MINOR || c->cls == PC_TE || c->cls == PC_INVALID) && a != FP_FALLBACK) FAIL("%s: fast_parse %d, want FP_FALLBACK\n", c->name, a);
+  if (c->cls == PC_NEED_MORE && a != FP_NEED_MORE)
+    FAIL("%s: fast_parse %d on an incomplete body, want NEED_MORE\n", c->name, a);
+  if ((c->cls == PC_MINOR || c->cls == PC_TE || c->cls == PC_INVALID) && a != FP_FALLBACK)
+    FAIL("%s: fast_parse %d, want FP_FALLBACK\n", c->name, a);
   // fb_parse_request (pico's API): the head, or -1 for a non-request
-  const char *m, *p; size_t ml, pl, nh = 64; int mv; struct fb_header h[64];
+  const char *m, *p;
+  size_t ml, pl, nh = 64;
+  int mv;
+  struct fb_header h[64];
   int ph = fb_parse_request(b, len, &m, &ml, &p, &pl, &mv, h, &nh, 0);
-  if (c->cls == PC_INVALID ? ph != -1 : ph != head) FAIL("%s: fb_parse_request %d, want %d\n", c->name, ph, c->cls == PC_INVALID ? -1 : head);
+  if (c->cls == PC_INVALID ? ph != -1 : ph != head)
+    FAIL("%s: fb_parse_request %d, want %d\n", c->name, ph, c->cls == PC_INVALID ? -1 : head);
   // a chunked body: the caller decodes it after the head, here in place, as a server would
   if (c->cls == PC_TE && c->decoded) {
-    char *body2 = malloc(len - head + 1); memcpy(body2, b + head, len - head);
+    char *body2 = malloc(len - head + 1);
+    memcpy(body2, b + head, len - head);
     int dl = (int)strlen(c->decoded), bl = -1, used = fb_decode_chunked(body2, len - head, body2, 500, &bl);
-    if (used != len - head || bl != dl || memcmp(body2, c->decoded, dl)) FAIL("%s: chunked body: %d of %d bytes, decoded %d, want %d\n", c->name, used, len - head, bl, dl);
+    if (used != len - head || bl != dl || memcmp(body2, c->decoded, dl))
+      FAIL("%s: chunked body: %d of %d bytes, decoded %d, want %d\n", c->name, used, len - head, bl, dl);
     if (fz_check_chunked(b + head, len - head, err, sizeof err)) FAIL("%s: chunked: %s\n", c->name, err);
     free(body2);
   }
   // every truncation, and the whole request, through the oracles (pico, every backend, batchparse)
   for (int t = 0; t <= len; t++) {
-    if (fz_check_fb(b, t, 64, 0, err, sizeof err) || fz_check_fast(b, t, err, sizeof err) || fz_check_batch(b, t, err, sizeof err)) {
-      FAIL("%s: at %d of %d bytes: %s\n", c->name, t, len, err); break; }
-    if (t < head && c->cls != PC_INVALID) {   // a prefix of a valid head is never complete or invalid
-      req_t q; int z = fb_parse_req(b, t, &q);
-      if (z != FP_NEED_MORE) { FAIL("%s: fb_parse_req %d on the %d-byte prefix, want NEED_MORE\n", c->name, z, t); break; }
+    if (fz_check_fb(b, t, 64, 0, err, sizeof err) || fz_check_fast(b, t, err, sizeof err) ||
+        fz_check_batch(b, t, err, sizeof err)) {
+      FAIL("%s: at %d of %d bytes: %s\n", c->name, t, len, err);
+      break;
+    }
+    if (t < head && c->cls != PC_INVALID) { // a prefix of a valid head is never complete or invalid
+      req_t q;
+      int z = fb_parse_req(b, t, &q);
+      if (z != FP_NEED_MORE) {
+        FAIL("%s: fb_parse_req %d on the %d-byte prefix, want NEED_MORE\n", c->name, z, t);
+        break;
+      }
     }
   }
   free(b);
@@ -71,29 +104,47 @@ static void check_case(const probe_case_t *c) {
 // RFC 9112 9.6: a client's "close" must reach the server. Every route x close-ish value x header position: fast_parse
 // falls back, fb_parse_req_ex parses it and says close; keep-alive spellings stay on the fast path.
 static void check_connection(void) {
-  static const char *routes[][3] = {   // method, target, body (NULL: none); POSTs carry a Bearer token
-    {"GET", "/health", NULL}, {"GET", "/feed", NULL}, {"GET", "/posts/1", NULL}, {"POST", "/posts", "{\"body\":\"x\"}"},
-    {"POST", "/posts/1/like", NULL}};
-  static const char *closes[] = {"close", "Close", "CLOSE", "keep-alive, close", "close, keep-alive", " close "};
-  static const char *keeps[] = {"keep-alive", "Keep-Alive", "KEEP-ALIVE", " keep-alive "};
+  static const char *routes[][3] = { // method, target, body (NULL: none); POSTs carry a Bearer token
+                                     { "GET", "/health", NULL },
+                                     { "GET", "/feed", NULL },
+                                     { "GET", "/posts/1", NULL },
+                                     { "POST", "/posts", "{\"body\":\"x\"}" },
+                                     { "POST", "/posts/1/like", NULL }
+  };
+  static const char *closes[] = { "close", "Close", "CLOSE", "keep-alive, close", "close, keep-alive", " close " };
+  static const char *keeps[] = { "keep-alive", "Keep-Alive", "KEEP-ALIVE", " keep-alive " };
   char src[1024], err[256];
-  for (int ri = 0; ri < 5; ri++) for (int k = 0; k < 6 + 4; k++) for (int pos = 0; pos < 3; pos++) {
-    const char *val = k < 6 ? closes[k] : keeps[k - 6], *body = routes[ri][2];
-    char conn[64]; snprintf(conn, sizeof conn, "Connection:%s%s\r\n", val[0] == ' ' ? "" : " ", val);
-    int n = snprintf(src, sizeof src, "%s %s HTTP/1.1\r\n%s", routes[ri][0], routes[ri][1], pos == 0 ? conn : "");
-    n += snprintf(src + n, sizeof src - n, "Host: localhost:8080\r\n%s", pos == 1 ? conn : "");
-    if (routes[ri][0][0] == 'P') n += snprintf(src + n, sizeof src - n, "Authorization: Bearer " PC_TOK "\r\n");
-    if (body) n += snprintf(src + n, sizeof src - n, "Content-Type: application/json\r\nContent-Length: %d\r\n", (int)strlen(body));
-    n += snprintf(src + n, sizeof src - n, "%s\r\n%s", pos == 2 ? conn : "", body ? body : "");
-    char *b = fz_copy(src, n, 0);
-    req_t f, e; fb_info_t in; int a = fast_parse(b, n, &f), x = fb_parse_req_ex(b, n, &e, &in);
-    if (x != n || in.close != (k < 6)) FAIL("%s %s, Connection \"%s\" at %d: fb_parse_req_ex %d (want %d), close %d\n", routes[ri][0], routes[ri][1], val, pos, x, n, in.close);
-    if (k < 6 ? a != FP_FALLBACK : a != n) FAIL("%s %s, Connection \"%s\" at %d: fast_parse %d, want %d\n", routes[ri][0], routes[ri][1], val, pos, a, k < 6 ? FP_FALLBACK : n);
-    bp_parse(1, (const char *const *)&b, &n, &e, &x);
-    if (x != a) FAIL("%s %s, Connection \"%s\" at %d: bp_parse %d, fast_parse %d\n", routes[ri][0], routes[ri][1], val, pos, x, a);
-    if (fz_check_fast(b, n, err, sizeof err) || fz_check_fb(b, n, 64, 0, err, sizeof err)) FAIL("Connection \"%s\": %s\n", val, err);
-    free(b);
-  }
+  for (int ri = 0; ri < 5; ri++)
+    for (int k = 0; k < 6 + 4; k++)
+      for (int pos = 0; pos < 3; pos++) {
+        const char *val = k < 6 ? closes[k] : keeps[k - 6], *body = routes[ri][2];
+        char conn[64];
+        snprintf(conn, sizeof conn, "Connection:%s%s\r\n", val[0] == ' ' ? "" : " ", val);
+        int n = snprintf(src, sizeof src, "%s %s HTTP/1.1\r\n%s", routes[ri][0], routes[ri][1], pos == 0 ? conn : "");
+        n += snprintf(src + n, sizeof src - n, "Host: localhost:8080\r\n%s", pos == 1 ? conn : "");
+        if (routes[ri][0][0] == 'P') n += snprintf(src + n, sizeof src - n, "Authorization: Bearer " PC_TOK "\r\n");
+        if (body)
+          n += snprintf(src + n, sizeof src - n, "Content-Type: application/json\r\nContent-Length: %d\r\n",
+                        (int)strlen(body));
+        n += snprintf(src + n, sizeof src - n, "%s\r\n%s", pos == 2 ? conn : "", body ? body : "");
+        char *b = fz_copy(src, n, 0);
+        req_t f, e;
+        fb_info_t in;
+        int a = fast_parse(b, n, &f), x = fb_parse_req_ex(b, n, &e, &in);
+        if (x != n || in.close != (k < 6))
+          FAIL("%s %s, Connection \"%s\" at %d: fb_parse_req_ex %d (want %d), close %d\n", routes[ri][0], routes[ri][1],
+               val, pos, x, n, in.close);
+        if (k < 6 ? a != FP_FALLBACK : a != n)
+          FAIL("%s %s, Connection \"%s\" at %d: fast_parse %d, want %d\n", routes[ri][0], routes[ri][1], val, pos, a,
+               k < 6 ? FP_FALLBACK : n);
+        bp_parse(1, (const char *const *)&b, &n, &e, &x);
+        if (x != a)
+          FAIL("%s %s, Connection \"%s\" at %d: bp_parse %d, fast_parse %d\n", routes[ri][0], routes[ri][1], val, pos,
+               x, a);
+        if (fz_check_fast(b, n, err, sizeof err) || fz_check_fb(b, n, 64, 0, err, sizeof err))
+          FAIL("Connection \"%s\": %s\n", val, err);
+        free(b);
+      }
 }
 
 static void check_pipeline(const char *t1, const char *t2) {
@@ -101,11 +152,16 @@ static void check_pipeline(const char *t1, const char *t2) {
   int n1 = snprintf(src, sizeof src, "GET %s HTTP/1.1\r\nHost: localhost:8080\r\n\r\n", t1);
   int n = n1 + snprintf(src + n1, sizeof src - n1, "GET %s HTTP/1.1\r\nHost: localhost:8080\r\n\r\n", t2);
   char *b = fz_copy(src, n, 0), err[256];
-  req_t o[4]; fp_batch_t x = fast_parse_many(b, n, o, 4);
-  if (x.n != 2 || x.used != n || x.status != FP_NEED_MORE) FAIL("pipeline %s + %s: fast_parse_many n %d used %d/%d status %d\n", t1, t2, x.n, x.used, n, x.status);
-  req_t r; int a = fb_parse_req(b, n, &r), c = fb_parse_req(b + n1, n - n1, &r);
-  if (a != n1 || c != n - n1) FAIL("pipeline %s + %s: fb_parse_req %d and %d, want %d and %d\n", t1, t2, a, c, n1, n - n1);
-  if (fz_check_fast(b, n, err, sizeof err) || fz_check_fb(b, n, 64, 0, err, sizeof err) || fz_check_batch(b, n, err, sizeof err))
+  req_t o[4];
+  fp_batch_t x = fast_parse_many(b, n, o, 4);
+  if (x.n != 2 || x.used != n || x.status != FP_NEED_MORE)
+    FAIL("pipeline %s + %s: fast_parse_many n %d used %d/%d status %d\n", t1, t2, x.n, x.used, n, x.status);
+  req_t r;
+  int a = fb_parse_req(b, n, &r), c = fb_parse_req(b + n1, n - n1, &r);
+  if (a != n1 || c != n - n1)
+    FAIL("pipeline %s + %s: fb_parse_req %d and %d, want %d and %d\n", t1, t2, a, c, n1, n - n1);
+  if (fz_check_fast(b, n, err, sizeof err) || fz_check_fb(b, n, 64, 0, err, sizeof err) ||
+      fz_check_batch(b, n, err, sizeof err))
     FAIL("pipeline %s + %s: %s\n", t1, t2, err);
   free(b);
 }
@@ -113,10 +169,12 @@ static void check_pipeline(const char *t1, const char *t2) {
 int main(void) {
   printf("probe cases: fastparse.h %s, fbparse.h %s\n", FP_BACKEND_NAME, FB_BACKEND_NAME);
   for (int i = 0; i < N_PROBE_CASES; i++) check_case(&PROBE_CASES[i]);
-  for (size_t i = 0; i < sizeof PROBE_PIPELINES / sizeof *PROBE_PIPELINES; i++) check_pipeline(PROBE_PIPELINES[i][0], PROBE_PIPELINES[i][1]);
-  check_pipeline("/posts/1/like", "/posts/1");   // the probe's like pair, as GETs (the like route then is NOTFOUND)
+  for (size_t i = 0; i < sizeof PROBE_PIPELINES / sizeof *PROBE_PIPELINES; i++)
+    check_pipeline(PROBE_PIPELINES[i][0], PROBE_PIPELINES[i][1]);
+  check_pipeline("/posts/1/like", "/posts/1"); // the probe's like pair, as GETs (the like route then is NOTFOUND)
   check_connection();
-  printf("%d cases, %zu pipelined pairs + 1, every truncation; Connection: 5 routes x 10 values x 3 positions\nTOTAL FAILURES: %d\n", N_PROBE_CASES,
-         sizeof PROBE_PIPELINES / sizeof *PROBE_PIPELINES, fails);
+  printf(
+      "%d cases, %zu pipelined pairs + 1, every truncation; Connection: 5 routes x 10 values x 3 positions\nTOTAL FAILURES: %d\n",
+      N_PROBE_CASES, sizeof PROBE_PIPELINES / sizeof *PROBE_PIPELINES, fails);
   return fails != 0;
 }

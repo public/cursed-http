@@ -13,6 +13,8 @@
 #   make hypothesis   Hypothesis properties on grammar-built requests (venv in build/; HYP_EXAMPLES, default 300)
 #   make lib          build/libchp.a: every backend of this architecture, picked at load time (include/chp.h)
 #   make gen          regenerate build/fastparse_gen.h and build/fastparse_pgo.h from gen/example_spec.json
+#   make lint         formatting + lint checks (clang-format, shfmt, ruff, shellcheck, cppcheck; Docker)
+#   make format       apply the formatters; make hooks installs the pre-commit check (.githooks/)
 # Everything is built into build/. The library itself is header-only: include/*.h.
 CC ?= cc
 PYTHON ?= python3
@@ -332,6 +334,13 @@ hypothesis: $(B)/libfuzzoracle.so $(B)/venv/.done
 mutants-fuzz: $(B)/venv/.done
 	./scripts/mutants_fuzz.sh
 
+# formatting and linting (scripts/lint.sh; pinned tools in ci/lint.Dockerfile, run through Docker)
+format:
+	./scripts/lint.sh --fix
+lint:
+	./scripts/lint.sh
+hooks:
+	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: all lib mca mca-validate gen gencheck test test-quick asan bench avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check fuzz fuzz-replay hypothesis mutants-fuzz clean
+.PHONY: all lib mca mca-validate gen gencheck test test-quick asan bench avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check fuzz fuzz-replay hypothesis mutants-fuzz format lint hooks clean
