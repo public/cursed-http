@@ -13,6 +13,10 @@ This repository holds three single-header parsers plus a learning mode:
   and it hands back the route, the numeric id, the `Bearer` token and the body framing directly.
 - **`fast_parse_learn()`**, the learning mode of fastparse.h. It learns each route's most common header layout at
   runtime and checks later requests against that layout, with results identical to `fast_parse`.
+- **`fast_parse_tmpl()`**, a second learning mode that needs no spec at all. It learns whole-request templates from
+  the traffic (constant bytes plus variable slots for the path and header values) and matches later requests with
+  vector compares, with results identical to `fast_parse`. *In development:* see
+  [Learned request templates](#learned-request-templates).
 - **[`fbparse.h`](include/fbparse.h)**, a general parser with picohttpparser's API and exactly its results.
 - **[`batchparse.h`](include/batchparse.h)**, which parses many connections' requests in one lane-parallel call.
 
@@ -286,6 +290,7 @@ make bench
 - **Optional learned layout** (`fast_parse_learn`). Per route, it learns the most common header layout at
   runtime and checks later requests against it with independent compares, with identical results. It helps
   pipelined batches; it doesn't help single calls on real hardware.
+- **Optional learned request templates** (`fast_parse_tmpl`), below.
 
 **fbparse.h**
 - **Same mask approach for pico's grammar.** There are four predicates: not-a-token-char (pico's
@@ -349,9 +354,35 @@ fp_batch_t fast_parse_many(const char *buf, int len, req_t *out, int max);
 fp_learn_t T = {0};                                    // 5.6 KB, one per thread, zero-initialised
 int fast_parse_learn(const char *buf, int len, req_t *r, fp_learn_t *T);   // same results as fast_parse
 fp_batch_t fast_parse_many_learn(const char *buf, int len, req_t *out, int max, fp_learn_t *T);
+
+fp_tmpl_t X = {0};                                     // ~50 KB, one per thread, zero-initialised
+int fast_parse_tmpl(const char *buf, int len, req_t *r, fp_tmpl_t *X);     // same results as fast_parse
+fp_batch_t fast_parse_many_tmpl(const char *buf, int len, req_t *out, int max, fp_tmpl_t *X);
 ```
 
 `FP_FALLBACK` is always safe: hand the bytes to a full parser (`fb_parse_req`) or answer 400.
+
+#### Learned request templates
+
+`fast_parse_tmpl` learns the traffic instead of the API. It is meant for places with no spec (a proxy, nginx, Envoy,
+HAProxy), where the request lines and headers are whatever clients send.
+- **A template** is a request seen at runtime, cut into constant segments and variable slots: the method (if it
+  varies), the path, and the tail of each header value that varies. Two requests with the same skeleton (line count
+  and every header name up to its colon) make a template; the values that differ become slots and their common
+  prefix stays constant. Up to 8 templates per table, tried in the order of their recent hits.
+- **A match** is vector compares of the constants and one short scan per slot: no LF classify, no end-of-headers
+  search, no line walk. The spec's router (`fp_route`) runs on the path span; only the Content-Length and first
+  Authorization lines are parsed, by the same functions `fast_parse` uses.
+- **Exactly `fast_parse`'s results.** The argument is in the comment above `fp_tm_try`: slots hold no CR/LF (the
+  path no SP), every line starts in constant bytes, and a slot starts only after its line's colon, so every line's
+  class is fixed by constant bytes. Connection lines are never slotted (the verdict reads the whole value), and
+  routes that ask for the spec's headers decline (the general parser fills `hdr`). This is argued and tested
+  (differential suite, direct tries of every learned template, a slot fuzzer, the libFuzzer/Hypothesis oracle, the
+  conformance suites), not formally verified.
+- **A cost model** keeps it from losing: every 8th window of 1,024 requests, a 16-request burst times both paths on
+  the same bytes (TSC on x86, `cntvct_el0` on arm64; `-DFP_TM_NOCOST` turns it off). A template more than 12.5%
+  slower than `fast_parse` is switched off; the table bypasses itself while it saves nothing.
+- **Status:** in development. Xeon numbers and the verdict are in the pull request that adds it.
 
 ### fbparse.h
 

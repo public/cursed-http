@@ -224,8 +224,12 @@ $(B)/ours_%.o: bench/ours.c $(HDRS) $(B)/fastparse_gen.h $(B)/fastparse_pgo.h | 
 OURS_HDR_hand := fastparse.h
 OURS_HDR_gen := fastparse_gen.h
 OURS_HDR_pgo := fastparse_pgo.h
-$(B)/compare: bench/compare.c $(HDRS) $(B)/ours_hand.o $(B)/ours_gen.o $(B)/ours_pgo.o $(B)/pico.o $(LLHTTP_O) $(B)/llhttp_shim.o
-	$(CC_T) $< $(B)/ours_hand.o $(B)/ours_gen.o $(B)/ours_pgo.o $(B)/pico.o $(LLHTTP_O) $(B)/llhttp_shim.o -o $@
+# hnc: the hand-written header with the learned templates' cost model compiled out (FP_TM_NOCOST)
+$(B)/ours_hnc.o: bench/ours.c $(HDRS) | $(B)
+	$(CC) $(CFLAGS) $(MARCH) -Iinclude '-DOURS_HDR="fastparse.h"' -DOURS=hnc -DFP_TM_NOCOST -c $< -o $@
+OURS_O := $(B)/ours_hand.o $(B)/ours_gen.o $(B)/ours_pgo.o $(B)/ours_hnc.o
+$(B)/compare: bench/compare.c $(HDRS) $(OURS_O) $(B)/pico.o $(LLHTTP_O) $(B)/llhttp_shim.o
+	$(CC_T) $< $(OURS_O) $(B)/pico.o $(LLHTTP_O) $(B)/llhttp_shim.o -o $@
 $(B)/bench_fbparse: bench/bench_fbparse.c $(HDRS) $(B)/pico.o $(LLHTTP_O) $(B)/llhttp_shim.o
 	$(CC_T) $< $(B)/pico.o $(LLHTTP_O) $(B)/llhttp_shim.o -o $@
 $(B)/bench_batch: bench/bench_batch.c $(HDRS) $(B)/pico.o

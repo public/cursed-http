@@ -71,6 +71,9 @@ static const char *CN[] = { "AGREE",    "RELAXED",   "ACCEPT-INVALID", "MISMATCH
 // later cases and truncations), every input parsed twice so a layout learned from it is tried at once
 static fp_learn_t T;
 static long learn_hits;
+// learned templates: likewise one table, every input parsed twice (a template forms from two requests)
+static fp_tmpl_t X;
+static long tmpl_hits;
 
 static void show(const char *b, int len, int max) {
   for (int i = 0; i < len && i < max; i++) {
@@ -90,6 +93,10 @@ static int judge(const case_t *k, const char *b, int len, int trunc, int report)
   uint64_t h0 = T.hits;
   int a3 = fast_parse_learn(b, len, &q1, &T), a4 = fast_parse_learn(b, len, &q2, &T);
   learn_hits += T.hits != h0;
+  req_t q3, q4;
+  uint64_t x0 = X.hits;
+  int a5 = fast_parse_tmpl(b, len, &q3, &X), a6 = fast_parse_tmpl(b, len, &q4, &X);
+  tmpl_hits += X.hits != x0;
   int cat;
   int lend = -1, lv = llhttp_message(b, len, &lend);
   const char *m, *p;
@@ -106,8 +113,9 @@ static int judge(const case_t *k, const char *b, int len, int trunc, int report)
   req_t g;
   int ref = ref_parse(b, len, &g); // pico + the reference logic (route/id/token/CL)
   if (!same(a, &f, a2, &s) || (a > 0 && f.id != s.id) || !same(a, &f, a3, &q1) || !same(a, &f, a4, &q2) ||
-      (a > 0 && (f.id != q1.id || f.id != q2.id)))
-    cat = C_SCALAR;
+      (a > 0 && (f.id != q1.id || f.id != q2.id)) || !same(a, &f, a5, &q3) || !same(a, &f, a6, &q4) ||
+      (a > 0 && (f.id != q3.id || f.id != q4.id)))
+    cat = C_SCALAR; // the scalar backend, the learned layout or the learned templates differ
   else if (a == FP_FALLBACK) cat = C_FALLBACK;
   else if (a == FP_NEED_MORE) cat = (lv == V_ACCEPT || (pv == V_ACCEPT && ref > 0)) ? C_STALL : C_NEEDMORE;
   else {
@@ -189,6 +197,8 @@ int main(int argc, char **argv) {
   printf("  suite says reject, we accept: %ld\n", suite_disagree);
   printf("  learned-layout fast path used on %ld inputs (all identical to fast_parse unless counted above)\n",
          learn_hits);
+  printf("  learned-template fast path used on %ld inputs (all identical to fast_parse unless counted above)\n",
+         tmpl_hits);
   long bugs = cnt[C_MISMATCH] + cnt[C_STALL] + cnt[C_SCALAR] + tcnt[C_MISMATCH] + tcnt[C_STALL] + tcnt[C_SCALAR];
   printf("BUGS (MISMATCH + STALL + SCALAR-DIFF, incl. truncations): %ld\n", bugs);
   fclose(rep);

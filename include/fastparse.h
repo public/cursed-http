@@ -14,6 +14,8 @@
 //   - fast_parse_many(): pipelined batch, see the bottom of this file.
 //   - fast_parse_learn(): same results, plus a fast path for the most common header layout per
 //     route, learned at runtime into a caller-owned fp_learn_t (see "learned header layout").
+//   - fast_parse_tmpl(): same results, plus whole-request templates learned at runtime (no spec needed) into a
+//     caller-owned fp_tmpl_t (see "learned request templates").
 //
 // Two cores, both always compiled and required to agree on every input:
 //   fp_core_cand  (SIMD backends): per 64-byte block, one ISA-specific classify step yields two
@@ -1063,6 +1065,599 @@ static inline int fast_parse_learn_scalar(const char *b, int len, req_t *r, fp_l
   return fp_core_learn(b, len, r, T, 0);
 }
 
+// ---------------- learned request templates (opt-in: fast_parse_tmpl) ----------------
+// No spec needed: request lines and header blocks are learned from the traffic itself. A template is a
+// request seen at runtime, cut into constant segments and variable slots:
+//   seg0 slot0 seg1 slot1 ... seg_n            (the headers end where seg_n ends)
+//   seg0 = "METHOD " (<= 8 bytes), or any method if the template learned it varies; slot0 = the path
+//   (>= 1 byte, up to the first SP/CR/LF);
+//   seg1 starts with " HTTP/1.1\r\n"; slot k >= 1 = the tail of one header value (up to the first CR/LF),
+//   so seg k+1 starts with "\r\n".
+// Matching: constant segments are compared with vector loads, each slot is one short scan; no LF
+// classify, no end-of-headers search, no line walk. Then the spec's router (fp_route) runs on the path
+// span, and only the Content-Length / first Authorization line is parsed, by fp_hdr_ct / fp_hdr_auth.
+// Learning (cold, rate-limited, only from requests the general parser accepted): two requests with the
+// same skeleton (line count, every header name up to its first colon) make a template: the values that
+// differ become slots, keeping their common prefix constant (anti-unification), and so does the method if
+// it differs. Later requests of that skeleton generalize it further. Templates are tried in the order of
+// their recent hits (reordered every 1024 requests).
+//
+// Why a match gives exactly what the general parser gives:
+//   - bytes [0, hend) are the template's constants with the slots between them, and no slot holds CR or
+//     LF (nor the path a SP): every LF and CR is the template's, shifted by the slot lengths. So the
+//     lines are the template's lines, all CRLF-terminated, with no empty line before hend and no bare CR;
+//   - the request line is METHOD SP path SP "HTTP/1.1" CRLF with a non-empty method and path free of
+//     SP/CR/LF and l0 >= 16, so fp_reqline (and the spec's canonical templates, which agree with it)
+//     would give fp_route exactly (method, path);
+//   - every header line starts in a constant segment, and a slot starts only after the line's first
+//     colon. The general parser classifies a line from its first byte and its first 8 or 14 bytes
+//     ("transfer", "content-length", "authorization:"), compared letter by letter: a colon in those
+//     bytes never matches, so the class (ignored / Content-Length / Authorization) is fixed by constant
+//     bytes and equals the template's, and the colon fp_has_colon looks for is constant too. The CL and
+//     first-Authorization lines are then parsed by the very functions the general parser calls;
+//   - Connection lines are always constant (their verdict reads the whole value), and a route asking for
+//     the spec's headers (fp_route_hdrs) declines: the general parser fills req_t.hdr;
+//   - the general parser's result depends on alignment nowhere, and on len only through hend <= len,
+//     hend <= FP_MAXHDR and hend + cl <= len, all checked here.
+#define FP_TM_N     8    // templates per table
+#define FP_TM_PEND  4    // skeletons seen once, waiting for a second request
+#define FP_TM_SLOTS 8    // variable slots per template, the path included
+#define FP_TM_LINES 40   // header lines per template
+#define FP_TM_REP   2048 // longest learnable header block
+#define FP_TM_CB    1024 // constant bytes per template
+typedef struct {
+  // hot: read by the matcher
+  uint64_t k0, m0; // segment 0 ("METHOD "): bytes, byte mask
+  uint8_t nslot, ml, mslot, cl_kind,
+      au_kind; // mslot: the method is variable too; cl_kind: 0 no CL line, 1 constant line (cl), 2 parse it; au_kind: 1 = has an Authorization line
+  int cl;
+  uint16_t seg_at[FP_TM_SLOTS + 1], seg_len[FP_TM_SLOTS + 1]; // segment k = cb[seg_at[k] ..+ seg_len[k])
+  uint8_t cl_seg, au_seg;
+  int8_t cl_slot, au_slot; // line start = segment base + *_s; end = slot end, or base + *_e
+  uint16_t cl_s, cl_e, au_s, au_e;
+  uint32_t hits, whits; // all-time (halved per window) and this window's
+  uint32_t cy_t, cy_g, ns;
+  uint8_t slow; // cost samples: try loop vs general parser (cycles, decayed); slow = not tried
+  _Alignas(64) unsigned char cb[FP_TM_CB + 32 * (FP_TM_SLOTS + 2)]; // constants, each segment padded to 32 bytes
+  // cold: the representative request and its slots, for relearning
+  int hend, nl, pe; // pe: end of the path
+  uint16_t ls[FP_TM_LINES], le[FP_TM_LINES],
+      nc[FP_TM_LINES];     // header lines [ls, le) + CRLF; nc: name + colon length (0: no colon)
+  int16_t lj[FP_TM_LINES]; // slot starts at ls + lj, or -1 = constant line
+  char rep[FP_TM_REP];
+} fp_tm_t;
+typedef struct {
+  fp_tm_t t[FP_TM_N], pend[FP_TM_PEND], scratch; // pend: skeletons seen once; scratch: the request being learned
+  uint8_t ord[FP_TM_N];
+  int n, npend; // ord: templates in the order they are tried
+  int wreq, whit, bypass, cool, backoff;
+  unsigned pnext, sctr, nwin;
+  int64_t save;
+  int nsave; // cost samples: sum of (general parser - template path) cycles, decayed
+  uint64_t hits, misses, learned, generalized, evicted;
+} fp_tmpl_t; // zero-init; meant to be one per server thread (size: see RESULTS.md)
+
+// Cycle counter for the cost samples (any monotonic tick works: only ratios of sums are used). Without
+// one (-DFP_TM_NOCOST, or an unknown target) templates are always tried.
+#if !defined(FP_TM_NOCOST) && (defined(__x86_64__) || defined(__i386__))
+FP_INLINE uint64_t fp_tm_tick(void) { return __builtin_ia32_rdtsc(); } // no header: avx512_emu.h stays usable
+#elif !defined(FP_TM_NOCOST) && defined(__aarch64__)
+FP_INLINE uint64_t fp_tm_tick(void) {
+  uint64_t t;
+  __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t));
+  return t;
+}
+#else
+#define FP_TM_NOTICK 1
+FP_INLINE uint64_t fp_tm_tick(void) { return 0; }
+#endif
+// constant compare (accumulated; nonzero = mismatch) and slot scan, per backend
+static const unsigned char fp_tm_win[64] = {
+  255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+  255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255
+}; // + 32 zeros: mask of n bytes at 32 - n
+typedef struct {
+#if FP_BACKEND >= 2
+  __m256i v;
+#elif FP_BACKEND == 1
+  uint8x16_t v;
+#endif
+  uint64_t s;
+} fp_tmacc_t;
+FP_INLINE void fp_tm_init(int simd, fp_tmacc_t *a) {
+#if FP_BACKEND >= 2
+  if (simd) {
+    a->v = _mm256_setzero_si256();
+    return;
+  }
+#elif FP_BACKEND == 1
+  if (simd) {
+    a->v = vdupq_n_u8(0);
+    return;
+  }
+#endif
+  (void)simd;
+  a->s = 0;
+}
+// bytes [0, n) of p against t (t readable to n rounded up to 32; p readable to n + 31); n >= 1
+FP_INLINE void fp_tm_cmp(int simd, fp_tmacc_t *a, const char *p, const unsigned char *t, int n) {
+#if FP_BACKEND >= 2
+  if (simd) {
+#define FP_X(o)                                                                                                        \
+  _mm256_xor_si256(_mm256_loadu_si256((const void *)(p + (o))), _mm256_loadu_si256((const void *)(t + (o))))
+    if (n < 32) {
+      a->v = _mm256_or_si256(a->v, _mm256_and_si256(FP_X(0), _mm256_loadu_si256((const void *)(fp_tm_win + 32 - n))));
+      return;
+    }
+    for (int i = 0; i + 32 < n; i += 32) a->v = _mm256_or_si256(a->v, FP_X(i));
+    a->v = _mm256_or_si256(a->v, FP_X(n - 32)); // last 32 bytes, overlapping
+#undef FP_X
+    return;
+  }
+#elif FP_BACKEND == 1
+  if (simd) {
+#define FP_X(o) veorq_u8(vld1q_u8((const uint8_t *)p + (o)), vld1q_u8(t + (o)))
+    if (n < 16) {
+      a->v = vorrq_u8(a->v, vandq_u8(FP_X(0), vld1q_u8(fp_tm_win + 32 - n)));
+      return;
+    }
+    for (int i = 0; i + 16 < n; i += 16) a->v = vorrq_u8(a->v, FP_X(i));
+    a->v = vorrq_u8(a->v, FP_X(n - 16));
+#undef FP_X
+    return;
+  }
+#endif
+  (void)simd;
+  if (n < 8) {
+    uint64_t t0;
+    memcpy(&t0, t, 8);
+    a->s |= (fp_ld64(p) ^ t0) & fp_bytes(n);
+    return;
+  }
+  for (int i = 0; i + 8 < n; i += 8) {
+    uint64_t ti;
+    memcpy(&ti, t + i, 8);
+    a->s |= fp_ld64(p + i) ^ ti;
+  }
+  uint64_t tl;
+  memcpy(&tl, t + n - 8, 8);
+  a->s |= fp_ld64(p + n - 8) ^ tl;
+}
+FP_INLINE int fp_tm_bad(int simd, const fp_tmacc_t *a) {
+#if FP_BACKEND >= 2
+  if (simd) return !_mm256_testz_si256(a->v, a->v);
+#elif FP_BACKEND == 1
+  if (simd) return vmaxvq_u8(a->v) != 0;
+#endif
+  (void)simd;
+  return a->s != 0;
+}
+// first byte at index >= p (and < lim) that is CR or LF (or SP: path), or -1
+FP_INLINE int fp_tm_scan(int simd, const char *b, int p, int lim, const int path) {
+#if FP_BACKEND >= 2
+  if (simd) {
+    const __m256i CR = _mm256_set1_epi8('\r'), LF = _mm256_set1_epi8('\n'), SP = _mm256_set1_epi8(' ');
+    for (; p < lim; p += 32) {
+      __m256i v = _mm256_loadu_si256((const void *)(b + p)),
+              m = _mm256_or_si256(_mm256_cmpeq_epi8(v, CR), _mm256_cmpeq_epi8(v, LF));
+      if (path) m = _mm256_or_si256(m, _mm256_cmpeq_epi8(v, SP));
+      uint32_t mm = (uint32_t)_mm256_movemask_epi8(m);
+      if (mm) {
+        int x = p + __builtin_ctz(mm);
+        return x < lim ? x : -1;
+      }
+    }
+    return -1;
+  }
+#elif FP_BACKEND == 1
+  if (simd) {
+    for (; p < lim; p += 16) {
+      uint8x16_t v = vld1q_u8((const uint8_t *)b + p),
+                 m = vorrq_u8(vceqq_u8(v, vdupq_n_u8('\r')), vceqq_u8(v, vdupq_n_u8('\n')));
+      if (path) m = vorrq_u8(m, vceqq_u8(v, vdupq_n_u8(' ')));
+      uint64_t mm = vget_lane_u64(vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(m), 4)), 0); // 4 bits per byte
+      if (mm) {
+        int x = p + (fp_ctz(mm) >> 2);
+        return x < lim ? x : -1;
+      }
+    }
+    return -1;
+  }
+#endif
+  (void)simd;
+  for (; p < lim; p += 8) {
+    uint64_t w = fp_ld64(b + p), m = fp_swar_eq(w, '\r' * FP_ONES) | fp_swar_eq(w, '\n' * FP_ONES);
+    if (path) m |= fp_swar_eq(w, ' ' * FP_ONES);
+    if (m) {
+      int x = p + (fp_ctz(m) >> 3);
+      return x < lim ? x : -1;
+    }
+  }
+  return -1;
+}
+
+// Request line, the same for every template: me = the method's end (first SP/CR/LF: must be a SP, method
+// >= 1 byte), pe = the path's end (the next SP/CR/LF, path >= 1 byte). 0 = not this shape, or a line the
+// general parser falls back on whatever the headers (l0 < 16, see fp_reqline): leave it to that parser.
+FP_INLINE int fp_tm_rl(int simd, const char *b, int lim, int *me, int *pe) {
+  int x, y;
+#if FP_BACKEND >= 2
+  if (simd && lim >= 32) { // both ends from one mask when the request line's start fits in 32 bytes
+    __m256i v = _mm256_loadu_si256((const void *)b);
+    uint32_t m = (uint32_t)_mm256_movemask_epi8(_mm256_or_si256(
+        _mm256_or_si256(_mm256_cmpeq_epi8(v, _mm256_set1_epi8(' ')), _mm256_cmpeq_epi8(v, _mm256_set1_epi8('\r'))),
+        _mm256_cmpeq_epi8(v, _mm256_set1_epi8('\n'))));
+    if (!m) return 0;
+    x = __builtin_ctz(m);
+    m &= m - 1;
+    y = m ? (int)__builtin_ctz(m) : fp_tm_scan(1, b, 32, lim, 1);
+  } else
+#endif
+  {
+    x = fp_tm_scan(simd, b, 0, lim, 1);
+    y = x > 0 ? fp_tm_scan(simd, b, x + 1, lim, 1) : -1;
+  }
+  if (x <= 0 || b[x] != ' ' || y <= x + 1 || y + 10 < 16) return 0;
+  *me = x;
+  *pe = y;
+  return 1;
+}
+// -2 = no match (use the general parser), else exactly what the general parser returns
+FP_INLINE int fp_tm_try(const char *b, int len, req_t *r, const fp_tm_t *T, const int simd, int lim, int me, int pe) {
+  if ((fp_ld64(b) & T->m0) != T->k0) return -2; // constant method (m0 = 0: the method is a slot)
+  // no position arrays: the CL / Authorization line ends are picked up as the loop passes them
+  int p = pe, x, cls = 0, cle = 0, aus = 0, aue = 0;
+  fp_tmacc_t acc;
+  fp_tm_init(simd, &acc);
+  for (int k = 1;; k++) {
+    int n = T->seg_len[k];
+    if (p + n > lim) return -2;
+    if (k == T->cl_seg) {
+      cls = p + T->cl_s;
+      cle = p + T->cl_e;
+    }
+    if (k == T->au_seg) {
+      aus = p + T->au_s;
+      aue = p + T->au_e;
+    }
+    fp_tm_cmp(simd, &acc, b + p, T->cb + T->seg_at[k], n);
+    p += n;
+    if (fp_tm_bad(simd, &acc)) return -2;
+    if (k == T->nslot) break;
+    if ((x = fp_tm_scan(simd, b, p, lim, 0)) < 0) return -2;
+    if (k == T->cl_slot) cle = x;
+    if (k == T->au_slot) aue = x;
+    p = x;
+  }
+  fp_route(b, me, b + me + 1, pe - me - 1, r);
+  if (fp_route_hdrs(r->route)) return -2; // the spec's header values: the general parser fills them
+  r->auth = 0;
+  r->tok = 0;
+  r->tok_len = 0;
+  fp_hdr_reset(r);
+  int cl = T->cl;
+  if (T->cl_kind == 2) {
+    int have_cl = 0;
+    if (fp_hdr_ct(b, cls, cle, &cl, &have_cl)) return FP_FALLBACK;
+  }
+  if (T->au_kind && fp_route_auth(r->route)) fp_hdr_auth(b, aus, aue, r);
+  if (p + cl > len) return FP_NEED_MORE;
+  r->body_off = p;
+  r->body_len = cl;
+  return p + cl;
+}
+
+// The skeleton of a request the general parser accepted, headers ending at hend: 0 if it can't be a
+// template (non-canonical request line, method > 7 bytes, too long, too many lines).
+static inline int fp_tm_shape(const char *b, int hend, fp_tm_t *T) {
+  int m = 0;
+  while (m < 8 && b[m] != ' ' && b[m] != '\r' && b[m] != '\n') m++;
+  if (m == 0 || m > 7 || b[m] != ' ' || hend > FP_TM_REP) return 0;
+  int p = m + 1;
+  while (p < hend && b[p] != ' ' && b[p] != '\r' && b[p] != '\n') p++;
+  if (p == m + 1 || p + 11 > hend || memcmp(b + p, " HTTP/1.1\r\n", 11)) return 0;
+  T->ml = (uint8_t)m;
+  T->mslot = 0;
+  T->pe = p;
+  T->hend = hend;
+  T->nl = 0;
+  int s = p + 11;
+  while (s < hend - 2) {
+    const char *lf = (const char *)memchr(b + s, '\n', hend - s);
+    if (!lf || T->nl == FP_TM_LINES) return 0;
+    int e = (int)(lf - b) - 1;
+    if (e <= s || b[e] != '\r' || memchr(b + s, '\r', e - s)) return 0;
+    const char *c = (const char *)memchr(b + s, ':', e - s);
+    T->ls[T->nl] = (uint16_t)s;
+    T->le[T->nl] = (uint16_t)e;
+    T->nc[T->nl] = (uint16_t)(c ? c - (b + s) + 1 : 0);
+    T->lj[T->nl] = -1;
+    T->nl++;
+    s = e + 2;
+  }
+  if (s != hend - 2 || b[s] != '\r' || b[s + 1] != '\n') return 0;
+  memcpy(T->rep, b, hend);
+  return 1;
+}
+// Connection (RFC 9112 9.6): fp_hdr_ct's verdict on such a line depends on its whole value, so a template
+// keeps it constant; a request whose Connection value differs has another skeleton.
+FP_INLINE int fp_tm_is_conn(const char *b, int s, int e) {
+  return (b[s] | 0x20) == 'c' && e - s >= 10 && FP_HNAME(b + s, "connecti", "on\0\0\0\0\0\0", 2);
+}
+// segments, slots and the CL / Authorization line refs from the representative and its slots
+static inline int fp_tm_compile(fp_tm_t *T) {
+  const char *b = T->rep;
+  int at = 0, seg = 1, cur = T->pe, ncb = T->hend;
+  T->m0 = T->mslot ? 0 : fp_bytes(T->ml + 1);
+  T->k0 = fp_ld64(b) & T->m0;
+  T->seg_len[0] = (uint16_t)(T->ml + 1);
+  T->seg_at[0] = 0;
+  T->cl_kind = 0;
+  T->au_kind = 0;
+  T->cl = 0;
+  T->cl_seg = T->au_seg = 255;
+  T->cl_slot = T->au_slot = -1;
+  ncb -= T->pe - T->ml - 1;
+  for (int i = 0; i < T->nl; i++) {
+    int s = T->ls[i], e = T->le[i], c = b[s] | 0x20, slotted = T->lj[i] >= 0;
+    if (slotted && (T->nc[i] == 0 || T->lj[i] < T->nc[i] || s + T->lj[i] > e)) return 0;
+    int is_cl = c == 'c' && e - s >= 14 && FP_HNAME(b + s, "content-", "length\0\0", 6);
+    int is_au = !T->au_kind && c == 'a' && e - s >= 14 && FP_HNAME(b + s, "authoriz", "ation:\0\0", 6);
+    if (slotted && fp_tm_is_conn(b, s, e)) return 0; // a Connection line's verdict depends on its whole value
+    if (is_cl) {
+      T->cl_seg = (uint8_t)seg;
+      T->cl_s = (uint16_t)(s - cur);
+      T->cl_slot = (int8_t)(slotted ? seg : -1);
+      T->cl_e = (uint16_t)(e - cur);
+      if (slotted) T->cl_kind = 2;
+      else {
+        int have = 0;
+        T->cl = 0;
+        if (fp_hdr_ct(b, s, e, &T->cl, &have)) return 0;
+        T->cl_kind = 1;
+      }
+    }
+    if (is_au) {
+      T->au_kind = 1;
+      T->au_seg = (uint8_t)seg;
+      T->au_s = (uint16_t)(s - cur);
+      T->au_slot = (int8_t)(slotted ? seg : -1);
+      T->au_e = (uint16_t)(e - cur);
+    }
+    if (!slotted) continue;
+    if (seg == FP_TM_SLOTS) return 0;
+    int n = s + T->lj[i] - cur; // segment seg = [cur, slot start)
+    if (at + n + 32 > (int)sizeof T->cb) return 0;
+    T->seg_at[seg] = (uint16_t)at;
+    T->seg_len[seg] = (uint16_t)n;
+    memcpy(T->cb + at, b + cur, n);
+    at += (n + 31) & ~31;
+    ncb -= e - (s + T->lj[i]);
+    seg++;
+    cur = e;
+  }
+  int n = T->hend - cur;
+  if (at + n + 32 > (int)sizeof T->cb || ncb > FP_TM_CB) return 0;
+  T->seg_at[seg] = (uint16_t)at;
+  T->seg_len[seg] = (uint16_t)n;
+  memcpy(T->cb + at, b + cur, n);
+  T->nslot = (uint8_t)seg;
+  return 1;
+}
+// Anti-unify template T with request b (shape S): -1 = another skeleton, 0 = same skeleton and nothing
+// to change (or the result would not fit), 1 = the values that differ (and the method) became slots.
+static inline int fp_tm_generalize(fp_tm_t *T, const char *b, const fp_tm_t *S) {
+  if (S->nl != T->nl) return -1;
+  int16_t lj[FP_TM_LINES];
+  int changed = 0, ms = T->mslot || S->ml != T->ml || memcmp(b, T->rep, T->ml);
+  for (int i = 0; i < T->nl; i++) {
+    const char *x = T->rep + T->ls[i], *y = b + S->ls[i];
+    int lx = T->le[i] - T->ls[i], ly = S->le[i] - S->ls[i], nc = T->nc[i];
+    if (nc != S->nc[i] || (nc ? memcmp(x, y, nc) : lx != ly || memcmp(x, y, lx))) return -1;
+    lj[i] = T->lj[i];
+    int lim = lj[i] >= 0 ? lj[i] : lx, cp = 0;
+    if (lim > ly) lim = ly;
+    while (cp < lim && x[cp] == y[cp]) cp++;
+    if (lj[i] < 0 && cp == lx && lx == ly) continue;          // identical constant line
+    if (fp_tm_is_conn(T->rep, T->ls[i], T->le[i])) return -1; // a Connection value never becomes a slot
+    if (lj[i] >= 0 && cp == lj[i]) continue;                  // same slot prefix
+    lj[i] = (int16_t)cp;
+    changed = 1; // cp >= nc: the names are equal
+  }
+  if (!changed && ms == T->mslot) return 0;
+  int16_t old[FP_TM_LINES];
+  int oms = T->mslot;
+  memcpy(old, T->lj, sizeof old);
+  memcpy(T->lj, lj, sizeof lj);
+  T->mslot = (uint8_t)ms;
+  if (fp_tm_compile(T)) return 1;
+  memcpy(T->lj, old, sizeof old);
+  T->mslot = (uint8_t)oms;
+  fp_tm_compile(T); // too many slots / constants: keep the old one
+  return 0;
+}
+// A complete request the general parser accepted and no template matched (cold, rate-limited). It
+// generalizes a template with its skeleton; else, with a pending request of its skeleton (seen once
+// before), it becomes a template; else it waits in the pending set. A template is evicted only if it got
+// under 1/16 of the last window's hits; a template evicted young makes learning rarer (backoff).
+__attribute__((noinline, cold)) static void fp_tm_learn(fp_tmpl_t *X, const char *b, int hend) {
+  if (X->cool > 0) {
+    X->cool--;
+    return;
+  }
+  X->cool = X->backoff;
+  fp_tm_t *S = &X->scratch;
+  if (!fp_tm_shape(b, hend, S)) return;
+  for (int i = 0; i < X->n; i++) {
+    int g = fp_tm_generalize(&X->t[X->ord[i]], b, S);
+    if (g >= 0) {
+      X->generalized += g;
+      return;
+    }
+  }
+  for (int i = 0; i < X->npend; i++) {
+    fp_tm_t *P = &X->pend[i];
+    if (fp_tm_generalize(P, b, S) < 0) continue;
+    int slot;
+    if (X->n < FP_TM_N) {
+      slot = X->n;
+      X->ord[X->n++] = (uint8_t)slot;
+    } else {
+      int wt = X->ord[X->n - 1];
+      if (X->t[wt].whits * 16 > (uint32_t)X->whit + 16) return;
+      slot = wt;
+      X->evicted++;
+      if (X->t[wt].hits < 64) X->backoff = X->backoff < 4096 ? X->backoff * 2 + 1 : 8191; // died young: learn rarer
+    }
+    P->hits = 0;
+    P->whits = 0;
+    X->t[slot] = *P;
+    X->learned++;
+    *P = X->pend[--X->npend];
+    return;
+  }
+  if (!fp_tm_compile(S)) return;
+  int i = X->npend < FP_TM_PEND ? X->npend++ : (int)(X->pnext++ % FP_TM_PEND);
+  X->pend[i] = *S;
+}
+// end of a window of 1024 requests: reorder by hits, decay, and stop trying while templates don't pay
+__attribute__((noinline, cold)) static void fp_tm_window(fp_tmpl_t *X) {
+  for (int i = 1; i < X->n; i++) // insertion sort by this window's hits, then all-time hits
+    for (int j = i; j > 0; j--) {
+      const fp_tm_t *a = &X->t[X->ord[j - 1]], *c = &X->t[X->ord[j]];
+      if (c->whits < a->whits || (c->whits == a->whits && c->hits <= a->hits)) break;
+      uint8_t o = X->ord[j];
+      X->ord[j] = X->ord[j - 1];
+      X->ord[j - 1] = o;
+    }
+  // Cost (sampled requests, see fp_core_tmpl): templates whose hits take more cycles than the general
+  // parser are switched off; the table bypasses while the template path saves nothing per request
+  // (a miss costs the failed loop). Sampling continues during bypass, so it ends when that changes.
+  for (int i = 0; i < X->n; i++) {
+    fp_tm_t *T = &X->t[i];
+    if (T->ns >= 16 && T->cy_t > T->cy_g + T->cy_g / 8) T->slow = 1; // > 12.5% slower than the general parser
+    T->hits = (T->hits >> 1) + T->whits;
+    T->whits = 0;
+  }
+  if (++X->nwin % 64 == 0) // every 64 windows: measure the switched-off ones afresh
+    for (int i = 0; i < X->n; i++)
+      if (X->t[i].slow) {
+        X->t[i].slow = 0;
+        X->t[i].ns = X->t[i].cy_t = X->t[i].cy_g = 0;
+      }
+#ifndef FP_TM_NOTICK
+  X->bypass = X->nsave >= 32 && X->save < 0;
+  if (X->nwin % 8 == 1) {
+    X->save -= X->save / 4;
+    X->nsave -= X->nsave / 4;
+  } // decay once per sampling burst
+#endif
+  if (!X->bypass && X->whit * 2 >= X->wreq) X->backoff = 0;
+  X->wreq = 0;
+  X->whit = 0;
+}
+
+// the try loop: -2 = no template matched; *hit = the template that did
+FP_INLINE int fp_tm_loop(const char *b, int len, req_t *r, fp_tmpl_t *X, const int simd, fp_tm_t **hit) {
+  int me, pe, lim = len < FP_MAXHDR ? len : FP_MAXHDR;
+  if (!fp_tm_rl(simd, b, lim, &me, &pe)) return -2;
+  for (int i = 0; i < X->n; i++) {
+    fp_tm_t *T = &X->t[X->ord[i]];
+    if (T->slow) continue;
+    int c = fp_tm_try(b, len, r, T, simd, lim, me, pe);
+    if (c != -2) {
+      *hit = T;
+      return c;
+    }
+  }
+  return -2;
+}
+FP_INLINE int fp_core_gen(const char *b, int len, req_t *r, const int simd) {
+  return simd ? FP_CORE(b, len, r) : fp_core_walk(b, len, r, 0);
+}
+// out of line: misses and cost samples call the general parser, so the template entry stays small
+__attribute__((noinline)) static int fp_tm_gen1(const char *b, int len, req_t *r) { return fp_core_gen(b, len, r, 1); }
+__attribute__((noinline)) static int fp_tm_gen0(const char *b, int len, req_t *r) { return fp_core_gen(b, len, r, 0); }
+// The first 16 requests of every 8th 1024-request window are cost samples: the general parser and the template
+// loop both run on the same bytes (alternating which goes first; the first 2 of the burst only warm both
+// paths' code and predictors), and the saving (general - template path; a miss saves minus the failed
+// loop) is accumulated, overall and per template that hit. The result is the template path's, as always.
+__attribute__((noinline, cold)) static int fp_tm_sample(const char *b, int len, req_t *r, fp_tmpl_t *X,
+                                                        const int simd) {
+  fp_tm_t *T = 0;
+  int c;
+#ifndef FP_TM_NOTICK
+  req_t g;
+  uint64_t t0, t1, t2;
+  int first = X->wreq & 1;
+  if (first) {
+    t0 = fp_tm_tick();
+    simd ? fp_tm_gen1(b, len, &g) : fp_tm_gen0(b, len, &g);
+    t1 = fp_tm_tick();
+    c = fp_tm_loop(b, len, r, X, simd, &T);
+    t2 = fp_tm_tick();
+  } else {
+    t0 = fp_tm_tick();
+    c = fp_tm_loop(b, len, r, X, simd, &T);
+    t1 = fp_tm_tick();
+    simd ? fp_tm_gen1(b, len, &g) : fp_tm_gen0(b, len, &g);
+    t2 = fp_tm_tick();
+  }
+  int64_t ct = (int64_t)(first ? t2 - t1 : t1 - t0), cg = (int64_t)(first ? t1 - t0 : t2 - t1);
+  if (X->wreq > 2 && ct < (1 << 16) && cg < (1 << 16)) { // else warm-up, or preempted
+    X->save += T ? cg - ct : -ct;
+    X->nsave++;
+    if (T) {
+      if (T->ns >= 64) {
+        T->cy_t -= T->cy_t / 64;
+        T->cy_g -= T->cy_g / 64;
+      } else T->ns++;
+      T->cy_t += (uint32_t)ct;
+      T->cy_g += (uint32_t)cg;
+    }
+  }
+#else
+  c = fp_tm_loop(b, len, r, X, simd, &T);
+#endif
+  if (c != -2) {
+    T->whits++;
+    X->whit++;
+    X->hits++;
+    return c;
+  }
+  c = simd ? fp_tm_gen1(b, len, r) : fp_tm_gen0(b, len, r);
+  if (c > 0) {
+    X->misses++;
+    fp_tm_learn(X, b, r->body_off);
+  }
+  return c;
+}
+FP_INLINE int fp_core_tmpl(const char *b, int len, req_t *r, fp_tmpl_t *X, const int simd) {
+  if (++X->wreq >= 1024) fp_tm_window(X);
+  if (FP_UNLIKELY(X->wreq <= 16) && !(X->nwin & 7) && X->n) return fp_tm_sample(b, len, r, X, simd);
+  if (FP_UNLIKELY(X->bypass)) return simd ? fp_tm_gen1(b, len, r) : fp_tm_gen0(b, len, r); // learns from samples only
+  fp_tm_t *T = 0;
+  int c = fp_tm_loop(b, len, r, X, simd, &T);
+  if (c != -2) {
+    T->whits++;
+    X->whit++;
+    X->hits++;
+    return c;
+  }
+  c = simd ? fp_tm_gen1(b, len, r) : fp_tm_gen0(b, len, r);
+  if (c > 0) {
+    X->misses++;
+    fp_tm_learn(X, b, r->body_off);
+  }
+  return c;
+}
+static inline int fast_parse_tmpl(const char *b, int len, req_t *r, fp_tmpl_t *X) {
+  return fp_core_tmpl(b, len, r, X, FP_BACKEND != 0);
+}
+static inline int fast_parse_tmpl_scalar(const char *b, int len, req_t *r, fp_tmpl_t *X) {
+  return fp_core_tmpl(b, len, r, X, 0);
+}
+
 // ---------------- pipelined batch ----------------
 // Parses consecutive complete requests from buf[0..len) into out[0..max) (same padding contract).
 //   n      = requests parsed; request i ends at out[i].body_off + out[i].body_len (offsets relative to buf)
@@ -1095,5 +1690,8 @@ static inline fp_batch_t fast_parse_many_scalar(const char *buf, int len, req_t 
 }
 static inline fp_batch_t fast_parse_many_learn(const char *buf, int len, req_t *out, int max, fp_learn_t *T) {
   FP_MANY(fast_parse_learn(b, l, r, T))
+}
+static inline fp_batch_t fast_parse_many_tmpl(const char *buf, int len, req_t *out, int max, fp_tmpl_t *X) {
+  FP_MANY(fast_parse_tmpl(b, l, r, X))
 }
 #undef FP_MANY

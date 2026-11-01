@@ -163,6 +163,29 @@ int main(int argc, char **argv) {
         }
     free(b);
   }
+  // learned templates on a spec that asks for headers: a route that asks declines (the general parser fills hdr),
+  // one that doesn't uses its template; both give exactly fast_parse's result
+  {
+    static fp_tmpl_t X;
+    static const char *R[] = { "GET /feed HTTP/1.1\r\nHost: a\r\nIf-None-Match: \"x1\"\r\nAccept: */*\r\n\r\n",
+                               "GET /health HTTP/1.1\r\nHost: a\r\nIf-None-Match: \"x1\"\r\nAccept: */*\r\n\r\n" };
+    for (int k = 0; k < 2; k++) {
+      memset(&X, 0, sizeof X);
+      int n = (int)strlen(R[k]);
+      char *b = fz_copy(R[k], n, 0);
+      for (int i = 0; i < 4; i++) {
+        req_t f, t;
+        memset(&f, 0, sizeof f);
+        memset(&t, 0, sizeof t);
+        int a = fast_parse(b, n, &f), c = fast_parse_tmpl(b, n, &t, &X);
+        if (!same(a, &f, c, &t)) FAIL("template on %s: %d vs fast_parse %d\n", k ? "/health" : "/feed", c, a);
+      }
+      if ((X.hits > 0) != (k == 1))
+        FAIL("templates: %llu hits on %s (want %s)\n", (unsigned long long)X.hits, k ? "/health" : "/feed",
+             k ? "some" : "none");
+      free(b);
+    }
+  }
   printf(
       "spec headers (%s): %d requests, %ld clean, %ld on the fast path, %ld fbparse == ref, %ld values extracted\nTOTAL FAILURES: %d\n",
       FP_SPEC_NAME, N, clean, fast_hits, fb_ok, extracted, fails);

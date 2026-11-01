@@ -32,6 +32,7 @@ $CXX -std=c++2b -O3 $MARCH -w -I$T/uws/src -Ivendor/pico -c bench/uws_shim.cpp -
 for o in hand:fastparse.h gen:fastparse_gen.h pgo:fastparse_pgo.h; do
   $CC $F $INC "-DOURS_HDR=\"${o#*:}\"" -DOURS=${o%%:*} -c bench/ours.c -o $B/x_ours_${o%%:*}.o
 done
+$CC $F $INC '-DOURS_HDR="fastparse.h"' -DOURS=hnc -DFP_TM_NOCOST -c bench/ours.c -o $B/x_ours_hnc.o # templates, no cost model
 OBJS="$OBJS $B/x_pico.o $B/x_lx.o"
 DEFS=""
 LIBS=""
