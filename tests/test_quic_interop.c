@@ -608,6 +608,12 @@ static int run(int nreq, int loss, int reorder) {
   CHECK(!sv.q.closing && !sv.q.draining, "server closed the connection: code 0x%llx frame 0x%llx",
         (unsigned long long)sv.q.close_code, (unsigned long long)sv.q.close_frame);
   CHECK(sv.errors == 0, "server stream errors %ld", sv.errors);
+  /* reordering alone must not collapse the window: losses that turn out spurious are undone and the
+   * reordering thresholds adapt (NewReno without undo took about 78 simulated seconds here) */
+  if (reorder && !loss)
+    CHECK((NOW_NS - start) / 1000000000 < 5 && sv.q.spurious_losses > 0 && sv.q.cc_undos > 0,
+          "reordering: %.1f simulated s, %llu spurious losses, %llu window reductions undone",
+          (NOW_NS - start) / 1e9, (unsigned long long)sv.q.spurious_losses, (unsigned long long)sv.q.cc_undos);
   printf(
       "  loss %2d%% reorder %d%s: %d requests, %.1f simulated s, %ld datagrams (%ld lost), cwnd %llu, srtt %lld ms, pre-validation %llu/%llu B\n",
       loss, reorder, BLACKHOLE ? " blackhole" : "", nreq, (NOW_NS - start) / 1e9, SENT_DGRAMS, LOST_DGRAMS,
