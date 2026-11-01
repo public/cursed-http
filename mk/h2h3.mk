@@ -122,6 +122,25 @@ $(H2B)/h3_server: examples/h3_server.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls
 $(H2B)/bench_h2h3: bench/bench_h2h3.c bench/h2_headers.h $(H2HDRS) $(H2B)/libnghttp2.a $(H2B)/libnghttp3.a
 	$(H2CC) -Ibench -DH2_MAX_STREAMS=1000 $(N2INC) $(N3INC) $< $(H2B)/libnghttp2.a $(H2B)/libnghttp3.a -o $@
 
+# bench_h2h3 with the rival decoders (scripts/fetch-thirdparty.sh ls-hpack ls-qpack h2o): LiteSpeed's
+# ls-hpack / ls-qpack and h2o's HPACK / QPACK, each built -O3 $(MARCH) (at least their own release flags)
+H2O := $(TP)/h2o
+RIVAL_INC := -I$(TP)/ls-hpack -I$(TP)/ls-qpack -DH2O_USE_LIBUV=0 -I$(H2O)/include -I$(H2O)/deps/picotls/include \
+  -I$(H2O)/deps/quicly/include -I$(H2O)/deps/klib -I$(H2O)/deps/golombset -I$(H2O)/deps/libgkc -I$(H2O)/deps/cloexec \
+  -I$(H2O)/deps/yoml -I$(H2O)/deps/picohttpparser -I$(H2O)/deps/hiredis -I$(H2O)/deps/libyrmcds
+RIVAL_SRC := $(TP)/ls-hpack/lshpack.c $(TP)/ls-qpack/lsqpack.c $(TP)/ls-qpack/deps/xxhash/xxhash.c \
+  $(addprefix $(H2O)/lib/,http2/hpack.c http3/qpack.c http2/frame.c common/memory.c common/string.c common/token.c \
+  common/url.c common/file.c core/headers.c)
+$(H2B)/rivals/%.o: $(TP)/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -O3 $(MARCH) -w -DXXH_HEADER_NAME=\"xxhash.h\" -include stddef.h -I$(TP)/ls-hpack/deps/xxhash $(RIVAL_INC) -I$(dir $<) -c $< -o $@
+$(H2B)/bench_h2h3_rivals: bench/bench_h2h3.c bench/h2_headers.h $(H2HDRS) $(H2B)/libnghttp2.a $(H2B)/libnghttp3.a \
+  $(patsubst $(TP)/%.c,$(H2B)/rivals/%.o,$(RIVAL_SRC))
+	$(H2CC) -Ibench -DRIVALS -DH2_MAX_STREAMS=1000 $(N2INC) $(N3INC) $(RIVAL_INC) $(filter %.c %.o %.a,$^) -lcrypto -lm -o $@
+bench-h2h3-rivals: $(H2B)/bench_h2h3_rivals
+	$(H2B)/bench_h2h3_rivals
+.PHONY: bench-h2h3-rivals
+
 # the example servers against real clients (curl over HTTP/2, aioquic over HTTP/3), loopback sockets
 real-clients:
 	bash tests/real_clients.sh

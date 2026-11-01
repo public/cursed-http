@@ -1,0 +1,69 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="810" viewBox="0 0 760 810" font-family="-apple-system,Segoe UI,Helvetica,Arial,sans-serif" font-size="13">
+<rect width="760" height="810" fill="#ffffff"/>
+<text x="16" y="26" font-size="15" font-weight="600" fill="#1f2328">ns per request, lower is better · Xeon Platinum 8260, in memory, a Chrome request</text>
+<text x="16" y="62" font-weight="600" fill="#1f2328">HTTP/2 server: request in, response out (h2.h's job)</text>
+<text x="182" y="87" text-anchor="end" fill="#1f2328" font-weight="600">h2.h</text>
+<rect x="190" y="74" width="8.9" height="18" rx="3" fill="#2f81f7"/>
+<text x="204.9" y="87" fill="#1f2328">565</text>
+<text x="182" y="113" text-anchor="end" fill="#1f2328">nghttp2</text>
+<rect x="190" y="100" width="36.5" height="18" rx="3" fill="#8c959f"/>
+<text x="232.5" y="113" fill="#1f2328">2,319</text>
+<text x="182" y="139" text-anchor="end" fill="#1f2328">h2 (Rust, hyper's)</text>
+<rect x="190" y="126" width="81.0" height="18" rx="3" fill="#8c959f"/>
+<text x="277.0" y="139" fill="#1f2328">5,141</text>
+<text x="182" y="165" text-anchor="end" fill="#1f2328">x/net/http2 (Go)</text>
+<rect x="190" y="152" width="470.0" height="18" rx="3" fill="#8c959f"/>
+<text x="666.0" y="165" fill="#1f2328">29,824</text>
+<text x="16" y="212" font-weight="600" fill="#1f2328">HPACK decode (hpack.h's job)</text>
+<text x="182" y="237" text-anchor="end" fill="#1f2328" font-weight="600">hpack.h</text>
+<rect x="190" y="224" width="180.8" height="18" rx="3" fill="#2f81f7"/>
+<text x="376.8" y="237" fill="#1f2328">323</text>
+<text x="182" y="263" text-anchor="end" fill="#1f2328">ls-hpack (LiteSpeed)</text>
+<rect x="190" y="250" width="250.1" height="18" rx="3" fill="#8c959f"/>
+<text x="446.1" y="263" fill="#1f2328">447</text>
+<text x="182" y="289" text-anchor="end" fill="#1f2328">nghttp2</text>
+<rect x="190" y="276" width="351.1" height="18" rx="3" fill="#8c959f"/>
+<text x="547.1" y="289" fill="#1f2328">627</text>
+<text x="182" y="315" text-anchor="end" fill="#1f2328">h2o</text>
+<rect x="190" y="302" width="412.8" height="18" rx="3" fill="#8c959f"/>
+<text x="608.8" y="315" fill="#1f2328">738</text>
+<text x="182" y="341" text-anchor="end" fill="#1f2328">x/net/http2/hpack (Go)</text>
+<rect x="190" y="328" width="470.0" height="18" rx="3" fill="#8c959f"/>
+<text x="666.0" y="341" fill="#1f2328">840</text>
+<text x="16" y="388" font-weight="600" fill="#1f2328">HTTP/3 server above QUIC (h3.h's job)</text>
+<text x="182" y="413" text-anchor="end" fill="#1f2328" font-weight="600">h3.h</text>
+<rect x="190" y="400" width="305.8" height="18" rx="3" fill="#2f81f7"/>
+<text x="501.8" y="413" fill="#1f2328">3,163</text>
+<text x="182" y="439" text-anchor="end" fill="#1f2328">nghttp3</text>
+<rect x="190" y="426" width="470.0" height="18" rx="3" fill="#8c959f"/>
+<text x="666.0" y="439" fill="#1f2328">4,861</text>
+<text x="16" y="486" font-weight="600" fill="#1f2328">QPACK decode, 4 KB dynamic table (qpack.h's job)</text>
+<text x="182" y="511" text-anchor="end" fill="#1f2328" font-weight="600">qpack.h</text>
+<rect x="190" y="498" width="324.7" height="18" rx="3" fill="#2f81f7"/>
+<text x="520.7" y="511" fill="#1f2328">1,265</text>
+<text x="182" y="537" text-anchor="end" fill="#1f2328">ls-qpack (LiteSpeed)</text>
+<rect x="190" y="524" width="324.4" height="18" rx="3" fill="#8c959f"/>
+<text x="520.4" y="537" fill="#1f2328">1,264</text>
+<text x="182" y="563" text-anchor="end" fill="#1f2328">h2o</text>
+<rect x="190" y="550" width="467.4" height="18" rx="3" fill="#8c959f"/>
+<text x="663.4" y="563" fill="#1f2328">1,821</text>
+<text x="182" y="589" text-anchor="end" fill="#1f2328">nghttp3</text>
+<rect x="190" y="576" width="470.0" height="18" rx="3" fill="#8c959f"/>
+<text x="666.0" y="589" fill="#1f2328">1,831</text>
+<text x="16" y="636" font-weight="600" fill="#1f2328">QPACK decode, static table only</text>
+<text x="182" y="661" text-anchor="end" fill="#1f2328" font-weight="600">qpack.h</text>
+<rect x="190" y="648" width="136.4" height="18" rx="3" fill="#2f81f7"/>
+<text x="332.4" y="661" fill="#1f2328">2,631</text>
+<text x="182" y="687" text-anchor="end" fill="#1f2328">ls-qpack (LiteSpeed)</text>
+<rect x="190" y="674" width="137.5" height="18" rx="3" fill="#8c959f"/>
+<text x="333.5" y="687" fill="#1f2328">2,651</text>
+<text x="182" y="713" text-anchor="end" fill="#1f2328">nghttp3</text>
+<rect x="190" y="700" width="208.1" height="18" rx="3" fill="#8c959f"/>
+<text x="404.1" y="713" fill="#1f2328">4,013</text>
+<text x="182" y="739" text-anchor="end" fill="#1f2328">h2o</text>
+<rect x="190" y="726" width="274.1" height="18" rx="3" fill="#8c959f"/>
+<text x="470.1" y="739" fill="#1f2328">5,284</text>
+<text x="182" y="765" text-anchor="end" fill="#1f2328">quic-go/qpack (Go)</text>
+<rect x="190" y="752" width="470.0" height="18" rx="3" fill="#8c959f"/>
+<text x="666.0" y="765" fill="#1f2328">9,062</text>
+</svg>

@@ -153,10 +153,83 @@ they produce. The full design, test list, limits and benchmarks are in **[H2H3.m
 Everything but `quic.h` is dependency-free and never allocates. `quic.h` grows stream buffers through a
 caller-supplied allocator.
 
-**Fast.** On the Xeon, `h2.h` uses 3.5–4.9× less CPU per request than an nghttp2 server, in memory (browser
-request: 2,337 → 525 ns). HPACK decoding is 1.8–2.3× faster than nghttp2's, QPACK 1.4–2.5× faster than nghttp3's.
-The main reason: each header is validated once, when it enters the dynamic table, and the verdict is cached.
-nghttp2 and nghttp3 re-check every byte of every header on every request.
+### Are we fast? (HTTP/2 and HTTP/3)
+
+![HTTP/2 and HTTP/3 benchmark chart](bench/bench_h2h3.svg)
+
+Xeon Platinum 8260 (Cascade Lake), gcc 13.3 `-O3 -march=native`, ns per request, in memory: no sockets and no TLS.
+Every C rival is built `-O3 -march=native`, at least as aggressively as its own release build. Before it is timed, every
+decoder's output is checked field by field against the request it encodes, and every server must answer every
+request. Results are from exp1361 and exp1362.
+
+**Server CPU per request**, 256 requests on one connection. The same client bytes go into each server, and each
+answers `:status 200` with a 13-byte body:
+
+| server | browser | gRPC | h2load |
+|---|---|---|---|
+| **`h2.h`** | **565** | **769** | **197** |
+| nghttp2 1.70 | 2,319 (4.1×) | 2,422 (3.1×) | 989 (5.0×) |
+| h2 0.4.20 (Rust, hyper's HTTP/2) ¹ | 5,141 (9.1×) | 5,552 (7.2×) | 2,869 (14.6×) |
+| golang.org/x/net/http2 v0.62 (Go 1.27) ¹ | 29,824 (53×) | 29,211 (38×) | 25,267 (128×) |
+| **`h3.h`** (HTTP/3 above QUIC) ² | **3,163** | **2,300** | **1,132** |
+| nghttp3 1.18 ² | 4,861 (1.5×) | 3,161 (1.4×) | 1,368 (1.2×) |
+
+**Header decoding** per request, warm 4 KB table:
+
+| decoder | browser | gRPC | h2load |
+|---|---|---|---|
+| **`hpack.h`** | **323** | **524** | **52** |
+| ls-hpack 2.3.5 (LiteSpeed) | 447 (1.4×) | 782 (1.5×) | 86 (1.7×) |
+| nghttp2 1.70 | 627 (1.9×) | 1,221 (2.3×) | 135 (2.6×) |
+| h2o (2026-11-01) | 738 (2.3×) | 1,401 (2.7×) | 81 (1.6×) |
+| x/net/http2/hpack (Go) | 840 (2.6×) | 1,889 (3.6×) | 113 (2.2×) |
+| **`qpack.h`**, dynamic table | **1,265** | 1,077 | **88** |
+| ls-qpack 2.7.0 (LiteSpeed), dynamic | 1,264 (1.0×) | **1,068 (0.99×)** | 195 (2.2×) |
+| h2o, dynamic ³ | 1,821 (1.4×) | 1,798 (1.7×) | 139 (1.6×) |
+| nghttp3 1.18, dynamic | 1,831 (1.4×) | 1,641 (1.5×) | 220 (2.5×) |
+| **`qpack.h`**, static table only | **2,631** | 1,291 | **149** |
+| ls-qpack, static only | 2,651 (1.0×) | **1,206 (0.93×)** | 237 (1.6×) |
+| nghttp3, static only | 4,013 (1.5×) | 1,945 (1.5×) | 348 (2.3×) |
+| h2o, static only ³ | 5,285 (2.0×) | 2,186 (1.7×) | 307 (2.1×) |
+| quic-go/qpack 0.6 (Go, static only) | 9,062 (3.4×) | 3,626 (2.8×) | 456 (3.1×) |
+
+- **Where we're not ahead.** LiteSpeed's ls-qpack is within 1% of `qpack.h` on the browser set, and 1–7% faster
+  on the gRPC set. `h3.h` leads nghttp3 by only 1.2× on the small h2load requests, which points at per-stream
+  overhead in `h3.h` rather than in QPACK.
+- **Why `hpack.h` and `h2.h` win.** Each header is validated once, when it enters the dynamic table, and the
+  verdict is cached. nghttp2 and nghttp3 re-check every byte of every header on every request. ls-hpack doesn't
+  validate at all, and h2o validates like we do.
+
+¹ Go and Rust are measured by their own harnesses ([`bench/go-h2h3`](bench/go-h2h3),
+[`bench/rust-h2`](bench/rust-h2)) on the same bytes, dumped with `bench_h2h3 --dump`. Each runs on one thread
+(`GOMAXPROCS=1`, a current-thread tokio runtime) through an in-memory connection; Rust is built with fat LTO and
+`target-cpu=native`. Their time includes the in-memory pipe and counting the responses, which is small next to
+these numbers. Go's server also starts a goroutine per request and adds `Date` and `Content-Length` headers.
+² An nghttp3 client's stream bytes, with its QPACK encoder using a 4 KB dynamic table, replayed into each server
+over an emulated stream transport. QUIC itself is not included.
+³ h2o's only public QPACK section decoder is its request parser, so its numbers also include h2o's request checks
+and building its header vector. Its HPACK row uses the per-field decoder only.
+
+Reproduce:
+
+```bash
+scripts/fetch-thirdparty.sh nghttp2 nghttp3 ls-hpack ls-qpack h2o
+make bench-h2h3-rivals
+```
+
+For the Go and Rust rows (Go 1.26+, cargo):
+
+```bash
+build/h2h3/bench_h2h3_rivals --dump build/h2h3/corpus
+```
+
+```bash
+(cd bench/go-h2h3 && go run . ../../build/h2h3/corpus)
+```
+
+```bash
+(cd bench/rust-h2 && cargo run --release -- ../../build/h2h3/corpus)
+```
 
 **Tested** against the reference implementations and real clients:
 - h2spec strict mode, 147/147;
@@ -605,6 +678,7 @@ make extras-check # both, as quick correctness gates (CI / Docker)
 make test-h2h3    # HPACK, h2, QPACK, h3 and QUIC tests, differential against nghttp2 / nghttp3 / ngtcp2
 make h2spec       # HTTP/2 conformance (Go)
 make real-clients # curl over HTTP/2 and aioquic over HTTP/3, against the example servers
+make bench-h2h3-rivals # + ls-hpack, ls-qpack, h2o (fetch them first); bench/go-h2h3, bench/rust-h2 for Go / Rust
 make mutants-h2 mutants-quic
 ```
 

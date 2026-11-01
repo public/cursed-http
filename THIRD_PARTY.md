@@ -69,9 +69,17 @@ and keeps its own licence.
 | h2spec | https://github.com/summerwind/h2spec v2.6.0 | `70ac22940108` | MIT | HTTP/2 conformance suite (`make h2spec`) |
 | picotls | https://github.com/h2o/picotls | `1e034d8418c1` | MIT | **the TLS 1.3 handshake `include/quic.h` builds on** (with OpenSSL libcrypto) |
 | ngtcp2 | https://github.com/ngtcp2/ngtcp2 v1.25.0 | `f9e9ff01ad2c` | MIT | QUIC reference client (`make test-h2h3`) |
+| ls-hpack | https://github.com/litespeedtech/ls-hpack v2.3.5 | `cf0f70dd10b3` | MIT | HPACK comparison benchmark (`make bench-h2h3-rivals`) |
+| ls-qpack | https://github.com/litespeedtech/ls-qpack v2.7.0 | `91567706c41c` | MIT | QPACK comparison benchmark (`make bench-h2h3-rivals`) |
+| h2o | https://github.com/h2o/h2o (master, 2026-11-01) | `0d22c901981c` | MIT | HPACK / QPACK comparison benchmark (9 of its source files) |
 
 `make real-clients` installs [aioquic](https://github.com/aiortc/aioquic) 1.6.1 (BSD-3-Clause) from PyPI into a
 virtualenv under `build/`, as the HTTP/3 client.
+
+The HTTP/2 / HTTP/3 comparison harnesses download their dependencies through their own toolchains, pinned by
+their lock files: `bench/go-h2h3` uses golang.org/x/net v0.62.0 (BSD-3-Clause) and github.com/quic-go/qpack v0.6.0
+(MIT), pinned by `go.sum`; `bench/rust-h2` uses the h2 0.4.20, http, bytes and tokio crates (MIT), pinned by
+`Cargo.lock`.
 
 `make compare-go` builds `bench/go-fasthttp` against [valyala/fasthttp](https://github.com/valyala/fasthttp) v1.76.0 (MIT)
 and its dependencies, pinned by `bench/go-fasthttp/go.sum` and downloaded by the Go toolchain into its module cache.
