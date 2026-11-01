@@ -79,6 +79,19 @@ M = [
         "  if (sz > d->cap) return QP_E_ENCODER; /* §3.2.2: an entry larger than the capacity is an error */",
         "",
     ),
+    # the Huffman table's check bits: hp__vok trusting them blindly, the decoder not collecting them
+    (
+        "hpack.h",
+        "  if (fl & HH_F_VALUE) return hv_check_value_rfc9113(p, n);",
+        "  if (0) return hv_check_value_rfc9113(p, n);",
+    ),
+    ("hfield.h", "    dst += (e >> 24) & 3;\n    fl |= e;", "    dst += (e >> 24) & 3;"),
+    # h3_pending's output bitmap: a response that is never queued
+    (
+        "h3.h",
+        "  if (end) s->flags |= H3_ST_BODY_END;\n  h3__want(c, s);\n  return 0;\n}\nstatic inline int h3_data",
+        "  if (end) s->flags |= H3_ST_BODY_END;\n  return 0;\n}\nstatic inline int h3_data",
+    ),
 ]
 for i, (f, a, b) in enumerate(M, 1):
     d = f"{out}/{i}"
