@@ -36,14 +36,14 @@ typedef struct { uint8_t d[1500]; size_t n; uint64_t at, seq; } dgram;
 static uint64_t SEQ;
 typedef struct { dgram q[4096]; int n; } wire;
 static wire TO_SRV, TO_CLI;
-static int LOSS, REORDER, BLACKHOLE; /* BLACKHOLE: drop client->server after its first datagram, for 3 s */
+static int LOSS, REORDER, BLACKHOLE; /* BLACKHOLE: drop client->server after its first datagram, for 8 s */
 static uint64_t BLACKHOLE_UNTIL;
 static long SENT_DGRAMS, LOST_DGRAMS;
 static uint64_t TO_SRV_BYTES, TO_CLI_BYTES; /* before the server validated the client's address */
 static void put(wire *w, const uint8_t *d, size_t n) {
   SENT_DGRAMS++;
   if (BLACKHOLE && w == &TO_SRV) {
-    if (!BLACKHOLE_UNTIL) BLACKHOLE_UNTIL = NOW_NS + 3000000000ull; /* the first datagram goes through */
+    if (!BLACKHOLE_UNTIL) BLACKHOLE_UNTIL = NOW_NS + 8000000000ull; /* the first datagram goes through; 3 PTO rounds */
     else if (NOW_NS < BLACKHOLE_UNTIL) { LOST_DGRAMS++; return; }
   }
   if ((int)(rnd() % 100) < LOSS) { LOST_DGRAMS++; return; }
@@ -501,8 +501,9 @@ static int run(int nreq, int loss, int reorder) {
   CHECK(!sv.q.closing && !sv.q.draining, "server closed the connection: code 0x%llx frame 0x%llx", (unsigned long long)sv.q.close_code,
         (unsigned long long)sv.q.close_frame);
   CHECK(sv.errors == 0, "server stream errors %ld", sv.errors);
-  printf("  loss %2d%% reorder %d: %d requests, %.1f simulated s, %ld datagrams (%ld lost), cwnd %llu, srtt %lld ms\n", loss, reorder, nreq,
-         (NOW_NS - start) / 1e9, SENT_DGRAMS, LOST_DGRAMS, (unsigned long long)sv.q.cwnd, (long long)sv.q.smoothed_rtt);
+  printf("  loss %2d%% reorder %d%s: %d requests, %.1f simulated s, %ld datagrams (%ld lost), cwnd %llu, srtt %lld ms, pre-validation %llu/%llu B\n",
+         loss, reorder, BLACKHOLE ? " blackhole" : "", nreq, (NOW_NS - start) / 1e9, SENT_DGRAMS, LOST_DGRAMS, (unsigned long long)sv.q.cwnd,
+         (long long)sv.q.smoothed_rtt, (unsigned long long)TO_CLI_BYTES, (unsigned long long)TO_SRV_BYTES);
   SENT_DGRAMS = LOST_DGRAMS = 0;
   if (cl.h3) nghttp3_conn_del(cl.h3);
   ngtcp2_conn_del(cl.conn);
