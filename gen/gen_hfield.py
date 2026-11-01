@@ -75,14 +75,28 @@ for L in range(1, 31):
 w("static const uint64_t hh_lim[31] = {" + ",".join("0x%xull" % x for x in lim) + "};")
 w("static const int32_t hh_base[31] = {" + ",".join(map(str, base)) + "};")
 w("static const uint16_t hh_sorted[257] = {" + ",".join(map(str, order)) + "};")
+# the header checks' byte classes (hfield.h's hv__value_ok and hv__name_ok), so the decoder can
+# report whether any decoded byte would fail them
+tok = set(b"!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyz")
+
+
+def value_ok(b):
+    return (b >= 0x20 and b != 0x7F) or b == 9
+
+
 for K in (12,):  # HH_K in hfield.h
     vals = []
     for idx in range(1 << K):
         syms, used, lng = entry(idx, K)
         s0 = syms[0] if syms else 0
         s1 = syms[1] if len(syms) > 1 else 0
-        vals.append(s0 | s1 << 8 | used << 16 | len(syms) << 24 | (0x80 << 24 if lng else 0))
-    w("/* K=%d window: bits 0-15 sym0|sym1<<8, 16-23 bits consumed, 24-25 nsyms, 31 long code */" % K)
+        vbad = any(not value_ok(s) for s in syms)
+        nbad = any(s not in tok for s in syms)
+        vals.append(s0 | s1 << 8 | used << 16 | len(syms) << 24 | vbad << 26 | nbad << 27 | (0x80 << 24 if lng else 0))
+    w(
+        "/* K=%d window: bits 0-15 sym0|sym1<<8, 16-23 bits consumed, 24-25 nsyms, 26 a symbol fails"
+        " hv__value_ok, 27 one fails hv__name_ok, 31 long code */" % K
+    )
     w("static const uint32_t hh_dec%d[%d] = {" % (K, 1 << K))
     for i in range(0, len(vals), 8):
         w("  " + ",".join("0x%08xu" % v for v in vals[i : i + 8]) + ",")
@@ -112,7 +126,6 @@ def nib(name, ok):
     return lo, hi
 
 
-tok = set(b"!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyz")
 path = set(range(0x21, 0x7F)) | set(range(0x80, 0x100))
 auth = set(b"!$%&'()*+,-.0123456789:;=@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]_abcdefghijklmnopqrstuvwxyz~")
 o = [

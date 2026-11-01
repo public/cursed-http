@@ -211,7 +211,18 @@ static inline uint8_t hp__nclass(const uint8_t *p, uint32_t n) {
 typedef struct {
   uint8_t *a;
   size_t used, cap;
+  uint32_t fl; /* the last string's HH_F_* check bits; all set for a raw (unchecked) string */
 } hp__arena;
+
+/* the checks of a string just decoded, skipping the rescan when the Huffman table showed every
+ * byte passes (then only the RFC 9113 whitespace rule is left) */
+static inline int hp__vok(const uint8_t *p, uint32_t n, uint32_t fl) {
+  if (fl & HH_F_VALUE) return hv_check_value_rfc9113(p, n);
+  return !n || (p[0] != ' ' && p[0] != '\t' && p[n - 1] != ' ' && p[n - 1] != '\t');
+}
+static inline uint8_t hp__nclass_f(const uint8_t *p, uint32_t n, uint32_t fl) {
+  return n && !(fl & HH_F_NAME) ? (uint8_t)HP_N_OK : hp__nclass(p, n); /* ':' is not a token byte */
+}
 
 /* string literal (§5.2): raw strings point into the input, Huffman ones are decoded into the arena */
 static inline int hp__str(const uint8_t **pp, const uint8_t *end, hp__arena *ar, const uint8_t **s, uint32_t *sl) {
@@ -222,12 +233,12 @@ static inline int hp__str(const uint8_t **pp, const uint8_t *end, hp__arena *ar,
   const uint8_t *src = *pp;
   *pp += len;
   if (!huff) {
-    *s = src, *sl = len;
+    *s = src, *sl = len, ar->fl = HH_F_VALUE | HH_F_NAME;
     return 0;
   }
   size_t need = (size_t)len * 8 / 5 + 8;
   if (ar->cap - ar->used < need) return HP_E_CALM;
-  ssize_t r = hh_decode(ar->a + ar->used, src, len);
+  ssize_t r = hh_decode_f(ar->a + ar->used, src, len, &ar->fl);
   if (r < 0) return HP_E_COMPRESSION;
   *s = ar->a + ar->used, *sl = (uint32_t)r, ar->used += (size_t)r;
   return 0;
@@ -268,7 +279,7 @@ static inline int hp__pin(hp_dec *d, hp__arena *ar, hp_field *f) {
 static inline int hp_decode_block(hp_dec *d, const uint8_t *in, size_t len, hp_field *out, int maxf, uint8_t *arena,
                                   size_t arena_cap, uint32_t max_list, int *flags) {
   const uint8_t *p = in, *end = in + len;
-  hp__arena ar = { arena, 0, arena_cap };
+  hp__arena ar = { arena, 0, arena_cap, 0 };
   uint64_t list = 0;
   int n = 0, fields_seen = 0;
   *flags = 0;
@@ -297,10 +308,10 @@ static inline int hp_decode_block(hp_dec *d, const uint8_t *in, size_t len, hp_f
         if (hp__pin(d, &ar, &f)) return HP_E_CALM; /* the insert below may move or evict it */
       } else {
         if ((r = hp__str(&p, end, &ar, &f.name, &f.nlen))) return r;
-        f.nclass = hp__nclass(f.name, f.nlen), f.sidx = (uint8_t)hp_name_index(f.name, f.nlen);
+        f.nclass = hp__nclass_f(f.name, f.nlen, ar.fl), f.sidx = (uint8_t)hp_name_index(f.name, f.nlen);
       }
       if ((r = hp__str(&p, end, &ar, &f.value, &f.vlen))) return r;
-      f.vok = (uint8_t)hv_check_value_rfc9113(f.value, f.vlen);
+      f.vok = (uint8_t)hp__vok(f.value, f.vlen, ar.fl);
       if (incr) hp__insert(d, f.name, f.nlen, f.value, f.vlen, f.sidx, f.nclass, f.vok);
     }
     fields_seen = 1;
