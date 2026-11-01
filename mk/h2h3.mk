@@ -1,6 +1,7 @@
 # HTTP/2 + HTTP/3 (include/hfield.h, hpack.h, h2.h, ...). Reference libraries come from
 # scripts/fetch-thirdparty.sh nghttp2 nghttp3 and are built here from source.
 #   make test-h2h3     every HTTP/2 / HTTP/3 test
+#   make hfield-check  include/hfield.h's tables = gen/gen_hfield.py's output (needs nghttp2 fetched)
 TP := third_party
 N2 := $(TP)/nghttp2/lib
 N3 := $(TP)/nghttp3/lib
@@ -54,6 +55,9 @@ H2TESTS := $(H2B)/test_quic $(H2B)/test_quic_interop $(H2B)/test_h3 $(H2B)/test_
 test-h2h3: $(H2TESTS)
 	@for t in $(H2TESTS); do echo "== $$t"; $$t || exit 1; done
 .PHONY: test-h2h3
+hfield-check:
+	$(PYTHON) -I gen/gen_hfield.py --check
+.PHONY: hfield-check
 
 mutants-h2: $(H2B)/libnghttp2.a $(H2B)/libnghttp3.a
 	python3 -I scripts/mutants_h2.py include $(H2B)/mutants
