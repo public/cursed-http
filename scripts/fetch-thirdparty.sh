@@ -16,6 +16,9 @@
 #   h2spec     summerwind/h2spec v2.6.0             MIT             HTTP/2 conformance suite (needs Go)
 #   picotls    h2o/picotls                          MIT             TLS 1.3 handshake for include/quic.h (+ OpenSSL libcrypto)
 #   ngtcp2     ngtcp2/ngtcp2 v1.25.0                MIT             QUIC reference client (in-memory interop tests)
+#   ls-hpack   litespeedtech/ls-hpack v2.3.5        MIT             HPACK comparison benchmark (LiteSpeed, lsquic)
+#   ls-qpack   litespeedtech/ls-qpack v2.7.0        MIT             QPACK comparison benchmark (LiteSpeed, lsquic)
+#   h2o        h2o/h2o (master, 2026-11-01)         MIT             HPACK / QPACK comparison benchmark
 # Default: all of them.
 set -e
 cd "$(dirname "$0")/.."
@@ -33,7 +36,7 @@ fetch() { # name owner/repo commit
   echo "$3" >"third_party/$1/.commit"
 }
 ALL="$*"
-for n in uws httparse hparse llhttp-src garden pico-src lightning pico-a64 pico-a64tbl http-parser nghttp2 nghttp3 h2spec picotls ngtcp2; do
+for n in uws httparse hparse llhttp-src garden pico-src lightning pico-a64 pico-a64tbl http-parser nghttp2 nghttp3 h2spec picotls ngtcp2 ls-hpack ls-qpack h2o; do
   if [ -n "$ALL" ] && ! echo " $ALL " | grep -q " $n "; then continue; fi
   case $n in
     uws) fetch uws uNetworking/uWebSockets 3ffd6f44c9c3c92c96345d9f96bd01ba9c025ab5 ;;
@@ -58,5 +61,8 @@ for n in uws httparse hparse llhttp-src garden pico-src lightning pico-a64 pico-
     h2spec) fetch h2spec summerwind/h2spec 70ac2294010887f48b18e2d64f5cccd48421fad1 ;;
     picotls) fetch picotls h2o/picotls 1e034d8418c1f806f2ba86717b34c910934f38f9 ;;
     ngtcp2) fetch ngtcp2 ngtcp2/ngtcp2 f9e9ff01ad2c8116bc09de4f644b0028a61486a6 ;;
+    ls-hpack) fetch ls-hpack litespeedtech/ls-hpack cf0f70dd10b352194c97448eb5d00b4aa484f531 ;;
+    ls-qpack) fetch ls-qpack litespeedtech/ls-qpack 91567706c41c0d97ab8dc576873ecd472d7869fa ;;
+    h2o) fetch h2o h2o/h2o 0d22c901981c6adefebf483673eef64da968df3e ;;
   esac
 done
