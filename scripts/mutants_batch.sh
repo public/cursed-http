@@ -17,5 +17,5 @@ mut 's/_mm256_set1_epi8(9)), t)/_mm256_set1_epi8(10)), t)/' "':' counted as a di
 mut 's/_mm512_mask_cmpeq_epi64_mask(kLk, t2, ZS(BP_TP11))/kLk/' "like tail word 2 unchecked (zmm)"
 mut 's/if (FP_LIKELY(h > 0)) { r->body_off = h; r->body_len = 0;/if (FP_LIKELY(h > 0)) { r->body_off = h; r->body_len = 1;/' "GET: wrong body_len on the quick path"
 mut 's/int h = fp_quick_get(b, len, FP_BACKEND != 0);/int h = fp_quick_get(b, len + 64, FP_BACKEND != 0);/' "GET: quick path ignores len (reads the continuation)"
-mut 's/post = fp_route_auth((int)rt\[i\]);/post = 0;/' "POST lanes through the GET path (Authorization lost)"
+mut 's/post = fp_route_lines((int)rt\[i\]);/post = 0;/' "POST lanes through the GET path (Authorization lost)"
 rm -rf $S
