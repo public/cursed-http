@@ -39,7 +39,11 @@ M = [
     ("quic.h", "    if (room < limit) limit = (size_t)room;", ";"),
     ("quic.h", "    c->key_phase ^= 1, c->phase_first_pn = pn;", "    c->phase_first_pn = pn;"),
     # spurious-loss handling: no undo of the window reduction, then no adaptive packet threshold
-    ("quic.h", "c->episode_spurious >= c->episode_lost && c->undo_cwnd) {", "c->episode_spurious >= c->episode_lost && 0) {"),
+    (
+        "quic.h",
+        "c->episode_spurious >= c->episode_lost && c->undo_cwnd) {",
+        "c->episode_spurious >= c->episode_lost && 0) {",
+    ),
     ("quic.h", "  if (disp > c->pkt_thresh) c->pkt_thresh = disp > 256 ? 256 : (uint32_t)disp;", ";"),
 ]
 for i, (f, a, b) in enumerate(M, 1):

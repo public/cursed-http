@@ -361,7 +361,7 @@ typedef struct {
   int64_t sent_at;
   uint16_t size;
   uint8_t ack_eliciting, in_flight, nf, acked, lost;
-  int64_t lost_at; /* kept after being declared lost, so a late ACK reveals a spurious loss */
+  int64_t lost_at;      /* kept after being declared lost, so a late ACK reveals a spurious loss */
   uint64_t largest_ack; /* largest pn this packet acknowledged (for trimming our ACK ranges) */
   quic_frec f[QUIC_FREC_MAX];
 } quic_sent;
@@ -580,7 +580,7 @@ static inline void quic__frame_lost(quic_conn *c, quic_space *sp, const quic_fre
 }
 
 /* CUBIC (RFC 9438): cwnd in bytes, time in seconds; C = 0.4 segments/s^3, beta = 0.7 */
-#define QUIC_CUBIC_C 0.4
+#define QUIC_CUBIC_C    0.4
 #define QUIC_CUBIC_BETA 0.7
 static inline double quic__cbrt(double x) { /* Newton's method: no libm needed */
   if (x <= 0) return 0;
@@ -592,7 +592,7 @@ static inline void quic__cc_acked(quic_conn *c, const quic_sent *p, int64_t now)
   if (!p->in_flight) return;
   c->bytes_in_flight -= p->size;
   if (p->sent_at <= c->recovery_start) return; /* in recovery */
-  if (c->cwnd < c->ssthresh) { /* slow start */
+  if (c->cwnd < c->ssthresh) {                 /* slow start */
     c->cwnd += p->size;
     return;
   }
