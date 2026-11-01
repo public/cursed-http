@@ -28,8 +28,13 @@ if [ "${LINT_LOCAL:-0}" != 1 ]; then
   docker image inspect "$img" >/dev/null 2>&1 || docker build -q -t "$img" -f ci/lint.Dockerfile ci >/dev/null
   files="" # the host may have bash 3.2 (macOS): no mapfile out here
   [ $staged = 1 ] && files=$(git diff --cached --name-only --diff-filter=ACMR | tr '\n' ' ')
+  # Mount the checkout at its own path, and in a worktree also the shared git directory: a worktree's .git file
+  # points there by absolute path, and without it git ls-files sees no files.
+  common=$(cd "$(git rev-parse --git-common-dir)" && pwd)
+  mounts=(-v "$PWD:$PWD")
+  case $common in "$PWD"/*) ;; *) mounts+=(-v "$common:$common") ;; esac
   exec docker run --rm -e LINT_LOCAL=1 -e LINT_FILES="$files" -e LINT_STAGED=$staged \
-    -v "$PWD":/r -w /r -u "$(id -u):$(id -g)" -e HOME=/tmp "$img" bash scripts/lint.sh "$@"
+    "${mounts[@]}" -w "$PWD" -u "$(id -u):$(id -g)" -e HOME=/tmp "$img" bash scripts/lint.sh "$@"
 fi
 
 git() { command git -c safe.directory='*' "$@"; }
@@ -46,6 +51,10 @@ pick() { # tracked first-party files matching the globs; with --staged, only sta
 mapfile -t C < <(pick '*.c' '*.h' '*.inc' '*.cpp' | sed '/^$/d')
 mapfile -t SH < <(pick '*.sh' | sed '/^$/d')
 mapfile -t PY < <(pick '*.py' | sed '/^$/d')
+if [ "${LINT_STAGED:-$staged}" != 1 ] && [ ${#C[@]} -eq 0 ]; then # never report "clean" for a file list git couldn't read
+  echo "lint: git listed no C files; is this a checkout git can read?" >&2
+  exit 2
+fi
 bad=0
 step() { printf '== %s\n' "$1"; }
 
