@@ -6,7 +6,7 @@
 //     the general parsers
 // Columns: single calls per route (API shapes), and "pipelined x8": the corpus back to back, each parser called
 // request after request on the remaining buffer (len > request), 8 requests per buffer. Shapes 3/4 have no API:
-// requests fast_parse falls back on ("GET / HTTP/1.1", l0 < 16) are regenerated, so every parser parses every one.
+// requests fast_parse falls back on (a Connection other than keep-alive) are regenerated, so every parser parses every one.
 // For the general parsers two costs are measured:
 //   raw    the parser alone (request line + headers into arrays; llhttp: spans via callbacks)
 //   +logic the same parser + exactly the routing / id / Bearer / Content-Length logic of the reference,

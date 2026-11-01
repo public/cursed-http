@@ -588,9 +588,10 @@ out:
 
 
 // ---------------- shared pieces of both cores ----------------
-// request line [0, l0]: METHOD SP+ path SP* "HTTP/1.1" CR LF -> route. 0 or FP_FALLBACK.
+// request line [0, l0]: METHOD SP+ path SP* "HTTP/1.1" CR LF -> route. 0 or FP_FALLBACK. l0 >= 13 for the
+// shortest line ("M / HTTP/1.1"); l0 >= 11 keeps the reads below in [0, l0], and an empty method or path falls back.
 FP_INLINE int fp_reqline(const char *b, int l0, req_t *r) {
-  if (l0 < 16 || b[l0 - 1] != '\r' || b[l0 - 10] != ' ' || fp_ld64(b + l0 - 9) != fp_c8("HTTP/1.1", 8))
+  if (l0 < 11 || b[l0 - 1] != '\r' || b[l0 - 10] != ' ' || fp_ld64(b + l0 - 9) != fp_c8("HTTP/1.1", 8))
     return FP_FALLBACK;
   uint32_t m4 = fp_ld32(b);
   int ml;
@@ -598,7 +599,7 @@ FP_INLINE int fp_reqline(const char *b, int l0, req_t *r) {
   else if (m4 == 0x54534f50u && b[4] == ' ') ml = 4; // "POST "
   else {
     const char *sp = memchr(b, ' ', l0 - 10);
-    if (!sp) return FP_FALLBACK;
+    if (!sp || sp == b) return FP_FALLBACK; // empty method: pico rejects
     ml = (int)(sp - b);
   }
   int ps = ml + 1, pe = l0 - 10;
@@ -1087,7 +1088,7 @@ static inline int fast_parse_learn_scalar(const char *b, int len, req_t *r, fp_l
 //     LF (nor the path a SP): every LF and CR is the template's, shifted by the slot lengths. So the
 //     lines are the template's lines, all CRLF-terminated, with no empty line before hend and no bare CR;
 //   - the request line is METHOD SP path SP "HTTP/1.1" CRLF with a non-empty method and path free of
-//     SP/CR/LF and l0 >= 16, so fp_reqline (and the spec's canonical templates, which agree with it)
+//     SP/CR/LF, so fp_reqline (and the spec's canonical templates, which agree with it)
 //     would give fp_route exactly (method, path);
 //   - every header line starts in a constant segment, and a slot starts only after the line's first
 //     colon. The general parser classifies a line from its first byte and its first 8 or 14 bytes
@@ -1274,8 +1275,8 @@ FP_INLINE int fp_tm_scan(int simd, const char *b, int p, int lim, const int path
 }
 
 // Request line, the same for every template: me = the method's end (first SP/CR/LF: must be a SP, method
-// >= 1 byte), pe = the path's end (the next SP/CR/LF, path >= 1 byte). 0 = not this shape, or a line the
-// general parser falls back on whatever the headers (l0 < 16, see fp_reqline): leave it to that parser.
+// >= 1 byte), pe = the path's end (the next SP/CR/LF, path >= 1 byte). 0 = not this shape: leave it to the
+// general parser.
 FP_INLINE int fp_tm_rl(int simd, const char *b, int lim, int *me, int *pe) {
   int x, y;
 #if FP_TM_256
@@ -1294,7 +1295,7 @@ FP_INLINE int fp_tm_rl(int simd, const char *b, int lim, int *me, int *pe) {
     x = fp_tm_scan(simd, b, 0, lim, 1);
     y = x > 0 ? fp_tm_scan(simd, b, x + 1, lim, 1) : -1;
   }
-  if (x <= 0 || b[x] != ' ' || y <= x + 1 || y + 10 < 16) return 0;
+  if (x <= 0 || b[x] != ' ' || y <= x + 1) return 0;
   *me = x;
   *pe = y;
   return 1;

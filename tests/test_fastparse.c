@@ -516,8 +516,7 @@ int main(int argc, char **argv) {
     req_t f, g;
     int a = P_fast(b, len[i], &f), c = ref_parse(b, len[i], &g);
     if (a == FP_FALLBACK) fb++;
-    // no-spec shapes: "GET / HTTP/1.1" falls back (l0 < 16, see fp_reqline), and so does a Connection other
-    // than keep-alive
+    // no-spec shapes: a Connection other than keep-alive falls back
     if ((!same(a, &f, c, &g) || a != len[i]) && !(shp[i] >= 3 && a == FP_FALLBACK))
       FAIL("CORPUS FAIL %d: fast=%d ref=%d len=%d\n", i, a, c, len[i]);
     check_backends(b, len[i], "corpus");
