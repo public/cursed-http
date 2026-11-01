@@ -6,8 +6,8 @@ PANELS = [
     (
         "HTTP/2 server: request in, response out (h2.h's job)",
         [
-            ("h2.h", 572.8, True),
-            ("nghttp2", 2326.2, False),
+            ("h2.h", 540.0, True),
+            ("nghttp2", 2325.5, False),
             ("h2 (Rust, hyper's)", 5141.0, False),
             ("x/net/http2 (Go)", 29824.3, False),
         ],
@@ -15,36 +15,36 @@ PANELS = [
     (
         "HPACK decode (hpack.h's job)",
         [
-            ("hpack.h", 347.7, True),
-            ("ls-hpack (LiteSpeed)", 448.1, False),
-            ("nghttp2", 650.9, False),
-            ("h2o", 732.2, False),
+            ("hpack.h", 329.4, True),
+            ("ls-hpack (LiteSpeed)", 446.4, False),
+            ("nghttp2", 625.0, False),
+            ("h2o", 734.3, False),
             ("x/net/http2/hpack (Go)", 839.9, False),
         ],
     ),
     (
         "HTTP/3 server above QUIC (h3.h's job)",
         [
-            ("h3.h", 3038.5, True),
-            ("nghttp3", 4951.5, False),
+            ("h3.h", 2339.4, True),
+            ("nghttp3", 4890.2, False),
         ],
     ),
     (
         "QPACK decode, 4 KB dynamic table (qpack.h's job)",
         [
-            ("qpack.h", 1192.0, True),
-            ("ls-qpack (LiteSpeed)", 1214.2, False),
-            ("h2o", 1791.9, False),
-            ("nghttp3", 1814.8, False),
+            ("qpack.h", 1094.2, True),
+            ("ls-qpack (LiteSpeed)", 1206.1, False),
+            ("h2o", 1785.9, False),
+            ("nghttp3", 1824.8, False),
         ],
     ),
     (
         "QPACK decode, static table only",
         [
-            ("qpack.h", 2532.5, True),
-            ("ls-qpack (LiteSpeed)", 2645.6, False),
-            ("nghttp3", 3994.4, False),
-            ("h2o", 5228.8, False),
+            ("qpack.h", 2407.0, True),
+            ("ls-qpack (LiteSpeed)", 2602.7, False),
+            ("nghttp3", 4050.1, False),
+            ("h2o", 5264.4, False),
             ("quic-go/qpack (Go)", 9061.5, False),
         ],
     ),
