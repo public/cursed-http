@@ -82,12 +82,20 @@ static void check_layouts(const char *b, int len, int a, const req_t *f) {
 }
 
 // learned-template tables: X_simd / X_scalar learn from every input the checks below see
-static fp_tmpl_t X_simd, X_scalar, X_bench;
+static fp_tmpl_t X_simd, X_scalar, X_bench, X_quick, X_quick_scalar; // X_quick*: fp_tmpl_quick on
 __attribute__((noinline)) static int P_tmpl(const char *b, int l, req_t *r) {
   return fast_parse_tmpl(b, l, r, &X_simd);
 }
 __attribute__((noinline)) static int P_tmpl_scalar(const char *b, int l, req_t *r) {
   return fast_parse_tmpl_scalar(b, l, r, &X_scalar);
+}
+__attribute__((noinline)) static int P_tmpl_quick(const char *b, int l, req_t *r) {
+  X_quick.quick = 128;
+  return fast_parse_tmpl(b, l, r, &X_quick);
+}
+__attribute__((noinline)) static int P_tmpl_quick_scalar(const char *b, int l, req_t *r) {
+  X_quick_scalar.quick = 64;
+  return fast_parse_tmpl_scalar(b, l, r, &X_quick_scalar);
 }
 __attribute__((noinline)) static int P_tmpl_bench(const char *b, int l, req_t *r) {
   return fast_parse_tmpl(b, l, r, &X_bench);
@@ -129,12 +137,13 @@ static void check_templates(const char *b, int len, int a, const req_t *f) {
 // every input
 static long quick_claims;
 static void check_backends(const char *b, int len, const char *what) {
-  int (*fn[])(const char *, int, req_t *) = { P_scalar, P_cand_scalar,  P_walk_simd, P_cand_simd,
-                                              P_learn,  P_learn_scalar, P_tmpl,      P_tmpl_scalar };
+  int (*fn[])(const char *, int, req_t *) = { P_scalar,     P_cand_scalar,      P_walk_simd, P_cand_simd,
+                                              P_learn,      P_learn_scalar,     P_tmpl,      P_tmpl_scalar,
+                                              P_tmpl_quick, P_tmpl_quick_scalar };
   req_t f;
   memset(&f, 0, sizeof f);
   int a = P_fast(b, len, &f);
-  for (int i = 0; i < 8; i++) {
+  for (int i = 0; i < 10; i++) {
     req_t s;
     memset(&s, 0, sizeof s);
     int c = fn[i](b, len, &s);
@@ -149,11 +158,13 @@ static void check_backends(const char *b, int len, const char *what) {
   int l0 = fp_reqline_canon(b, &q);
   if (l0 && !fp_route_lines(q.route))
     for (int simd = 0; simd < 2; simd++) {
-      int h = simd ? fp_quick_get(b, len, 1) : fp_quick_get(b, len, 0);
-      if (h > 0) {
-        quick_claims++;
-        if (a != h || f.body_len != 0 || f.route != q.route)
-          FAIL("QUICK-GET MISMATCH simd %d len=%d: quick=%d fast=%d\n", simd, len, h, a);
+      for (int cap = 0; cap < 2; cap++) { // cap: the length capped at 128, as fp_tm_quick passes it
+        int lq = cap && len > 128 ? 128 : len, h = simd ? fp_quick_get(b, lq, 1) : fp_quick_get(b, lq, 0);
+        if (h > 0) {
+          quick_claims++;
+          if (a != h || f.body_len != 0 || f.route != q.route)
+            FAIL("QUICK-GET MISMATCH simd %d cap %d len=%d: quick=%d fast=%d\n", simd, cap, len, h, a);
+        }
       }
     }
 }
@@ -189,6 +200,12 @@ static void check_many(const char *b, int len, int max) {
     if (!same(1, &o1[i], 1, &o3[i]) || o1[i].id != o3[i].id) FAIL("MANY LEARN MISMATCH req %d\n", i);
   for (int i = 0; i < x.n && i < y.n; i++)
     if (!same(1, &o1[i], 1, &o2[i])) FAIL("MANY SCALAR MISMATCH req %d\n", i);
+  req_t o5[16];
+  X_quick.quick = 128;
+  fp_batch_t v = fast_parse_many_tmpl(b, len, o5, max, &X_quick);
+  if (v.n != x.n || v.used != x.used || v.status != x.status) FAIL("MANY TMPL QUICK MISMATCH\n");
+  for (int i = 0; i < x.n && i < v.n; i++)
+    if (!same(1, &o1[i], 1, &o5[i]) || o1[i].id != o5[i].id) FAIL("MANY TMPL QUICK MISMATCH req %d\n", i);
   req_t o4[16];
   fp_batch_t w = P_many_tmpl(b, len, o4, max);
   if (w.n != x.n || w.used != x.used || w.status != x.status) FAIL("MANY TMPL MISMATCH\n");
@@ -676,7 +693,10 @@ int main(int argc, char **argv) {
   printf(
       "layout-preserving fuzz 300k: %ld agree with pico; direct layout check: %ld of %ld tries matched a layout in this phase (%ld in the whole run), all identical to fast_parse\n",
       agree2, lay_hits - h_before, lay_tries, lay_hits);
-  printf("fp_quick_get claimed %ld inputs, all identical to fast_parse\n", quick_claims);
+  printf(
+      "fp_quick_get claimed %ld inputs, all identical to fast_parse; fp_tmpl_quick tables: %llu quick, %llu template hits\n",
+      quick_claims, (unsigned long long)(X_quick.quicks + X_quick_scalar.quicks),
+      (unsigned long long)(X_quick.hits + X_quick_scalar.hits));
   // 3d. slot fuzz: mutate what templates leave variable (the method, the path, header values after the
   // colon): insert / delete / replace bytes, including CR, LF, SP, HT, ':', NUL and high bytes, so line
   // lengths change and slots end early or late; then everything above, and every template directly
@@ -849,6 +869,7 @@ int main(int argc, char **argv) {
     for (int i = 0; i < 512; i++) u += gen(sb + u, 1); // 512 mload -gzip requests, back to back
     memset(sb + u, 0x5a, PAD);
     memset(&XP, 0, sizeof XP);
+    fp_tmpl_quick(&XP, -1); // templates only
     int nt = fp_tmpl_seed(&XP, sb, u, 1), npin = 0;
     for (int i = 0; i < XP.n; i++) npin += XP.t[i].pin;
     long h0 = (long)XP.hits;

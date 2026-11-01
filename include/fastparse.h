@@ -1131,16 +1131,20 @@ typedef struct {
   int n, npend; // ord: templates in the order they are tried
   int wreq, whit, bypass, cool, backoff;
   unsigned pnext, sctr, nwin;
-  int mode, stale, pint, hold;
-  uint32_t wtp, acost, atp;           // mode: FP_TM_AUTO/ALWAYS/OFF; cost model counters (fp_tm_window)
+  int mode, stale, pint, hold, quick;
+  uint32_t wtp, acost, atp;           // mode: FP_TM_AUTO/ALWAYS/OFF; quick: fp_tmpl_quick; cost model counters
   uint64_t tries0, misses0, learned0; // tries, misses and templates learned at the window's start
-  uint64_t hits, misses, learned, generalized, evicted, tries; // tries: failed template tries
-} fp_tmpl_t; // zero-init; meant to be one per server thread (size: see RESULTS.md)
+  uint64_t hits, misses, learned, generalized, evicted, tries,
+      quicks; // tries: failed template tries; quicks: fp_quick_get results
+} fp_tmpl_t;  // zero-init; meant to be one per server thread (size: see RESULTS.md)
 
-#define FP_TM_AUTO   0 // fp_tmpl_t.mode: templates while they pay (the cost model below), the default
-#define FP_TM_ALWAYS 1 // always try templates (traffic known to be a few request shapes)
-#define FP_TM_OFF    2 // never: the general parser only, nothing learned
-#ifndef FP_TM_COST     // bypass while failed tries + misses exceed this per request (x16)
+#define FP_TM_AUTO   0      // fp_tmpl_t.mode: templates while they pay (the cost model below), the default
+#define FP_TM_ALWAYS 1      // always try templates (traffic known to be a few request shapes)
+#define FP_TM_OFF    2      // never: the general parser only, nothing learned
+#ifndef FP_TM_QUICK_DEFAULT // fp_tmpl_quick's default cap (0 = off); a profile-generated header sets it
+#define FP_TM_QUICK_DEFAULT 0
+#endif
+#ifndef FP_TM_COST // bypass while failed tries + misses exceed this per request (x16)
 #define FP_TM_COST 16
 #endif
 // constant compare (accumulated; nonzero = mismatch) and slot scan, per backend
@@ -1631,8 +1635,31 @@ __attribute__((noinline, cold)) static int fp_tm_bypass(const char *b, int len, 
   if (X->stale && c > 0) fp_tm_learn(X, b, r->body_off);
   return c;
 }
+// Short canonical GETs (headers end within cap = 64 or 128 bytes, no line the core would look at) are the
+// spec parser's best case: fp_quick_get returns exactly fast_parse's result, cheaper than a template match
+// (Xeon exp1350). With quick on they skip the templates; anything else (POSTs, routes that read header lines, longer header blocks) goes on
+// to the templates. Only requests starting with 'G' are checked, so POSTs pay one compare.
+FP_INLINE int fp_tm_quick(const char *b, int len, req_t *r, const int simd, int cap) {
+  if (b[0] != 'G') return 0;
+  int l0 = fp_reqline_canon(b, r);
+  if (!l0 || fp_route_lines(r->route)) return 0;
+  int h = fp_quick_get(b, len < cap ? len : cap, simd); // h <= cap <= len: a complete request, no body
+  if (h > 0) {
+    r->body_off = h;
+    r->body_len = 0;
+  }
+  return h;
+}
 FP_INLINE int fp_core_tmpl(const char *b, int len, req_t *r, fp_tmpl_t *X, const int simd) {
   if (++X->wreq >= 1024) fp_tm_window(X);
+  int cap = X->quick ? X->quick : FP_TM_QUICK_DEFAULT;
+  if (cap > 0) {
+    int h = fp_tm_quick(b, len, r, simd, cap);
+    if (h > 0) {
+      X->quicks++;
+      return h;
+    }
+  }
   if (FP_UNLIKELY(X->bypass)) {
     if (X->wreq < 64 || X->stale) return fp_tm_bypass(b, len, r, X, simd); // maybe a probe, or learning
     return simd ? fp_tm_gen1(b, len, r) : fp_tm_gen0(b, len, r);
@@ -1650,6 +1677,9 @@ static inline int fast_parse_tmpl_scalar(const char *b, int len, req_t *r, fp_tm
 // same padding contract as fast_parse), at least two of each request shape; pin = 1 keeps the templates
 // it makes from ever being evicted. Returns the number of templates. The table stays exact either way:
 // a seeded template is learned and checked like any other.
+// short canonical GETs via fp_quick_get first: cap = 64 or 128 (header bytes), -1 = off, 0 = the default
+// (FP_TM_QUICK_DEFAULT: on in headers generated from a profile whose GET header blocks are short)
+static inline void fp_tmpl_quick(fp_tmpl_t *X, int cap) { X->quick = cap == 64 || cap == 128 || cap == -1 ? cap : 0; }
 static inline void fp_tmpl_mode(fp_tmpl_t *X, int mode) {
   X->mode = mode;
   X->bypass = mode == FP_TM_OFF;

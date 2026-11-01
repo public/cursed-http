@@ -360,6 +360,7 @@ int fast_parse_tmpl(const char *buf, int len, req_t *r, fp_tmpl_t *X);     // sa
 fp_batch_t fast_parse_many_tmpl(const char *buf, int len, req_t *out, int max, fp_tmpl_t *X);
 void fp_tmpl_mode(fp_tmpl_t *X, int mode);   // FP_TM_AUTO (default), FP_TM_ALWAYS or FP_TM_OFF
 int fp_tmpl_seed(fp_tmpl_t *X, const char *buf, int len, int pin);   // learn from sample requests; pin: never evict
+void fp_tmpl_quick(fp_tmpl_t *X, int cap);   // short canonical GETs via fp_quick_get first: 128, 64, -1 = off
 ```
 
 `FP_FALLBACK` is always safe: hand the bytes to a full parser (`fb_parse_req`) or answer 400.
@@ -389,6 +390,12 @@ HAProxy), where the request lines and headers are whatever clients send.
   API's clients) or `FP_TM_OFF`. `fp_tmpl_seed` takes sample requests back to back, with at least two of each shape,
   so the table hits from the first live request; with `pin = 1` those templates are never evicted. Seeded templates
   are learned and checked like any other.
+- **Quick dispatch over the generated parser**: with `fp_tmpl_quick`, a GET whose request line is canonical (a
+  route that reads no header lines) and whose headers end within 128 bytes goes to `fp_quick_get` before the
+  templates. It returns exactly `fast_parse`'s result. A header generated with `--profile` turns it on by default
+  when the profiled GET header blocks are short (median ≤ 64 B). In the lab on the Xeon it cut gocli -gzip to
+  51.7 ns, against 56.5 for the profile-generated parser alone and 59.2 for templates alone; on k6 (85 B GET
+  blocks) it would cost 6.5 ns, so there it stays off.
 - **Status:** in development. Xeon numbers and the verdict are in the pull request that adds it.
 
 ### fbparse.h

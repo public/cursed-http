@@ -290,6 +290,17 @@ def gen_spec_region(spec, routes, prof):
         + " }"
     )
 
+    # learned templates: short canonical GETs to fp_quick_get first (fp_tmpl_quick), when the profile's GET
+    # header blocks are short. Xeon exp1350/1351: a win at a 60 B median (gocli -gzip), a tie at 37, a loss at 85 (k6).
+    if prof:
+        g = prof["methods"].get("GET")
+        if g and g["median_header_bytes"] <= 64:
+            w(
+                "// learned templates: short GETs take fp_quick_get first "
+                f"(profiled GET header block median {g['median_header_bytes']} B <= 64)"
+            )
+            w("#define FP_TM_QUICK_DEFAULT 128")
+
     # learned layout per route (never for routes that ask for headers: a layout only compares a line's first
     # 16 bytes, and those values vary)
     if prof:
