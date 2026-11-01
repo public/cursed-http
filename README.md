@@ -69,6 +69,7 @@ fastparse on every request before it's timed.
 |---|---|---|
 | **fastparse.h** (AVX2) | **46.9** | 1× |
 | fastparse.h, generated from the spec + profile | 45.1 | 0.96× |
+| fbparse.h, our general parser ³ | — | 2.0× slower |
 | lightning (C, AVX2/SSE4.2) | 95.3 | 2.0× slower |
 | picohttpparser (SSE4.2) | 109.2 | 2.3× slower |
 | hparse (Zig) ¹ | 122.9 | 2.6× slower |
@@ -78,7 +79,8 @@ fastparse on every request before it's timed.
 | fasthttp 1.76 (Go) ² | 392.7 | 8.4× slower |
 | http-parser 2.9.4 (Node.js, legacy) | 397.7 | 8.5× slower |
 
-**General traffic** (fbparse.h against the general parsers, +logic):
+**General traffic** (fbparse.h against the general parsers, +logic). fbparse.h is the fastest general parser on every
+corpus here, and on the API mix above (³):
 
 | corpus | **fbparse.h** | lightning | picohttpparser | httparse ¹ | llhttp | hparse ¹ | fasthttp ² | http-parser |
 |---|---|---|---|---|---|---|---|---|
@@ -107,6 +109,10 @@ against 40.5 for the best general parser.
 httparse is from a separate Xeon run with that machine's rustc 1.94.0. It was built like its own bench profile plus
 `target-cpu=native`, so its compile-time AVX2 path is on, and it passed the same correctness gate. Its vs-fbparse
 row uses the same layout-randomised pairs, 8 layouts × 2 rounds.
+³ fbparse.h is from a later run of the same harness (Xeon exp1385, 3 rounds, the gate passed) with buffers twice as
+far apart, which puts every parser's numbers higher, so only same-run ratios are shown. In that run, on the gocli -gzip
+mix +logic: fbparse.h 107.7 ns, lightning 114.2, picohttpparser 132.8, uWebSockets 138.7, llhttp 259.2, fastparse.h
+54.6. On the k6 and gocli corpora too, it is the fastest general parser: 99.6 vs 116.8 (lightning) and 81.7 vs 88.1.
 ² fasthttp is Go. It is measured by its own harness on the same request bytes (`make compare-go`): it parses with
 `RequestHeader.Read`, as its server does, and its "+logic" is the same routing in Go. There is no shared correctness
 gate across languages; it accepted every request.
@@ -818,12 +824,15 @@ Xeon, gocli -gzip corpus, raw / +logic:
 | uWebSockets 20.80.0 (C++) | 107.5 / **125.8** | 85.7 / 99.8 | 88.9 / 110.3 | 139.5 / 177.3 |
 | llhttp 9.4.3 | 225.9 / **254.0** | 195.2 / 211.3 | 205.7 / 233.3 | 373.2 / 416.7 |
 | http-parser 2.9.4 | 375.0 / **397.7** | 284.6 / 295.5 | 333.9 / 356.6 | 957.9 / 1002.5 |
+| fbparse.h ³ | 79.1 / **107.7** | 65.8 / 74.4 | 66.3 / 84.2 | 93.5 / 126.6 |
 | **fastparse, AVX2** | **46.9** | 31.1 | 36.0 | 93.1 |
 | fastparse, generated from the spec | 45.9 | 30.7 | 35.1 | 87.2 |
 | fastparse, generated, spec + profile | **45.1** | 30.8 | 34.3 | 84.2 |
 | fastparse, learned layout | 49.8 | 29.2 | 36.5 | 94.3 |
 | fastparse, scalar backend | 93.4 | 65.5 | 77.4 | 197.3 |
 
+³ fbparse.h's row is from the later run exp1385 (buffers twice as far apart, so every number runs higher); lightning
+there was 90.8 / 114.2 and picohttpparser 108.4 / 132.8 on the mix, so compare it with those, not this table's rows.
 httparse 1.10.1 (Rust, AVX2, rustc 1.94.0, separate run) is at 134.4 / 150.4 on the mix. hparse (Zig) measured
 97.2 / 122.9 on the mix in an earlier run of the same harness. fasthttp (Go) is at 355.1 /
 392.7.

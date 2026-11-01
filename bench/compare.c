@@ -13,6 +13,7 @@
 //          i.e. the work fast_parse does. This is the apples-to-apples number.
 // Every parser+logic must agree with fast_parse on every corpus request (route, id, token, body) first.
 #include "fastparse.h"
+#include "fbparse.h"
 #include "picohttpparser.h"
 #include "testlib.h"
 
@@ -77,6 +78,14 @@ int hp_parse_request(const char *, size_t, const char **, size_t *, const char *
   __attribute__((noinline)) static int logic_##name(const char *b, int l, req_t *r) {                                  \
     return ref_parse_with(fn, b, l, r);                                                                                \
   }
+// fbparse.h: picohttpparser's signature with struct fb_header (the same layout as struct phr_header)
+_Static_assert(sizeof(struct fb_header) == sizeof(struct phr_header), "fb_header layout");
+static int fbx_parse_request(const char *b, size_t l, const char **m, size_t *ml, const char **p, size_t *pl, int *minor,
+                             struct phr_header *h, size_t *nh, size_t last) {
+  return fb_parse_request(b, l, m, ml, p, pl, minor, (struct fb_header *)h, nh, last);
+}
+RAW(fbparse, fbx_parse_request)
+LOGIC(fbparse, fbx_parse_request)
 RAW(pico, phr_parse_request)
 LOGIC(pico, phr_parse_request)
 RAW(llhttp, lx_parse_request)
@@ -118,6 +127,7 @@ typedef struct {
   int mutates;
 } entry_t; // mutates: writes into the request buffer
 static entry_t E[] = {
+  { "fbparse.h (ours, general)", raw_fbparse, logic_fbparse },
   { "picohttpparser 465a7ff", raw_pico, logic_pico },
   { "llhttp 9.4.3", raw_llhttp, logic_llhttp },
 #ifdef HAVE_UWS
