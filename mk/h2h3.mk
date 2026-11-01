@@ -50,7 +50,7 @@ $(H2B)/test_h3: tests/test_h3.c $(H2HDRS) $(H2B)/libnghttp3.a
 $(H2B)/test_h3_asan: tests/test_h3.c $(H2HDRS) $(H2B)/libnghttp3.a
 	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(N3INC) $< $(H2B)/libnghttp3.a -o $@
 
-H2TESTS := $(H2B)/test_h3 $(H2B)/test_qpack $(H2B)/test_hpack $(H2B)/test_hpack_scalar $(H2B)/test_h2 $(H2B)/test_h2_scalar
+H2TESTS := $(H2B)/test_quic $(H2B)/test_quic_interop $(H2B)/test_h3 $(H2B)/test_qpack $(H2B)/test_hpack $(H2B)/test_hpack_scalar $(H2B)/test_h2 $(H2B)/test_h2_scalar
 test-h2h3: $(H2TESTS)
 	@for t in $(H2TESTS); do echo "== $$t"; $$t || exit 1; done
 .PHONY: test-h2h3
@@ -77,3 +77,32 @@ h2spec: $(H2B)/h2_server $(H2B)/h2spec
 	@$(H2B)/h2_server 18080 2>/dev/null & pid=$$!; sleep 0.3; \
 	$(H2B)/h2spec -h 127.0.0.1 -p 18080 -S; rc=$$?; kill $$pid; exit $$rc
 .PHONY: h2spec
+
+# picotls (TLS 1.3 for quic.h) from scripts/fetch-thirdparty.sh picotls, with the OpenSSL backend
+PTLS := $(TP)/picotls
+PTLS_SRC := $(PTLS)/lib/picotls.c $(PTLS)/lib/openssl.c $(PTLS)/lib/pembase64.c $(PTLS)/lib/hpke.c
+$(H2B)/ptls/%.o: $(PTLS)/lib/%.c
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g -I$(PTLS)/include -w -c $< -o $@
+$(H2B)/libpicotls.a: $(patsubst $(PTLS)/lib/%.c,$(H2B)/ptls/%.o,$(PTLS_SRC))
+	ar rcs $@ $^
+QINC := -I$(PTLS)/include
+$(H2B)/test_quic: tests/test_quic.c tests/rfc9001_vectors.h $(H2HDRS) include/qhp.h $(H2B)/libpicotls.a
+	$(H2CC) $(QINC) $< $(H2B)/libpicotls.a -lcrypto -o $@
+
+# ngtcp2 (QUIC reference client for the interop test), with its picotls crypto backend
+NT := $(TP)/ngtcp2
+NTINC := -I$(NT)/lib/includes -I$(H2B)/gen -I$(NT)/lib -I$(NT)/crypto/includes -I$(NT)/crypto $(QINC) -DNGTCP2_STATICLIB -DHAVE_ARPA_INET_H -DHAVE_NETINET_IN_H
+$(H2B)/gen/ngtcp2/version.h: $(NT)/lib/includes/ngtcp2/version.h.in
+	@mkdir -p $(dir $@)
+	sed -e 's/@PACKAGE_VERSION@/1.25.0/' -e 's/@PACKAGE_VERSION_NUM@/0x011900/' $< > $@
+$(H2B)/nt/%.o: $(NT)/%.c $(H2B)/gen/ngtcp2/version.h
+	@mkdir -p $(dir $@)
+	$(CC) -O2 -g $(NTINC) -w -c $< -o $@
+NT_SRC := $(wildcard $(NT)/lib/*.c) $(NT)/crypto/shared.c $(NT)/crypto/picotls/picotls.c
+$(H2B)/libngtcp2.a: $(patsubst $(NT)/%.c,$(H2B)/nt/%.o,$(NT_SRC))
+	ar rcs $@ $^
+$(H2B)/test_quic_interop: tests/test_quic_interop.c $(H2HDRS) include/qhp.h $(H2B)/libngtcp2.a $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
+	$(H2CC) $(QINC) $(N3INC) $(NTINC) $< $(H2B)/libngtcp2.a $(H2B)/libnghttp3.a $(H2B)/libpicotls.a -lcrypto -o $@
+$(H2B)/test_quic_interop_asan: tests/test_quic_interop.c $(H2HDRS) include/qhp.h $(H2B)/libngtcp2.a $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
+	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(QINC) $(N3INC) $(NTINC) $< $(H2B)/libngtcp2.a $(H2B)/libnghttp3.a $(H2B)/libpicotls.a -lcrypto -o $@

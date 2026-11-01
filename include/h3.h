@@ -204,14 +204,16 @@ static inline int h3__req_fin(h3_conn *c, h3_stream *s, uint64_t sid) {
   return 0;
 }
 
-static inline int h3__request_stream(h3_conn *c, h3_scratch *sc, uint64_t sid, const uint8_t *buf, size_t len, int fin) {
+static inline int h3__request_stream(h3_conn *c, h3_scratch *sc, uint64_t sid, uint64_t offset, const uint8_t *buf, size_t len, int fin) {
   h3_stream *s = h3__find(c, sid);
   if (!s) {
-    if (sid < c->max_sid) return (int)len; /* a stream we already finished or reset: drop */
-    if (c->goaway_sent) return (int)len;
+    /* QUIC opens streams in any order, so only the offset tells a new stream from one we already
+     * finished or reset: a new one starts at 0 */
+    if (offset) return (int)len;
+    if (c->goaway_sent && sid >= c->max_sid) return (int)len;
     for (int i = 0; i < H3_MAX_STREAMS; i++)
       if (!c->s[i].active) { s = &c->s[i]; break; }
-    c->max_sid = sid + 4;
+    if (sid + 4 > c->max_sid) c->max_sid = sid + 4;
     if (!s) { h3__reset(c, NULL, sid, H3_REQUEST_REJECTED); return (int)len; }
     memset(s, 0, offsetof(h3_stream, hdr));
     s->id = sid, s->active = 1, s->content_length = -1;
@@ -338,7 +340,7 @@ static inline int h3__decoder_stream(h3_conn *c, const uint8_t *buf, size_t len)
 
 static inline int h3_recv(h3_conn *c, h3_scratch *sc, uint64_t sid, uint64_t offset, const uint8_t *buf, size_t len, int fin) {
   if (c->error) return H3_E_CLOSED;
-  if ((sid & 3) == 0) return h3__request_stream(c, sc, sid, buf, len, fin);
+  if ((sid & 3) == 0) return h3__request_stream(c, sc, sid, offset, buf, len, fin);
   if ((sid & 3) != 2) return h3__fail(c, H3_STREAM_CREATION_ERROR); /* server-initiated ids are ours */
   int which = sid == (uint64_t)c->in_id[0] ? 0 : sid == (uint64_t)c->in_id[1] ? 1 : sid == (uint64_t)c->in_id[2] ? 2 : -1;
   size_t pos = 0;
