@@ -49,7 +49,8 @@ including its `is_complete()` last-length check, and is tested to agree with it 
 
 ## Fetched on demand (never committed): `scripts/fetch-thirdparty.sh` → `third_party/`
 
-Used only by `make conformance`, `make compare-all` and `make extras-check`. Each is downloaded at a pinned commit
+Used only by `make conformance`, `make compare-all`, `make extras-check` and the HTTP/2/3 targets (`make
+test-h2h3`, `make h2spec`, `make real-clients`); of these, only picotls is needed by code in `include/` (`quic.h`). Each is downloaded at a pinned commit
 and keeps its own licence.
 
 | name | project | commit | licence | used for |
@@ -63,6 +64,14 @@ and keeps its own licence.
 | lightning | https://github.com/softwaredc/lightning | `7b3b0cb1cb59` | Apache-2.0 | comparison benchmark |
 | pico-a64, pico-a64tbl | https://github.com/volyrique/picohttpparser (branches `armv8-a`, `armv8-a+tbl`) | `a47c4d00644f`, `b93abc18204c` | MIT / Perl | comparison benchmark (ARM) |
 | http-parser | https://github.com/nodejs/http-parser | `ec8b5ee63f0e` | MIT | comparison benchmark |
+| nghttp2 | https://github.com/nghttp2/nghttp2 v1.70.0 | `85e300c79fb6` | MIT | HTTP/2 + HPACK reference (`make test-h2h3`, benchmarks) |
+| nghttp3 (+ sfparse) | https://github.com/ngtcp2/nghttp3 v1.18.0, https://github.com/ngtcp2/sfparse | `dbfc24286138`, `4b313cfd2e1b` | MIT | HTTP/3 + QPACK reference (`make test-h2h3`, benchmarks) |
+| h2spec | https://github.com/summerwind/h2spec v2.6.0 | `70ac22940108` | MIT | HTTP/2 conformance suite (`make h2spec`) |
+| picotls | https://github.com/h2o/picotls | `1e034d8418c1` | MIT | **the TLS 1.3 handshake `include/quic.h` builds on** (with OpenSSL libcrypto) |
+| ngtcp2 | https://github.com/ngtcp2/ngtcp2 v1.25.0 | `f9e9ff01ad2c` | MIT | QUIC reference client (`make test-h2h3`) |
+
+`make real-clients` installs [aioquic](https://github.com/aiortc/aioquic) 1.6.1 (BSD-3-Clause) from PyPI into a
+virtualenv under `build/`, as the HTTP/3 client.
 
 `make compare-go` builds `bench/go-fasthttp` against [valyala/fasthttp](https://github.com/valyala/fasthttp) v1.76.0 (MIT)
 and its dependencies, pinned by `bench/go-fasthttp/go.sum` and downloaded by the Go toolchain into its module cache.
