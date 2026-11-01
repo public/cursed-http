@@ -1,7 +1,9 @@
-# cursed-http-parser
+# cursed-http
 
-![CI](https://github.com/public/cursed-http-parser/actions/workflows/ci.yml/badge.svg)
+![CI](https://github.com/public/cursed-http/actions/workflows/ci.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/license-MIT-orange)
+
+*Formerly cursed-http-parser. Links to the old name redirect here.*
 
 Fast HTTP/1.1 request parsers in C, built on SIMD bitmasks (AVX2, AVX-512, NEON, with a scalar fallback).
 They are header-only, stateless and never allocate.
