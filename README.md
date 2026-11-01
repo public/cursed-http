@@ -14,6 +14,23 @@ This repository holds three single-header parsers plus a learning mode:
 - **[`fbparse.h`](include/fbparse.h)**, a general parser with picohttpparser's API and exactly its results.
 - **[`batchparse.h`](include/batchparse.h)**, which parses many connections' requests in one lane-parallel call.
 
+**Why it exists.** It was written for [cursed-http](https://github.com/public/cursed-http), an entry in the
+[$12 server challenge](https://github.com/arjaythedev/twelve-dollar-server-challenge), where one vCPU serves a small
+JSON API and every nanosecond per request counts. A server that knows its own routes doesn't need a general parser on
+the hot path, so fastparse.h matches the API's request lines directly and leaves everything else to fbparse.h. This
+repository is that server's parser, extracted with its tests and benchmarks.
+
+**Status.** Its one user so far is cursed-http, which the challenge's organisers scored at 275,000 simulated users.
+The parsers are complete for HTTP/1.1 requests and tested on x86-64 (AVX2, AVX-512) and AArch64 (NEON). There are no
+tagged releases yet; `main` is the current version. It has not had an external security review (see
+[SECURITY.md](SECURITY.md)).
+
+**Proven, tested, or neither.** Nothing here is formally verified. The parsers are tested: differentially against
+picohttpparser on millions of generated and mutated inputs per run, against 298 third-party conformance cases, with
+libFuzzer, Hypothesis properties, ASan/UBSan, and planted bugs (`make mutants`) that each must make a test fail.
+"Identical to picohttpparser" below means no difference has been found on those inputs, not that one can't exist.
+Details: [Correctness](#correctness).
+
 ## Features
 
 * **Bitmask parsing.** One ISA-specific step classifies 64 bytes into bitmasks; everything else is portable C on
@@ -22,12 +39,12 @@ This repository holds three single-header parsers plus a learning mode:
   "need more".
 * **Spec-generated routing.** `gen/httpgen.py` compiles your routes into canonical request-line templates matched
   with 64-bit compares. It can be profile-guided, and the profile contributes decisions only, never bytes.
-* **Safe by construction, not by hope.**
+* **Declines what it doesn't understand.**
   - Anything unusual returns `FP_FALLBACK`: HTTP/1.0, chunked, obs-fold, a bare CR, an odd Content-Length.
   - `fbparse.h` takes those requests with picohttpparser's exact accept/reject.
   - 298 third-party conformance cases (llhttp, HTTP Garden, picohttpparser, httparse) give 0 framing mismatches.
 * **A drop-in for picohttpparser.** `fb_parse_request` has `phr_parse_request`'s signature and returns
-  identical results on every input, including the -1 vs -2 decisions. Millions of differential inputs check that
+  identical results on every input tested so far, including the -1 vs -2 decisions. Millions of differential inputs check that
   on every run.
 * **Tested hard.** Differential fuzzing against picohttpparser, ASan/UBSan, planted-bug (mutation) checks, and
   real AVX-512 runs on a Xeon.
@@ -242,6 +259,7 @@ make bench
 - [Correctness](#correctness)
 - [Benchmarks](#benchmarks)
 - [Limits and semantic differences](#limits-and-semantic-differences)
+- [Security](#security)
 - [Acknowledgements](#acknowledgements)
 - [Licence](#licence)
 
@@ -964,6 +982,18 @@ anyway.
 - POST layouts rarely stick in the learned path, because token lengths vary.
 - The spec format is as listed above.
 - picohttpparser itself is undefined for `last_len > len + 3`, and so is `fb_parse_request`.
+
+## Security
+
+- **fastparse.h is not a validator.** It ignores what it doesn't need (see the list above), so put it in front of
+  code that only uses the fields it returns, and verify the Bearer token cryptographically.
+- **Framing is strict.** Anything that could make two parsers disagree about where a request ends (bare CR, obs-fold,
+  odd or duplicate Content-Length, any `Transfer-Encoding`) falls back to fbparse.h, which rejects exactly what
+  picohttpparser rejects. The HTTP Garden cases are request-smuggling payloads, and they found real bugs here first.
+- **Buffers:** the SIMD loads read up to 64 bytes past the end of the data, so the buffer must have at least 64
+  readable bytes after `buf[len - 1]` (any contents; see [Usage](#usage)). Results point into the buffer, so keep it
+  alive while you use them.
+- Report vulnerabilities privately, as described in [SECURITY.md](SECURITY.md).
 
 ## Acknowledgements
 
