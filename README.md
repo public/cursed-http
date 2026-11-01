@@ -153,10 +153,94 @@ they produce. The full design, test list, limits and benchmarks are in **[H2H3.m
 Everything but `quic.h` is dependency-free and never allocates. `quic.h` grows stream buffers through a
 caller-supplied allocator.
 
-**Fast.** On the Xeon, `h2.h` uses 3.5–4.9× less CPU per request than an nghttp2 server, in memory (browser
-request: 2,337 → 525 ns). HPACK decoding is 1.8–2.3× faster than nghttp2's, QPACK 1.4–2.5× faster than nghttp3's.
-The main reason: each header is validated once, when it enters the dynamic table, and the verdict is cached.
-nghttp2 and nghttp3 re-check every byte of every header on every request.
+### Are we fast? (HTTP/2 and HTTP/3)
+
+![HTTP/2 and HTTP/3 benchmark chart](bench/bench_h2h3.svg)
+
+Xeon Platinum 8260 (Cascade Lake), gcc 13.3 `-O3 -march=native`, ns per request, in memory: no sockets and no TLS.
+Every C rival is built with the same flags (`make MARCH=-march=native`), at least as aggressively as its own release
+build. Before it is timed, every decoder's output is checked field by field against the request it encodes, and every
+server must answer every request. Results are from exp1380 (C) and exp1362 (Go, Rust).
+
+**Server CPU per request**, 256 requests on one connection. The same client bytes go into each server, and each
+answers `:status 200` with a 13-byte body:
+
+| server | browser | gRPC | h2load |
+|---|---|---|---|
+| **`h2.h`** | **573** | **771** | **187** |
+| nghttp2 1.70 | 2,326 (4.1×) | 2,433 (3.2×) | 990 (5.3×) |
+| h2 0.4.20 (Rust, hyper's HTTP/2) ¹ | 5,141 (9.0×) | 5,552 (7.2×) | 2,869 (15×) |
+| golang.org/x/net/http2 v0.62 (Go 1.27) ¹ | 29,824 (52×) | 29,211 (38×) | 25,267 (135×) |
+| **`h3.h`** (HTTP/3 above QUIC) ² | **3,038** | **2,168** | **994** |
+| nghttp3 1.18 ² | 4,952 (1.6×) | 3,193 (1.5×) | 1,375 (1.4×) |
+
+**Header decoding** per request, warm 4 KB table:
+
+| decoder | browser | gRPC | h2load |
+|---|---|---|---|
+| **`hpack.h`** | **348** | **526** | **56** |
+| ls-hpack 2.3.5 (LiteSpeed) | 448 (1.3×) | 772 (1.5×) | 85 (1.5×) |
+| nghttp2 1.70 | 651 (1.9×) | 1,249 (2.4×) | 139 (2.5×) |
+| h2o (2026-11-01) | 732 (2.1×) | 1,389 (2.6×) | 79 (1.4×) |
+| x/net/http2/hpack (Go) | 840 (2.4×) | 1,889 (3.6×) | 112 (2.0×) |
+| **`qpack.h`**, dynamic table | **1,192** | **986** | **89** |
+| ls-qpack 2.7.0 (LiteSpeed), dynamic | 1,214 (1.02×) | 1,080 (1.10×) | 188 (2.1×) |
+| ls-qpack, dynamic, plus `qpack.h`'s field checks ⁴ | 1,526 (1.3×) | 1,282 (1.3×) | 261 (2.9×) |
+| h2o, dynamic ³ | 1,792 (1.5×) | 1,754 (1.8×) | 134 (1.5×) |
+| nghttp3 1.18, dynamic | 1,815 (1.5×) | 1,629 (1.7×) | 211 (2.4×) |
+| **`qpack.h`**, static table only | **2,532** | **1,172** | **145** |
+| ls-qpack, static only | 2,646 (1.04×) | 1,202 (1.03×) | 227 (1.6×) |
+| ls-qpack, static only, plus `qpack.h`'s field checks ⁴ | 2,952 (1.2×) | 1,400 (1.2×) | 309 (2.1×) |
+| nghttp3, static only | 3,994 (1.6×) | 1,929 (1.6×) | 336 (2.3×) |
+| h2o, static only ³ | 5,229 (2.1×) | 2,139 (1.8×) | 304 (2.1×) |
+| quic-go/qpack 0.6 (Go, static only) | 9,062 (3.6×) | 3,626 (3.1×) | 456 (3.1×) |
+
+- **Closest race: LiteSpeed's ls-qpack.** It is within 2–10% of `qpack.h` on the browser and gRPC sets, though
+  `qpack.h` checks every field against RFC 9113 and ls-qpack checks nothing. Doing the same checks in its
+  callback (⁴) puts ls-qpack 1.2–1.3× behind. Without a dynamic table, which is when a server advertises none,
+  nothing can be cached, and the value check alone costs `qpack.h` about 7–10% (exp1378). Huffman is not the
+  difference: on its own, our decoder is faster than ls-qpack's on these strings (exp1371).
+- **`h3.h` vs nghttp3** is 1.4–1.6×, much less than HTTP/2's 3–5×. At 1 µs per small request, `h3.h` has
+  per-stream overhead left to remove.
+- **Why `hpack.h` and `h2.h` win.** Each header is validated once, when it enters the dynamic table, and the
+  verdict is cached. nghttp2 and nghttp3 re-check every byte of every header on every request. ls-hpack doesn't
+  validate at all, and h2o validates like we do.
+- **Build flags matter at this scale.** An earlier run with the Makefile's default x86 target (`-march=haswell`)
+  had `qpack.h` 1–7% behind ls-qpack on the gRPC set and `hpack.h` 7% faster on the browser set.
+
+¹ Go and Rust are measured by their own harnesses ([`bench/go-h2h3`](bench/go-h2h3),
+[`bench/rust-h2`](bench/rust-h2)) on the same bytes, dumped with `bench_h2h3 --dump`. Each runs on one thread
+(`GOMAXPROCS=1`, a current-thread tokio runtime) through an in-memory connection; Rust is built with fat LTO and
+`target-cpu=native`. Their time includes the in-memory pipe and counting the responses, which is small next to
+these numbers. Go's server also starts a goroutine per request and adds `Date` and `Content-Length` headers.
+² An nghttp3 client's stream bytes, with its QPACK encoder using a 4 KB dynamic table, replayed into each server
+over an emulated stream transport. QUIC itself is not included.
+⁴ ls-qpack with `qpack.h`'s two per-field checks (the name's class and the RFC 9113 value rules) added to its
+header callback: the same work `qpack.h` does, so this row compares like with like. Build it with
+`make MARCH=-march=native CFLAGS="-O3 -DLSVAL" bench-h2h3-rivals` (its ls-qpack rows are then this one).
+³ h2o's only public QPACK section decoder is its request parser, so its numbers also include h2o's request checks
+and building its header vector. Its HPACK row uses the per-field decoder only.
+
+Reproduce:
+
+```bash
+scripts/fetch-thirdparty.sh nghttp2 nghttp3 ls-hpack ls-qpack h2o
+make MARCH=-march=native bench-h2h3-rivals
+```
+
+For the Go and Rust rows (Go 1.26+, cargo):
+
+```bash
+build/h2h3/bench_h2h3_rivals --dump build/h2h3/corpus
+```
+
+```bash
+(cd bench/go-h2h3 && go run . ../../build/h2h3/corpus)
+```
+
+```bash
+(cd bench/rust-h2 && cargo run --release -- ../../build/h2h3/corpus)
+```
 
 **Tested** against the reference implementations and real clients:
 - h2spec strict mode, 147/147;
@@ -604,6 +688,7 @@ make extras-check # both, as quick correctness gates (CI / Docker)
 make test-h2h3    # HPACK, h2, QPACK, h3 and QUIC tests, differential against nghttp2 / nghttp3 / ngtcp2
 make h2spec       # HTTP/2 conformance (Go)
 make real-clients # curl over HTTP/2 and aioquic over HTTP/3, against the example servers
+make bench-h2h3-rivals # + ls-hpack, ls-qpack, h2o (fetch them first); bench/go-h2h3, bench/rust-h2 for Go / Rust
 make mutants-h2 mutants-quic
 ```
 

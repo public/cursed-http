@@ -30,8 +30,8 @@ M = [
     ),
     (
         "h2.h",
-        "    if (c->conn_recv_unacked >= H2_CONN_WINDOW / 2) h2__window_update(c, 0, c->conn_recv_unacked), c->conn_recv_unacked = 0;",
-        "    ;",
+        "      if (c->conn_recv_unacked >= H2_CONN_WINDOW / 2)\n        h2__window_update(c, 0, c->conn_recv_unacked), c->conn_recv_unacked = 0;",
+        "      ;",
     ),
     ("h2.h", "        int64_t delta = (int64_t)v - c->peer_initial_window;", "        int64_t delta = 0;"),
     (
@@ -48,7 +48,7 @@ M = [
     ("hpack.h", "  while (d->n && d->size + want > d->max) {", "  while (d->n && d->size + want > d->max + 32) {"),
     (
         "h3.h",
-        "      if (s->content_length >= 0 && s->data_seen > s->content_length) { h3__reset(c, s, sid, H3_MESSAGE_ERROR); return (int)len; }",
+        "      if (s->content_length >= 0 && s->data_seen > s->content_length) {\n        h3__reset(c, s, sid, H3_MESSAGE_ERROR);\n        return (int)len;\n      }",
         "",
     ),
     (
