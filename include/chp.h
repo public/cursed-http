@@ -1,5 +1,5 @@
-// chp.h - cursed-http-parser behind one ABI, for binaries that run on any CPU of their architecture.
-// Part of cursed-http-parser. MIT licence, see LICENSE.
+// chp.h - cursed-http behind one ABI, for binaries that run on any CPU of their architecture.
+// Part of cursed-http. MIT licence, see LICENSE.
 //
 // The headers pick their SIMD backend at compile time (-march). A binary built for the x86-64 baseline
 // therefore gets SSE2, and one built with -mavx2 dies on a CPU without it. Link build/libchp.a instead

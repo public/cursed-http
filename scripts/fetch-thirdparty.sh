@@ -11,6 +11,14 @@
 #   pico-a64   volyrique/picohttpparser armv8-a     MIT/Perl        comparison benchmark (pico with Armv8-A NEON optimisations)
 #   pico-a64tbl volyrique/picohttpparser armv8-a+tbl MIT/Perl       comparison benchmark (the same, TBL-based parse_token)
 #   http-parser nodejs/http-parser v2.9.4+         MIT             comparison benchmark (Node.js's parser before llhttp)
+#   nghttp2    nghttp2/nghttp2 v1.70.0              MIT             HTTP/2 + HPACK reference (differential tests, client)
+#   nghttp3    ngtcp2/nghttp3 v1.18.0 (+ sfparse)   MIT             HTTP/3 + QPACK reference (differential tests)
+#   h2spec     summerwind/h2spec v2.6.0             MIT             HTTP/2 conformance suite (needs Go)
+#   picotls    h2o/picotls                          MIT             TLS 1.3 handshake for include/quic.h (+ OpenSSL libcrypto)
+#   ngtcp2     ngtcp2/ngtcp2 v1.25.0                MIT             QUIC reference client (in-memory interop tests)
+#   ls-hpack   litespeedtech/ls-hpack v2.3.5        MIT             HPACK comparison benchmark (LiteSpeed, lsquic)
+#   ls-qpack   litespeedtech/ls-qpack v2.7.0        MIT             QPACK comparison benchmark (LiteSpeed, lsquic)
+#   h2o        h2o/h2o (master, 2026-11-01)         MIT             HPACK / QPACK comparison benchmark
 # Default: all of them.
 set -e
 cd "$(dirname "$0")/.."
@@ -28,7 +36,7 @@ fetch() { # name owner/repo commit
   echo "$3" >"third_party/$1/.commit"
 }
 ALL="$*"
-for n in uws httparse hparse llhttp-src garden pico-src lightning pico-a64 pico-a64tbl http-parser; do
+for n in uws httparse hparse llhttp-src garden pico-src lightning pico-a64 pico-a64tbl http-parser nghttp2 nghttp3 h2spec picotls ngtcp2 ls-hpack ls-qpack h2o; do
   if [ -n "$ALL" ] && ! echo " $ALL " | grep -q " $n "; then continue; fi
   case $n in
     uws) fetch uws uNetworking/uWebSockets 3ffd6f44c9c3c92c96345d9f96bd01ba9c025ab5 ;;
@@ -41,5 +49,20 @@ for n in uws httparse hparse llhttp-src garden pico-src lightning pico-a64 pico-
     pico-a64) fetch pico-a64 volyrique/picohttpparser a47c4d00644f084d5170acdffa73642e81b2f908 ;;
     pico-a64tbl) fetch pico-a64tbl volyrique/picohttpparser b93abc18204cf273829a01197167952c43b5cd6b ;;
     http-parser) fetch http-parser nodejs/http-parser ec8b5ee63f0e51191ea43bb0c6eac7bfbff3141d ;;
+    nghttp2) fetch nghttp2 nghttp2/nghttp2 85e300c79fb6dbcfa9c1013215c8710c1c2cd3d2 ;;
+    nghttp3)
+      fetch nghttp3 ngtcp2/nghttp3 dbfc24286138cb0b6490160e7ca87fe1ce6722a0
+      [ -f third_party/nghttp3/lib/sfparse/sfparse.c ] || {
+        rmdir third_party/nghttp3/lib/sfparse 2>/dev/null || true
+        fetch nghttp3-sfparse ngtcp2/sfparse 4b313cfd2e1b389ae632b36dcd50402307289af2
+        mv third_party/nghttp3-sfparse third_party/nghttp3/lib/sfparse
+      }
+      ;;
+    h2spec) fetch h2spec summerwind/h2spec 70ac2294010887f48b18e2d64f5cccd48421fad1 ;;
+    picotls) fetch picotls h2o/picotls 1e034d8418c1f806f2ba86717b34c910934f38f9 ;;
+    ngtcp2) fetch ngtcp2 ngtcp2/ngtcp2 f9e9ff01ad2c8116bc09de4f644b0028a61486a6 ;;
+    ls-hpack) fetch ls-hpack litespeedtech/ls-hpack cf0f70dd10b352194c97448eb5d00b4aa484f531 ;;
+    ls-qpack) fetch ls-qpack litespeedtech/ls-qpack 91567706c41c0d97ab8dc576873ecd472d7869fa ;;
+    h2o) fetch h2o h2o/h2o 0d22c901981c6adefebf483673eef64da968df3e ;;
   esac
 done

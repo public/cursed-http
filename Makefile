@@ -1,4 +1,4 @@
-# cursed-http-parser
+# cursed-http (formerly cursed-http-parser)
 #   make test         every differential test (native backend, scalar, emulated AVX-512, generated headers)
 #   make test-quick   the same with smaller fuzz counts (CI)
 #   make asan         ASan + UBSan builds of the tests (quick mode)
@@ -348,3 +348,4 @@ hooks:
 clean:
 	rm -rf $(B)
 .PHONY: all lib mca mca-validate gen gencheck test test-quick asan bench avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check fuzz fuzz-replay hypothesis mutants-fuzz format lint hooks clean
+include mk/h2h3.mk
