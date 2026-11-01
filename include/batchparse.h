@@ -1,5 +1,5 @@
 // batchparse.h - lane-parallel HTTP request parsing: N requests from N different connections at once.
-// Part of cursed-http-parser. MIT licence, see LICENSE.
+// Part of cursed-http. MIT licence, see LICENSE.
 // Builds on fastparse.h (included, never modified): every lane returns exactly what fast_parse()
 // returns for that buffer (same ret, same req_t), including NEED_MORE / FALLBACK.
 //

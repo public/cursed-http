@@ -1,5 +1,5 @@
 // fbparse.h - general HTTP/1.x request parser, picohttpparser-exact, SIMD (the slow path behind fastparse.h).
-// Part of cursed-http-parser. MIT licence, see LICENSE. The validation rules and the -1/-2 decisions follow
+// Part of cursed-http. MIT licence, see LICENSE. The validation rules and the -1/-2 decisions follow
 // picohttpparser's behaviour (MIT; credited in THIRD_PARTY.md).
 //
 // API (picohttpparser's phr_parse_request, same arguments and results):
