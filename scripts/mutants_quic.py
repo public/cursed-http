@@ -13,7 +13,7 @@ M = [
  ("quic.h", "  c->bytes_in_flight -= p->size;\n  if (p->sent_at <= c->recovery_start) return; /* in recovery */", "  if (p->sent_at <= c->recovery_start) return; /* in recovery */"),
  ("quic.h", "    if (uni) c->max_streams_uni_local++, c->send_max_streams_uni = 1;\n    else c->max_streams_bidi_local++, c->send_max_streams_bidi = 1;", "    ;"),
  ("quic.h", "    if (room < limit) limit = (size_t)room;", ";"),
- ("quic.h", "    c->key_phase ^= 1;", ";"),
+ ("quic.h", "    c->key_phase ^= 1, c->phase_first_pn = pn;", "    c->phase_first_pn = pn;"),
 ]
 for i, (f, a, b) in enumerate(M, 1):
     d = f"{out}/{i}"; os.makedirs(d)

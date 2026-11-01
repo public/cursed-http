@@ -92,6 +92,7 @@ enum { H2S_FREE, H2S_ACTIVE };
 #define H2_ST_TRAILERS 8u     /* trailers follow the body */
 #define H2_ST_REMOTE_END 16u  /* the client sent END_STREAM (half-closed remote) */
 #define H2_ST_LOCAL_END 32u   /* we sent END_STREAM (half-closed local) */
+#define H2_ST_QUEUED 64u      /* in the send queue */
 
 typedef struct {
   uint32_t id;
@@ -115,7 +116,8 @@ struct h2_conn {
   int64_t conn_send_win;
   uint32_t conn_recv_unacked;
   int nactive;
-  uint32_t rr;                 /* round-robin cursor for DATA */
+  uint32_t qh, qn;             /* send queue: ring of stream slots with a body or trailers pending */
+  uint16_t q[H2_MAX_STREAMS];
   hp_dec dec;
   size_t stage_len, stage_off;
   uint8_t stage[H2_STAGE];
@@ -155,8 +157,9 @@ static inline void h2__window_update(h2_conn *c, uint32_t sid, uint32_t inc) {
 }
 
 /* ------------------------------------------ streams ------------------------------------------ */
+/* streams live in slots probed from (sid / 2) % H2_MAX_STREAMS, so a lookup is O(1) on average */
 static inline h2_stream *h2__find(h2_conn *c, uint32_t sid) {
-  for (int i = 0; i < H2_MAX_STREAMS; i++)
+  for (uint32_t k = 0, i = (sid >> 1) % H2_MAX_STREAMS; k < H2_MAX_STREAMS; k++, i = (i + 1) % H2_MAX_STREAMS)
     if (c->s[i].state != H2S_FREE && c->s[i].id == sid) return &c->s[i];
   return NULL;
 }
@@ -194,6 +197,11 @@ static inline void h2__end(h2_conn *c, h2_stream *s, uint8_t which) {
   if ((s->flags & (H2_ST_REMOTE_END | H2_ST_LOCAL_END)) == (H2_ST_REMOTE_END | H2_ST_LOCAL_END)) h2__close_stream(c, s, 0);
 }
 
+static inline void h2__enqueue(h2_conn *c, h2_stream *s) {
+  if (s->flags & H2_ST_QUEUED) return;
+  s->flags |= H2_ST_QUEUED;
+  c->q[(c->qh + c->qn++) % H2_MAX_STREAMS] = (uint16_t)(s - c->s);
+}
 static inline void h2_init(h2_conn *c, const h2_callbacks *cb, void *user) {
   memset(c, 0, offsetof(h2_conn, dec));
   c->cb = *cb, c->user = user;
@@ -219,7 +227,8 @@ static inline int h2__header_block(h2_conn *c, h2_scratch *sc, uint32_t sid, uin
   if (n == HP_E_COMPRESSION) return h2__fail(c, H2_COMPRESSION_ERROR);
   if (n < 0) return h2__fail(c, H2_ENHANCE_YOUR_CALM);
   int end = flags & H2_FL_END_STREAM;
-  h2_stream *s = h2__find(c, sid);
+  /* an id above any seen is a new stream: no lookup (a miss would probe every slot) */
+  h2_stream *s = sid <= c->last_sid ? h2__find(c, sid) : NULL;
   if (s) { /* trailers: a second HEADERS on a stream the client has not ended */
     if (s->flags & H2_ST_REMOTE_END) { h2_reset(c, sid, H2_STREAM_CLOSED); return 0; }
     if (!end || self_dep) { h2_reset(c, sid, H2_PROTOCOL_ERROR); return 0; }
@@ -238,7 +247,7 @@ static inline int h2__header_block(h2_conn *c, h2_scratch *sc, uint32_t sid, uin
   if (self_dep) { h2_reset(c, sid, H2_PROTOCOL_ERROR); return 0; } /* §5.3.1 */
   if (c->goaway_sent) return 0;
   if (c->nactive >= H2_MAX_STREAMS) { h2_reset(c, sid, H2_REFUSED_STREAM); return 0; }
-  for (int i = 0; i < H2_MAX_STREAMS; i++)
+  for (uint32_t k = 0, i = (sid >> 1) % H2_MAX_STREAMS; k < H2_MAX_STREAMS; k++, i = (i + 1) % H2_MAX_STREAMS)
     if (c->s[i].state == H2S_FREE) { s = &c->s[i]; break; }
   if (!s) return h2__fail(c, H2_INTERNAL_ERROR); /* cannot happen while nactive < H2_MAX_STREAMS */
   memset(s, 0, offsetof(h2_stream, trailer));
@@ -496,6 +505,7 @@ static inline int h2_respond(h2_conn *c, uint32_t sid, int status, const hp_fiel
   if (headers_end) { h2__end(c, s, H2_ST_LOCAL_END); return 0; }
   s->body = body ? body : (const uint8_t *)"", s->body_len = len, s->body_off = 0;
   if (end) s->flags |= H2_ST_BODY_END;
+  h2__enqueue(c, s);
   return 0;
 }
 static inline int h2_data(h2_conn *c, uint32_t sid, const uint8_t *body, size_t len, int end) {
@@ -504,6 +514,7 @@ static inline int h2_data(h2_conn *c, uint32_t sid, const uint8_t *body, size_t 
     return H2_E_STATE;
   s->body = body, s->body_len = len, s->body_off = 0;
   if (end) s->flags |= H2_ST_BODY_END;
+  h2__enqueue(c, s);
   return 0;
 }
 static inline int h2_trailers(h2_conn *c, uint32_t sid, const hp_field *f, int n) {
@@ -513,18 +524,12 @@ static inline int h2_trailers(h2_conn *c, uint32_t sid, const hp_field *f, int n
   if (!bl) return H2_E_TOO_BIG;
   s->trailer_len = (uint16_t)bl, s->flags |= H2_ST_TRAILERS;
   if (!s->body) s->body = (const uint8_t *)"", s->body_len = s->body_off = 0;
+  h2__enqueue(c, s);
   return 0;
 }
 
 static inline int h2_want_write(const h2_conn *c) {
-  if (c->stage_len > c->stage_off) return 1;
-  for (int i = 0; i < H2_MAX_STREAMS; i++) {
-    const h2_stream *s = &c->s[i];
-    if (s->state != H2S_FREE && s->body && (s->body_off < s->body_len || (s->flags & (H2_ST_BODY_END | H2_ST_TRAILERS))) &&
-        (s->body_off == s->body_len || (s->send_win > 0 && c->conn_send_win > 0)))
-      return 1;
-  }
-  return 0;
+  return c->stage_len > c->stage_off || (c->qn && c->conn_send_win > 0);
 }
 static inline int h2_is_closed(const h2_conn *c) { return c->closed && c->stage_len == c->stage_off; }
 
@@ -546,44 +551,42 @@ static inline size_t h2_send(h2_conn *c, uint8_t *out, size_t cap) {
     if (m < pend) return w;
   }
   if (c->closed) return w;
-  /* DATA, round-robin over streams, within the flow-control windows */
-  for (int progress = 1; progress && w + 9 < cap;) {
-    progress = 0;
-    for (int k = 0; k < H2_MAX_STREAMS && w + 9 < cap; k++) {
-      int i = (int)((c->rr + (uint32_t)k) % H2_MAX_STREAMS);
-      h2_stream *s = &c->s[i];
-      if (s->state == H2S_FREE || !s->body || (s->flags & H2_ST_LOCAL_END)) continue;
-      size_t left = s->body_len - s->body_off;
-      int fin_flag = (s->flags & H2_ST_BODY_END) != 0, trl = (s->flags & H2_ST_TRAILERS) != 0;
-      if (!left && !fin_flag && !trl) continue; /* waiting for h2_data */
-      size_t m = left;
-      if (m > c->peer_max_frame) m = c->peer_max_frame;
-      if ((int64_t)m > s->send_win) m = s->send_win > 0 ? (size_t)s->send_win : 0;
-      if ((int64_t)m > c->conn_send_win) m = c->conn_send_win > 0 ? (size_t)c->conn_send_win : 0;
-      if (m > cap - w - 9) m = cap - w - 9;
-      if (!m && left) continue; /* blocked by flow control or space */
-      int last = m == left;
-      uint8_t fl = last && fin_flag && !trl ? H2_FL_END_STREAM : 0;
-      if (m || fl) {
-        h2__hdr(out + w, (uint32_t)m, H2F_DATA, fl, s->id);
-        memcpy(out + w + 9, s->body + s->body_off, m);
-        w += 9 + m, s->body_off += m, s->send_win -= (int32_t)m, c->conn_send_win -= (int64_t)m;
-        progress = 1;
-      }
-      if (!last) continue;
-      if (trl) {
-        if (w + 9 + s->trailer_len > cap) continue;
-        h2__hdr(out + w, s->trailer_len, H2F_HEADERS, H2_FL_END_HEADERS | H2_FL_END_STREAM, s->id);
-        memcpy(out + w + 9, s->trailer, s->trailer_len);
-        w += 9 + s->trailer_len, progress = 1;
-        h2__local_end(c, s);
-      } else if (fin_flag) {
-        h2__local_end(c, s);
-      } else {
-        s->body = NULL, s->body_len = s->body_off = 0;
-        if (c->cb.on_sent) c->cb.on_sent(c, s->id, c->user);
-      }
-      c->rr = (uint32_t)(i + 1);
+  /* DATA from the send queue, round-robin, within the flow-control windows: each stream gets one
+   * frame per turn and goes to the back while it has more */
+  for (uint32_t idle = 0; c->qn && idle < c->qn && w + 9 < cap;) {
+    h2_stream *s = &c->s[c->q[c->qh]];
+    c->qh = (c->qh + 1) % H2_MAX_STREAMS, c->qn--;
+    s->flags &= (uint8_t)~H2_ST_QUEUED;
+    if (s->state == H2S_FREE || !s->body || (s->flags & H2_ST_LOCAL_END)) continue; /* gone or done */
+    size_t left = s->body_len - s->body_off;
+    int fin_flag = (s->flags & H2_ST_BODY_END) != 0, trl = (s->flags & H2_ST_TRAILERS) != 0;
+    if (!left && !fin_flag && !trl) continue; /* waiting for h2_data, which queues it again */
+    size_t m = left;
+    if (m > c->peer_max_frame) m = c->peer_max_frame;
+    if ((int64_t)m > s->send_win) m = s->send_win > 0 ? (size_t)s->send_win : 0;
+    if ((int64_t)m > c->conn_send_win) m = c->conn_send_win > 0 ? (size_t)c->conn_send_win : 0;
+    if (m > cap - w - 9) m = cap - w - 9;
+    if (!m && left) { h2__enqueue(c, s), idle++; continue; } /* blocked by flow control or space */
+    idle = 0;
+    int last = m == left;
+    uint8_t fl = last && fin_flag && !trl ? H2_FL_END_STREAM : 0;
+    if (m || fl) {
+      h2__hdr(out + w, (uint32_t)m, H2F_DATA, fl, s->id);
+      memcpy(out + w + 9, s->body + s->body_off, m);
+      w += 9 + m, s->body_off += m, s->send_win -= (int32_t)m, c->conn_send_win -= (int64_t)m;
+    }
+    if (!last) { h2__enqueue(c, s); continue; }
+    if (trl) {
+      if (w + 9 + s->trailer_len > cap) { h2__enqueue(c, s), idle++; continue; }
+      h2__hdr(out + w, s->trailer_len, H2F_HEADERS, H2_FL_END_HEADERS | H2_FL_END_STREAM, s->id);
+      memcpy(out + w + 9, s->trailer, s->trailer_len);
+      w += 9 + s->trailer_len;
+      h2__local_end(c, s);
+    } else if (fin_flag) {
+      h2__local_end(c, s);
+    } else {
+      s->body = NULL, s->body_len = s->body_off = 0;
+      if (c->cb.on_sent) c->cb.on_sent(c, s->id, c->user);
     }
   }
   return w;

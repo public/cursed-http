@@ -402,13 +402,15 @@ static inline void quic_ctx_init(quic_ctx *x, ptls_context_t *tls) {
   tls->max_early_data_size = 0;
 }
 
+/* slots probed from a hash of the id: O(1) on average */
+static inline uint32_t quic__slot(uint64_t sid) { return (uint32_t)(((sid >> 2) * 4 + (sid & 3)) % QUIC_MAX_STREAMS); }
 static inline quic_stream *quic__stream(quic_conn *c, uint64_t sid) {
-  for (int i = 0; i < QUIC_MAX_STREAMS; i++)
+  for (uint32_t k = 0, i = quic__slot(sid); k < QUIC_MAX_STREAMS; k++, i = (i + 1) % QUIC_MAX_STREAMS)
     if (c->s[i].used && c->s[i].id == sid) return &c->s[i];
   return NULL;
 }
 static inline quic_stream *quic__stream_new(quic_conn *c, uint64_t sid) {
-  for (int i = 0; i < QUIC_MAX_STREAMS; i++)
+  for (uint32_t k = 0, i = quic__slot(sid); k < QUIC_MAX_STREAMS; k++, i = (i + 1) % QUIC_MAX_STREAMS)
     if (!c->s[i].used) {
       quic_stream *s = &c->s[i];
       memset(s, 0, sizeof *s);
@@ -729,11 +731,11 @@ static inline int quic__stream_deliver(quic_conn *c, quic_stream *s) {
 /* a client stream id we have not seen: check limits and open it */
 static inline quic_stream *quic__peer_stream(quic_conn *c, uint64_t sid, int *err) {
   *err = 0;
-  quic_stream *s = quic__stream(c, sid);
-  if (s) return s;
-  if (sid & 1) { *err = QUIC_STREAM_STATE_ERROR; return NULL; } /* server-initiated: only ours, and we keep those */
   int uni = (sid & 2) != 0;
   uint64_t idx = sid >> 2, *opened = uni ? &c->opened_uni : &c->opened_bidi;
+  quic_stream *s = (sid & 1) || idx < *opened ? quic__stream(c, sid) : NULL; /* beyond opened: new, no lookup */
+  if (s) return s;
+  if (sid & 1) { *err = QUIC_STREAM_STATE_ERROR; return NULL; } /* server-initiated: only ours, and we keep those */
   if (idx >= (uni ? c->max_streams_uni_local : c->max_streams_bidi_local)) { *err = QUIC_STREAM_LIMIT_ERROR; return NULL; }
   if (quic__rs_covers(&c->closed[uni], idx, idx + 1)) return NULL; /* finished and freed: ignore */
   if (idx + 1 > *opened) *opened = idx + 1;

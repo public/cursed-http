@@ -118,3 +118,6 @@ mutants-quic: $(H2B)/libngtcp2.a $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
 
 $(H2B)/h3_server: examples/h3_server.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls.a
 	$(CC) -O2 $(WARN) $(MARCH) -Iinclude $(QINC) $< $(H2B)/libpicotls.a -lcrypto -o $@
+
+$(H2B)/bench_h2h3: bench/bench_h2h3.c bench/h2_headers.h $(H2HDRS) $(H2B)/libnghttp2.a $(H2B)/libnghttp3.a
+	$(H2CC) -Ibench -DH2_MAX_STREAMS=1000 $(N2INC) $(N3INC) $< $(H2B)/libnghttp2.a $(H2B)/libnghttp3.a -o $@

@@ -9,7 +9,8 @@
  *       and call again with more. offset is the stream offset of buf[0]. Returns H3_E_CLOSED once
  *       the connection has failed: close it with h3_error(&c) as the application error code.
  *   h3_peer_reset(&c, sid, code)          RESET_STREAM or STOP_SENDING arrived for a request stream
- *   n = h3_pending(&c, sids, max)         streams that have output
+ *   n = h3_pending(&c, sids, max)         streams that have output (scans every stream)
+ *   h3_stream_wants(&c, sid)              whether one stream has output (O(1) on average)
  *   n = h3_stream_send(&c, sid, out, cap, &fin)       up to cap bytes for that stream
  *
  *   h3_respond / h3_data / h3_trailers / h3_goaway    as in h2.h (zero-copy bodies)
@@ -118,8 +119,9 @@ static inline int h3__fail(h3_conn *c, uint64_t code) {
   if (!c->error) c->error = code;
   return H3_E_CLOSED;
 }
+/* slots probed from (sid / 4) % H3_MAX_STREAMS: O(1) on average */
 static inline h3_stream *h3__find(h3_conn *c, uint64_t sid) {
-  for (int i = 0; i < H3_MAX_STREAMS; i++)
+  for (uint32_t k = 0, i = (uint32_t)((sid >> 2) % H3_MAX_STREAMS); k < H3_MAX_STREAMS; k++, i = (i + 1) % H3_MAX_STREAMS)
     if (c->s[i].active && c->s[i].id == sid) return &c->s[i];
   return NULL;
 }
@@ -211,7 +213,7 @@ static inline int h3__request_stream(h3_conn *c, h3_scratch *sc, uint64_t sid, u
      * finished or reset: a new one starts at 0 */
     if (offset) return (int)len;
     if (c->goaway_sent && sid >= c->max_sid) return (int)len;
-    for (int i = 0; i < H3_MAX_STREAMS; i++)
+    for (uint32_t k = 0, i = (uint32_t)((sid >> 2) % H3_MAX_STREAMS); k < H3_MAX_STREAMS; k++, i = (i + 1) % H3_MAX_STREAMS)
       if (!c->s[i].active) { s = &c->s[i]; break; }
     if (sid + 4 > c->max_sid) c->max_sid = sid + 4;
     if (!s) { h3__reset(c, NULL, sid, H3_REQUEST_REJECTED); return (int)len; }
@@ -434,6 +436,14 @@ static inline int h3__has_out(const h3_conn *c, const h3_stream *s) {
   if (s->hdr_off < s->hdr_len) return 1;
   if (s->body && s->body_off < s->body_len) return 1;
   return (s->flags & (H3_ST_BODY_END | H3_ST_TRAILERS)) != 0; /* the fin, or trailers, are still due */
+}
+/* does stream sid have output? (O(1) on average, for a transport's per-stream check) */
+static inline int h3_stream_wants(h3_conn *c, uint64_t sid) {
+  if (sid == c->out_id[0]) return c->ctrl_off < c->ctrl_len;
+  if (sid == c->out_id[1]) return !c->type_sent[0];
+  if (sid == c->out_id[2]) return !c->type_sent[1] || c->qd.fb_len || c->qd.inserted > c->qd.known;
+  h3_stream *s = h3__find(c, sid);
+  return s && h3__has_out(c, s);
 }
 static inline int h3_pending(h3_conn *c, uint64_t *sids, int max) {
   int n = 0;

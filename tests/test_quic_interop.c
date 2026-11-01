@@ -128,12 +128,7 @@ static size_t q_send(quic_conn *q, uint64_t sid, uint8_t *out, size_t cap, int *
 }
 static int q_wants(quic_conn *q, uint64_t sid, void *u) {
   (void)q;
-  server *s = u;
-  uint64_t ids[256];
-  int n = h3_pending(&s->h, ids, 256);
-  for (int i = 0; i < n; i++)
-    if (ids[i] == sid) return 1;
-  return 0;
+  return h3_stream_wants(&((server *)u)->h, sid);
 }
 static void q_reset(quic_conn *q, uint64_t sid, uint64_t code, void *u) {
   (void)q;
