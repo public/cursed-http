@@ -4,9 +4,9 @@ Status: 2026-11-01, measured on `main` at `91e7fd3`. Prototypes are draft PRs an
 
 | PR | option | library lines | codegen | Xeon |
 |---|---|---|---|---|
-| [#10](https://github.com/public/cursed-http/pull/10) | 1. hfield.h dead tables | −270 | byte-identical | exp1372 |
-| [#9](https://github.com/public/cursed-http/pull/9) | 2. fbparse.h vector layer | −104 | byte-identical | exp1369, exp1370 |
-| [#11](https://github.com/public/cursed-http/pull/11) | 3. dead A/B knobs (stacked on #9) | −37 | byte-identical | pending |
+| [#10](https://github.com/public/cursed-http/pull/10) | 1. hfield.h dead tables | −270 | byte-identical | exp1372: code and `.rodata` identical with the box's gcc 13.3 / clang 18.1; 18 decode cells, worst median +0.11% |
+| [#9](https://github.com/public/cursed-http/pull/9) | 2. fbparse.h vector layer | −104 | byte-identical | exp1369: identical on the box, tests pass on real AVX2/SSE2/AVX-512, x86 mutants killed. exp1370: 12 cells, worst median +0.72%, geomean +0.06% (gcc) / +0.01% (clang) |
+| [#11](https://github.com/public/cursed-http/pull/11) | 3. dead A/B knobs (stacked on #9) | −37 | byte-identical | exp1379: identical on the box; 12 cells, worst median +0.58% |
 
 **The rule used for "without hurting performance".** A change qualifies only if, before and after, the machine code
 and `.rodata` of every public entry point are **byte-identical** under:
@@ -201,12 +201,12 @@ place, so a mutant in a shared predicate now bites on every backend. That is str
 - `make test-quick` on arm64; `make test-h2h3` for #10.
 - The mutant scripts, before vs after, with every mutant still applying.
 - CI on x86-64 Linux.
+- A full fuzz sweep on Linux arm64 clang, on #11 (which contains #9): `make fuzz FUZZ_TIME=120` found no mismatch
+  (6.4M runs over 4 targets), and `make hypothesis HYP_EXAMPLES=2000` passed all 5 properties.
 - On the Xeon: real-hardware AVX2/SSE2/AVX-512 tests and the x86-only mutants, plus a same-run timing A/B (6
   corpora × 8 layouts × 4 rounds × gcc/clang for fbparse; 9 HPACK/QPACK/Huffman cells for hfield).
 
 **Not done here**
-- A full fuzz sweep: libFuzzer isn't in Apple clang, so `fuzz-replay` of the seeds and regressions ran instead.
-  Run `make fuzz` on Linux before merging.
 - Real-hardware AVX-512 mutants beyond the x86-only set.
 
 **Order to land**
