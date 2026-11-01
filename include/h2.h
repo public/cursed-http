@@ -48,23 +48,44 @@
 #ifndef H2_TRAILER_MAX
 #define H2_TRAILER_MAX 128 /* encoded trailer block per stream */
 #endif
-#define H2_MAX_FIELDS 256
-#define H2_FRAME_MAX 16384     /* SETTINGS_MAX_FRAME_SIZE we keep (the default) */
+#define H2_MAX_FIELDS  256
+#define H2_FRAME_MAX   16384       /* SETTINGS_MAX_FRAME_SIZE we keep (the default) */
 #define H2_CONN_WINDOW (16u << 20) /* raised once at start (HAProxy raises it to 2 GB) */
 
 enum { H2_E_CLOSED = -1, H2_E_AGAIN = -2, H2_E_STATE = -3, H2_E_TOO_BIG = -4 };
 enum {
-  H2_NO_ERROR, H2_PROTOCOL_ERROR, H2_INTERNAL_ERROR, H2_FLOW_CONTROL_ERROR, H2_SETTINGS_TIMEOUT,
-  H2_STREAM_CLOSED, H2_FRAME_SIZE_ERROR, H2_REFUSED_STREAM, H2_CANCEL, H2_COMPRESSION_ERROR,
-  H2_CONNECT_ERROR, H2_ENHANCE_YOUR_CALM, H2_INADEQUATE_SECURITY, H2_HTTP_1_1_REQUIRED
+  H2_NO_ERROR,
+  H2_PROTOCOL_ERROR,
+  H2_INTERNAL_ERROR,
+  H2_FLOW_CONTROL_ERROR,
+  H2_SETTINGS_TIMEOUT,
+  H2_STREAM_CLOSED,
+  H2_FRAME_SIZE_ERROR,
+  H2_REFUSED_STREAM,
+  H2_CANCEL,
+  H2_COMPRESSION_ERROR,
+  H2_CONNECT_ERROR,
+  H2_ENHANCE_YOUR_CALM,
+  H2_INADEQUATE_SECURITY,
+  H2_HTTP_1_1_REQUIRED
 };
-enum { H2F_DATA, H2F_HEADERS, H2F_PRIORITY, H2F_RST_STREAM, H2F_SETTINGS, H2F_PUSH_PROMISE, H2F_PING,
-       H2F_GOAWAY, H2F_WINDOW_UPDATE, H2F_CONTINUATION };
-#define H2_FL_END_STREAM 0x1
-#define H2_FL_ACK 0x1
+enum {
+  H2F_DATA,
+  H2F_HEADERS,
+  H2F_PRIORITY,
+  H2F_RST_STREAM,
+  H2F_SETTINGS,
+  H2F_PUSH_PROMISE,
+  H2F_PING,
+  H2F_GOAWAY,
+  H2F_WINDOW_UPDATE,
+  H2F_CONTINUATION
+};
+#define H2_FL_END_STREAM  0x1
+#define H2_FL_ACK         0x1
 #define H2_FL_END_HEADERS 0x4
-#define H2_FL_PADDED 0x8
-#define H2_FL_PRIORITY 0x20
+#define H2_FL_PADDED      0x8
+#define H2_FL_PRIORITY    0x20
 
 typedef struct h2_conn h2_conn;
 
@@ -75,7 +96,7 @@ typedef struct {
   int (*on_request)(h2_conn *c, uint32_t sid, const h2_request *rq, int end_stream, void *user);
   int (*on_data)(h2_conn *c, uint32_t sid, const uint8_t *d, size_t n, int end_stream, void *user);
   int (*on_trailers)(h2_conn *c, uint32_t sid, const hp_field *f, int n, void *user);
-  void (*on_sent)(h2_conn *c, uint32_t sid, void *user);               /* the body passed last is out */
+  void (*on_sent)(h2_conn *c, uint32_t sid, void *user);                  /* the body passed last is out */
   void (*on_close)(h2_conn *c, uint32_t sid, uint32_t error, void *user); /* the stream is gone */
 } h2_callbacks;
 
@@ -87,12 +108,12 @@ typedef struct {
 } h2_scratch;
 
 enum { H2S_FREE, H2S_ACTIVE };
-#define H2_ST_RESPONDED 2u
-#define H2_ST_BODY_END 4u     /* END_STREAM goes on the last DATA of the current body */
-#define H2_ST_TRAILERS 8u     /* trailers follow the body */
-#define H2_ST_REMOTE_END 16u  /* the client sent END_STREAM (half-closed remote) */
-#define H2_ST_LOCAL_END 32u   /* we sent END_STREAM (half-closed local) */
-#define H2_ST_QUEUED 64u      /* in the send queue */
+#define H2_ST_RESPONDED  2u
+#define H2_ST_BODY_END   4u  /* END_STREAM goes on the last DATA of the current body */
+#define H2_ST_TRAILERS   8u  /* trailers follow the body */
+#define H2_ST_REMOTE_END 16u /* the client sent END_STREAM (half-closed remote) */
+#define H2_ST_LOCAL_END  32u /* we sent END_STREAM (half-closed local) */
+#define H2_ST_QUEUED     64u /* in the send queue */
 
 typedef struct {
   uint32_t id;
@@ -109,14 +130,14 @@ typedef struct {
 struct h2_conn {
   h2_callbacks cb;
   void *user;
-  uint32_t preface_left;       /* client preface bytes still expected */
+  uint32_t preface_left; /* client preface bytes still expected */
   uint8_t got_settings, closed, goaway_sent, goaway_recv, sent_size_update;
-  uint32_t last_sid;           /* highest client stream id seen */
+  uint32_t last_sid; /* highest client stream id seen */
   uint32_t peer_max_frame, peer_max_concurrent, peer_initial_window, peer_header_table;
   int64_t conn_send_win;
   uint32_t conn_recv_unacked;
   int nactive;
-  uint32_t qh, qn;             /* send queue: ring of stream slots with a body or trailers pending */
+  uint32_t qh, qn; /* send queue: ring of stream slots with a body or trailers pending */
   uint16_t q[H2_MAX_STREAMS];
   hp_dec dec;
   size_t stage_len, stage_off;
@@ -126,12 +147,16 @@ struct h2_conn {
 
 /* ------------------------------------------ framing ------------------------------------------ */
 static inline uint32_t h2__be24(const uint8_t *p) { return (uint32_t)p[0] << 16 | (uint32_t)p[1] << 8 | p[2]; }
-static inline uint32_t h2__be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+static inline uint32_t h2__be32(const uint8_t *p) {
+  return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
 static inline void h2__hdr(uint8_t *p, uint32_t len, uint8_t type, uint8_t flags, uint32_t sid) {
   p[0] = (uint8_t)(len >> 16), p[1] = (uint8_t)(len >> 8), p[2] = (uint8_t)len, p[3] = type, p[4] = flags;
   p[5] = (uint8_t)(sid >> 24 & 0x7f), p[6] = (uint8_t)(sid >> 16), p[7] = (uint8_t)(sid >> 8), p[8] = (uint8_t)sid;
 }
-static inline void h2__put32(uint8_t *p, uint32_t v) { p[0] = (uint8_t)(v >> 24), p[1] = (uint8_t)(v >> 16), p[2] = (uint8_t)(v >> 8), p[3] = (uint8_t)v; }
+static inline void h2__put32(uint8_t *p, uint32_t v) {
+  p[0] = (uint8_t)(v >> 24), p[1] = (uint8_t)(v >> 16), p[2] = (uint8_t)(v >> 8), p[3] = (uint8_t)v;
+}
 
 /* append to the stage; 0 if it does not fit */
 static inline uint8_t *h2__stage(h2_conn *c, size_t n) {
@@ -146,7 +171,10 @@ static inline uint8_t *h2__stage(h2_conn *c, size_t n) {
 }
 static inline void h2__ctrl(h2_conn *c, uint8_t type, uint8_t flags, uint32_t sid, const uint8_t *payload, uint32_t n) {
   uint8_t *p = h2__stage(c, 9 + n);
-  if (!p) { c->closed = 1; return; } /* control frames are tiny; a full stage means a stuck peer */
+  if (!p) {
+    c->closed = 1;
+    return;
+  } /* control frames are tiny; a full stage means a stuck peer */
   h2__hdr(p, n, type, flags, sid);
   if (n) memcpy(p + 9, payload, n);
 }
@@ -194,7 +222,8 @@ static inline int h2__fail(h2_conn *c, uint32_t code) {
 /* set an end flag; the stream is closed once both ends are done */
 static inline void h2__end(h2_conn *c, h2_stream *s, uint8_t which) {
   s->flags |= which;
-  if ((s->flags & (H2_ST_REMOTE_END | H2_ST_LOCAL_END)) == (H2_ST_REMOTE_END | H2_ST_LOCAL_END)) h2__close_stream(c, s, 0);
+  if ((s->flags & (H2_ST_REMOTE_END | H2_ST_LOCAL_END)) == (H2_ST_REMOTE_END | H2_ST_LOCAL_END))
+    h2__close_stream(c, s, 0);
 }
 
 static inline void h2__enqueue(h2_conn *c, h2_stream *s) {
@@ -206,22 +235,25 @@ static inline void h2_init(h2_conn *c, const h2_callbacks *cb, void *user) {
   memset(c, 0, offsetof(h2_conn, dec));
   c->cb = *cb, c->user = user;
   c->preface_left = 24;
-  c->peer_max_frame = 16384, c->peer_max_concurrent = 0xffffffff, c->peer_initial_window = 65535, c->peer_header_table = 4096;
+  c->peer_max_frame = 16384, c->peer_max_concurrent = 0xffffffff, c->peer_initial_window = 65535,
+  c->peer_header_table = 4096;
   c->conn_send_win = 65535;
   c->stage_len = c->stage_off = 0;
   for (int i = 0; i < H2_MAX_STREAMS; i++) c->s[i].state = H2S_FREE;
   hp_dec_init(&c->dec, 4096);
   /* server preface: SETTINGS, then the connection window raised once */
   uint8_t st[18];
-  const uint16_t id[3] = {0x3 /* MAX_CONCURRENT_STREAMS */, 0x6 /* MAX_HEADER_LIST_SIZE */, 0x2 /* ENABLE_PUSH */};
-  const uint32_t v[3] = {H2_MAX_STREAMS, H2_MAX_LIST, 0};
-  for (int i = 0; i < 3; i++) st[6 * i] = (uint8_t)(id[i] >> 8), st[6 * i + 1] = (uint8_t)id[i], h2__put32(st + 6 * i + 2, v[i]);
+  const uint16_t id[3] = { 0x3 /* MAX_CONCURRENT_STREAMS */, 0x6 /* MAX_HEADER_LIST_SIZE */, 0x2 /* ENABLE_PUSH */ };
+  const uint32_t v[3] = { H2_MAX_STREAMS, H2_MAX_LIST, 0 };
+  for (int i = 0; i < 3; i++)
+    st[6 * i] = (uint8_t)(id[i] >> 8), st[6 * i + 1] = (uint8_t)id[i], h2__put32(st + 6 * i + 2, v[i]);
   h2__ctrl(c, H2F_SETTINGS, 0, 0, st, 18);
   h2__window_update(c, 0, H2_CONN_WINDOW - 65535);
 }
 
 /* ------------------------------------------ receive ------------------------------------------ */
-static inline int h2__header_block(h2_conn *c, h2_scratch *sc, uint32_t sid, uint8_t flags, const uint8_t *blk, size_t blen, int self_dep) {
+static inline int h2__header_block(h2_conn *c, h2_scratch *sc, uint32_t sid, uint8_t flags, const uint8_t *blk,
+                                   size_t blen, int self_dep) {
   int hfl;
   int n = hp_decode_block(&c->dec, blk, blen, sc->f, H2_MAX_FIELDS / 2, sc->arena, sizeof sc->arena, H2_MAX_LIST, &hfl);
   if (n == HP_E_COMPRESSION) return h2__fail(c, H2_COMPRESSION_ERROR);
@@ -230,11 +262,23 @@ static inline int h2__header_block(h2_conn *c, h2_scratch *sc, uint32_t sid, uin
   /* an id above any seen is a new stream: no lookup (a miss would probe every slot) */
   h2_stream *s = sid <= c->last_sid ? h2__find(c, sid) : NULL;
   if (s) { /* trailers: a second HEADERS on a stream the client has not ended */
-    if (s->flags & H2_ST_REMOTE_END) { h2_reset(c, sid, H2_STREAM_CLOSED); return 0; }
-    if (!end || self_dep) { h2_reset(c, sid, H2_PROTOCOL_ERROR); return 0; }
+    if (s->flags & H2_ST_REMOTE_END) {
+      h2_reset(c, sid, H2_STREAM_CLOSED);
+      return 0;
+    }
+    if (!end || self_dep) {
+      h2_reset(c, sid, H2_PROTOCOL_ERROR);
+      return 0;
+    }
     for (int i = 0; i < n; i++)
-      if (sc->f[i].nclass != HP_N_OK || !sc->f[i].vok) { h2_reset(c, sid, H2_PROTOCOL_ERROR); return 0; }
-    if (s->content_length >= 0 && s->data_seen != s->content_length) { h2_reset(c, sid, H2_PROTOCOL_ERROR); return 0; }
+      if (sc->f[i].nclass != HP_N_OK || !sc->f[i].vok) {
+        h2_reset(c, sid, H2_PROTOCOL_ERROR);
+        return 0;
+      }
+    if (s->content_length >= 0 && s->data_seen != s->content_length) {
+      h2_reset(c, sid, H2_PROTOCOL_ERROR);
+      return 0;
+    }
     int r = c->cb.on_trailers ? c->cb.on_trailers(c, sid, sc->f, n, c->user) : 0;
     if ((s = h2__find(c, sid))) {
       if (r) h2_reset(c, sid, H2_INTERNAL_ERROR);
@@ -244,20 +288,35 @@ static inline int h2__header_block(h2_conn *c, h2_scratch *sc, uint32_t sid, uin
   }
   if (sid <= c->last_sid) return h2__fail(c, H2_STREAM_CLOSED); /* HEADERS on a closed stream */
   c->last_sid = sid;
-  if (self_dep) { h2_reset(c, sid, H2_PROTOCOL_ERROR); return 0; } /* §5.3.1 */
+  if (self_dep) {
+    h2_reset(c, sid, H2_PROTOCOL_ERROR);
+    return 0;
+  } /* §5.3.1 */
   if (c->goaway_sent) return 0;
-  if (c->nactive >= H2_MAX_STREAMS) { h2_reset(c, sid, H2_REFUSED_STREAM); return 0; }
+  if (c->nactive >= H2_MAX_STREAMS) {
+    h2_reset(c, sid, H2_REFUSED_STREAM);
+    return 0;
+  }
   for (uint32_t k = 0, i = (sid >> 1) % H2_MAX_STREAMS; k < H2_MAX_STREAMS; k++, i = (i + 1) % H2_MAX_STREAMS)
-    if (c->s[i].state == H2S_FREE) { s = &c->s[i]; break; }
+    if (c->s[i].state == H2S_FREE) {
+      s = &c->s[i];
+      break;
+    }
   if (!s) return h2__fail(c, H2_INTERNAL_ERROR); /* cannot happen while nactive < H2_MAX_STREAMS */
   memset(s, 0, offsetof(h2_stream, trailer));
   s->id = sid, s->state = H2S_ACTIVE;
   s->send_win = (int32_t)c->peer_initial_window;
   c->nactive++;
   h2_request rq;
-  if (!h_build_request(sc->f, n, &rq, sc->f + H2_MAX_FIELDS / 2)) { h2_reset(c, sid, H2_PROTOCOL_ERROR); return 0; }
+  if (!h_build_request(sc->f, n, &rq, sc->f + H2_MAX_FIELDS / 2)) {
+    h2_reset(c, sid, H2_PROTOCOL_ERROR);
+    return 0;
+  }
   s->content_length = rq.content_length;
-  if (end && rq.content_length > 0) { h2_reset(c, sid, H2_PROTOCOL_ERROR); return 0; }
+  if (end && rq.content_length > 0) {
+    h2_reset(c, sid, H2_PROTOCOL_ERROR);
+    return 0;
+  }
   if (end) s->flags |= H2_ST_REMOTE_END;
   if (hfl & HP_F_LIST_TOO_BIG) { /* answer 431 without involving the application */
     uint8_t b431[24];
@@ -271,7 +330,8 @@ static inline int h2__header_block(h2_conn *c, h2_scratch *sc, uint32_t sid, uin
     else h2_reset(c, sid, H2_NO_ERROR); /* §8.1: done with the request body too */
     return 0;
   }
-  if (c->cb.on_request && c->cb.on_request(c, sid, &rq, end, c->user) && h2__find(c, sid)) h2_reset(c, sid, H2_INTERNAL_ERROR);
+  if (c->cb.on_request && c->cb.on_request(c, sid, &rq, end, c->user) && h2__find(c, sid))
+    h2_reset(c, sid, H2_INTERNAL_ERROR);
   return 0;
 }
 
@@ -307,141 +367,163 @@ static inline int h2__frame(h2_conn *c, h2_scratch *sc, const uint8_t *p, size_t
   const uint8_t *pl = p + 9;
   if (!c->got_settings && type != H2F_SETTINGS) return h2__fail(c, H2_PROTOCOL_ERROR);
   switch (type) {
-  case H2F_DATA: {
-    if (!sid) return h2__fail(c, H2_PROTOCOL_ERROR);
-    if (sid > c->last_sid) return h2__fail(c, H2_PROTOCOL_ERROR); /* idle stream */
-    uint32_t pad = 0;
-    if (fl & H2_FL_PADDED) {
-      if (!len || (pad = pl[0]) >= len) return h2__fail(c, H2_PROTOCOL_ERROR);
-      pl++;
-    }
-    size_t dlen = len - pad - ((fl & H2_FL_PADDED) ? 1 : 0);
-    /* the connection window counts the whole frame, whatever happens to the stream */
-    c->conn_recv_unacked += len;
-    if (c->conn_recv_unacked > H2_CONN_WINDOW) return h2__fail(c, H2_FLOW_CONTROL_ERROR);
-    if (c->conn_recv_unacked >= H2_CONN_WINDOW / 2) h2__window_update(c, 0, c->conn_recv_unacked), c->conn_recv_unacked = 0;
-    h2_stream *s = h2__find(c, sid);
-    if (!s || (s->flags & H2_ST_REMOTE_END)) { /* closed or half-closed (remote) */
-      if (s) h2_reset(c, sid, H2_STREAM_CLOSED);
-      else { uint8_t b[4]; h2__put32(b, H2_STREAM_CLOSED); h2__ctrl(c, H2F_RST_STREAM, 0, sid, b, 4); }
+    case H2F_DATA: {
+      if (!sid) return h2__fail(c, H2_PROTOCOL_ERROR);
+      if (sid > c->last_sid) return h2__fail(c, H2_PROTOCOL_ERROR); /* idle stream */
+      uint32_t pad = 0;
+      if (fl & H2_FL_PADDED) {
+        if (!len || (pad = pl[0]) >= len) return h2__fail(c, H2_PROTOCOL_ERROR);
+        pl++;
+      }
+      size_t dlen = len - pad - ((fl & H2_FL_PADDED) ? 1 : 0);
+      /* the connection window counts the whole frame, whatever happens to the stream */
+      c->conn_recv_unacked += len;
+      if (c->conn_recv_unacked > H2_CONN_WINDOW) return h2__fail(c, H2_FLOW_CONTROL_ERROR);
+      if (c->conn_recv_unacked >= H2_CONN_WINDOW / 2)
+        h2__window_update(c, 0, c->conn_recv_unacked), c->conn_recv_unacked = 0;
+      h2_stream *s = h2__find(c, sid);
+      if (!s || (s->flags & H2_ST_REMOTE_END)) { /* closed or half-closed (remote) */
+        if (s) h2_reset(c, sid, H2_STREAM_CLOSED);
+        else {
+          uint8_t b[4];
+          h2__put32(b, H2_STREAM_CLOSED);
+          h2__ctrl(c, H2F_RST_STREAM, 0, sid, b, 4);
+        }
+        return (int)(9 + len);
+      }
+      s->recv_unacked += len;
+      if (s->recv_unacked > 65535) {
+        h2_reset(c, sid, H2_FLOW_CONTROL_ERROR);
+        return (int)(9 + len);
+      }
+      s->data_seen += (int64_t)dlen;
+      int end = fl & H2_FL_END_STREAM;
+      if (s->content_length >= 0 && (s->data_seen > s->content_length || (end && s->data_seen != s->content_length))) {
+        h2_reset(c, sid, H2_PROTOCOL_ERROR);
+        return (int)(9 + len);
+      }
+      if (c->cb.on_data && c->cb.on_data(c, sid, pl, dlen, end, c->user)) {
+        if (h2__find(c, sid)) h2_reset(c, sid, H2_INTERNAL_ERROR);
+        return (int)(9 + len);
+      }
+      if (!(s = h2__find(c, sid))) return (int)(9 + len); /* the application reset it */
+      if (end) h2__end(c, s, H2_ST_REMOTE_END);
+      /* the application consumed it: reopen the window once half of it is used */
+      else if (s->recv_unacked >= 32768) h2__window_update(c, sid, s->recv_unacked), s->recv_unacked = 0;
       return (int)(9 + len);
     }
-    s->recv_unacked += len;
-    if (s->recv_unacked > 65535) { h2_reset(c, sid, H2_FLOW_CONTROL_ERROR); return (int)(9 + len); }
-    s->data_seen += (int64_t)dlen;
-    int end = fl & H2_FL_END_STREAM;
-    if (s->content_length >= 0 && (s->data_seen > s->content_length || (end && s->data_seen != s->content_length))) {
-      h2_reset(c, sid, H2_PROTOCOL_ERROR);
+    case H2F_HEADERS: {
+      if (!sid || !(sid & 1)) return h2__fail(c, H2_PROTOCOL_ERROR);
+      uint32_t off = 0, pad = 0;
+      int self_dep = 0;
+      if (fl & H2_FL_PADDED) {
+        if (!len) return h2__fail(c, H2_PROTOCOL_ERROR);
+        pad = pl[0], off = 1;
+      }
+      if (fl & H2_FL_PRIORITY) {
+        if (len < off + 5) return h2__fail(c, H2_FRAME_SIZE_ERROR);
+        self_dep = (h2__be32(pl + off) & 0x7fffffff) == sid;
+        off += 5;
+      }
+      if (off + pad > len) return h2__fail(c, H2_PROTOCOL_ERROR);
+      size_t bl = 0;
+      int used = h2__gather(c, sc, p, avail, sid, fl, pl + off, len - off - pad, 9 + len, &bl);
+      if (used <= 0) return used;
+      int r = h2__header_block(c, sc, sid, fl, sc->block, bl, self_dep);
+      return r < 0 ? r : used;
+    }
+    case H2F_PRIORITY:
+      if (!sid) return h2__fail(c, H2_PROTOCOL_ERROR);
+      if (len != 5) { /* stream error (§6.3); the stream may be idle, so no state to touch */
+        uint8_t b[4];
+        h2__put32(b, H2_FRAME_SIZE_ERROR);
+        h2__ctrl(c, H2F_RST_STREAM, 0, sid, b, 4);
+        return (int)(9 + len);
+      }
+      if ((h2__be32(pl) & 0x7fffffff) == sid) h2_reset(c, sid, H2_PROTOCOL_ERROR);
+      return (int)(9 + len);
+    case H2F_RST_STREAM: {
+      if (!sid) return h2__fail(c, H2_PROTOCOL_ERROR);
+      if (len != 4) return h2__fail(c, H2_FRAME_SIZE_ERROR);
+      if (sid > c->last_sid) return h2__fail(c, H2_PROTOCOL_ERROR);
+      h2_stream *s = h2__find(c, sid);
+      if (s) h2__close_stream(c, s, h2__be32(pl));
       return (int)(9 + len);
     }
-    if (c->cb.on_data && c->cb.on_data(c, sid, pl, dlen, end, c->user)) {
-      if (h2__find(c, sid)) h2_reset(c, sid, H2_INTERNAL_ERROR);
-      return (int)(9 + len);
-    }
-    if (!(s = h2__find(c, sid))) return (int)(9 + len); /* the application reset it */
-    if (end) h2__end(c, s, H2_ST_REMOTE_END);
-    /* the application consumed it: reopen the window once half of it is used */
-    else if (s->recv_unacked >= 32768) h2__window_update(c, sid, s->recv_unacked), s->recv_unacked = 0;
-    return (int)(9 + len);
-  }
-  case H2F_HEADERS: {
-    if (!sid || !(sid & 1)) return h2__fail(c, H2_PROTOCOL_ERROR);
-    uint32_t off = 0, pad = 0;
-    int self_dep = 0;
-    if (fl & H2_FL_PADDED) { if (!len) return h2__fail(c, H2_PROTOCOL_ERROR); pad = pl[0], off = 1; }
-    if (fl & H2_FL_PRIORITY) {
-      if (len < off + 5) return h2__fail(c, H2_FRAME_SIZE_ERROR);
-      self_dep = (h2__be32(pl + off) & 0x7fffffff) == sid;
-      off += 5;
-    }
-    if (off + pad > len) return h2__fail(c, H2_PROTOCOL_ERROR);
-    size_t bl = 0;
-    int used = h2__gather(c, sc, p, avail, sid, fl, pl + off, len - off - pad, 9 + len, &bl);
-    if (used <= 0) return used;
-    int r = h2__header_block(c, sc, sid, fl, sc->block, bl, self_dep);
-    return r < 0 ? r : used;
-  }
-  case H2F_PRIORITY:
-    if (!sid) return h2__fail(c, H2_PROTOCOL_ERROR);
-    if (len != 5) { /* stream error (§6.3); the stream may be idle, so no state to touch */
-      uint8_t b[4];
-      h2__put32(b, H2_FRAME_SIZE_ERROR);
-      h2__ctrl(c, H2F_RST_STREAM, 0, sid, b, 4);
-      return (int)(9 + len);
-    }
-    if ((h2__be32(pl) & 0x7fffffff) == sid) h2_reset(c, sid, H2_PROTOCOL_ERROR);
-    return (int)(9 + len);
-  case H2F_RST_STREAM: {
-    if (!sid) return h2__fail(c, H2_PROTOCOL_ERROR);
-    if (len != 4) return h2__fail(c, H2_FRAME_SIZE_ERROR);
-    if (sid > c->last_sid) return h2__fail(c, H2_PROTOCOL_ERROR);
-    h2_stream *s = h2__find(c, sid);
-    if (s) h2__close_stream(c, s, h2__be32(pl));
-    return (int)(9 + len);
-  }
-  case H2F_SETTINGS:
-    if (sid) return h2__fail(c, H2_PROTOCOL_ERROR);
-    if (fl & H2_FL_ACK) {
-      if (len) return h2__fail(c, H2_FRAME_SIZE_ERROR);
-      return 9;
-    }
-    if (len % 6) return h2__fail(c, H2_FRAME_SIZE_ERROR);
-    for (uint32_t i = 0; i < len; i += 6) {
-      uint16_t id = (uint16_t)(pl[i] << 8 | pl[i + 1]);
-      uint32_t v = h2__be32(pl + i + 2);
-      switch (id) {
-      case 1: c->peer_header_table = v; break;
-      case 2: if (v > 1) return h2__fail(c, H2_PROTOCOL_ERROR); break;
-      case 3: c->peer_max_concurrent = v; break;
-      case 4: {
-        if (v > 0x7fffffff) return h2__fail(c, H2_FLOW_CONTROL_ERROR);
-        int64_t delta = (int64_t)v - c->peer_initial_window;
-        for (int k = 0; k < H2_MAX_STREAMS; k++)
-          if (c->s[k].state != H2S_FREE) {
-            int64_t w = c->s[k].send_win + delta;
-            if (w > 0x7fffffff) return h2__fail(c, H2_FLOW_CONTROL_ERROR);
-            c->s[k].send_win = (int32_t)w;
+    case H2F_SETTINGS:
+      if (sid) return h2__fail(c, H2_PROTOCOL_ERROR);
+      if (fl & H2_FL_ACK) {
+        if (len) return h2__fail(c, H2_FRAME_SIZE_ERROR);
+        return 9;
+      }
+      if (len % 6) return h2__fail(c, H2_FRAME_SIZE_ERROR);
+      for (uint32_t i = 0; i < len; i += 6) {
+        uint16_t id = (uint16_t)(pl[i] << 8 | pl[i + 1]);
+        uint32_t v = h2__be32(pl + i + 2);
+        switch (id) {
+          case 1: c->peer_header_table = v; break;
+          case 2:
+            if (v > 1) return h2__fail(c, H2_PROTOCOL_ERROR);
+            break;
+          case 3: c->peer_max_concurrent = v; break;
+          case 4: {
+            if (v > 0x7fffffff) return h2__fail(c, H2_FLOW_CONTROL_ERROR);
+            int64_t delta = (int64_t)v - c->peer_initial_window;
+            for (int k = 0; k < H2_MAX_STREAMS; k++)
+              if (c->s[k].state != H2S_FREE) {
+                int64_t w = c->s[k].send_win + delta;
+                if (w > 0x7fffffff) return h2__fail(c, H2_FLOW_CONTROL_ERROR);
+                c->s[k].send_win = (int32_t)w;
+              }
+            c->peer_initial_window = v;
+            break;
           }
-        c->peer_initial_window = v;
-        break;
+          case 5:
+            if (v < 16384 || v > 16777215) return h2__fail(c, H2_PROTOCOL_ERROR);
+            c->peer_max_frame = v;
+            break;
+          default: break; /* 6 MAX_HEADER_LIST_SIZE is advisory; unknown settings are ignored */
+        }
       }
-      case 5: if (v < 16384 || v > 16777215) return h2__fail(c, H2_PROTOCOL_ERROR); c->peer_max_frame = v; break;
-      default: break; /* 6 MAX_HEADER_LIST_SIZE is advisory; unknown settings are ignored */
+      c->got_settings = 1;
+      h2__ctrl(c, H2F_SETTINGS, H2_FL_ACK, 0, NULL, 0);
+      return (int)(9 + len);
+    case H2F_PUSH_PROMISE: return h2__fail(c, H2_PROTOCOL_ERROR); /* clients never push */
+    case H2F_PING:
+      if (sid) return h2__fail(c, H2_PROTOCOL_ERROR);
+      if (len != 8) return h2__fail(c, H2_FRAME_SIZE_ERROR);
+      if (!(fl & H2_FL_ACK)) h2__ctrl(c, H2F_PING, H2_FL_ACK, 0, pl, 8);
+      return 17;
+    case H2F_GOAWAY:
+      if (sid) return h2__fail(c, H2_PROTOCOL_ERROR);
+      if (len < 8) return h2__fail(c, H2_FRAME_SIZE_ERROR);
+      c->goaway_recv = 1;
+      return (int)(9 + len);
+    case H2F_WINDOW_UPDATE: {
+      if (len != 4) return h2__fail(c, H2_FRAME_SIZE_ERROR);
+      uint32_t inc = h2__be32(pl) & 0x7fffffff;
+      if (!sid) {
+        if (!inc) return h2__fail(c, H2_PROTOCOL_ERROR);
+        if (c->conn_send_win + inc > 0x7fffffff) return h2__fail(c, H2_FLOW_CONTROL_ERROR);
+        c->conn_send_win += inc;
+        return 13;
       }
-    }
-    c->got_settings = 1;
-    h2__ctrl(c, H2F_SETTINGS, H2_FL_ACK, 0, NULL, 0);
-    return (int)(9 + len);
-  case H2F_PUSH_PROMISE: return h2__fail(c, H2_PROTOCOL_ERROR); /* clients never push */
-  case H2F_PING:
-    if (sid) return h2__fail(c, H2_PROTOCOL_ERROR);
-    if (len != 8) return h2__fail(c, H2_FRAME_SIZE_ERROR);
-    if (!(fl & H2_FL_ACK)) h2__ctrl(c, H2F_PING, H2_FL_ACK, 0, pl, 8);
-    return 17;
-  case H2F_GOAWAY:
-    if (sid) return h2__fail(c, H2_PROTOCOL_ERROR);
-    if (len < 8) return h2__fail(c, H2_FRAME_SIZE_ERROR);
-    c->goaway_recv = 1;
-    return (int)(9 + len);
-  case H2F_WINDOW_UPDATE: {
-    if (len != 4) return h2__fail(c, H2_FRAME_SIZE_ERROR);
-    uint32_t inc = h2__be32(pl) & 0x7fffffff;
-    if (!sid) {
-      if (!inc) return h2__fail(c, H2_PROTOCOL_ERROR);
-      if (c->conn_send_win + inc > 0x7fffffff) return h2__fail(c, H2_FLOW_CONTROL_ERROR);
-      c->conn_send_win += inc;
+      if (sid > c->last_sid) return h2__fail(c, H2_PROTOCOL_ERROR);
+      h2_stream *s = h2__find(c, sid);
+      if (!s) return 13; /* closed: ignore */
+      if (!inc) {
+        h2_reset(c, sid, H2_PROTOCOL_ERROR);
+        return 13;
+      }
+      if ((int64_t)s->send_win + inc > 0x7fffffff) {
+        h2_reset(c, sid, H2_FLOW_CONTROL_ERROR);
+        return 13;
+      }
+      s->send_win += (int32_t)inc;
       return 13;
     }
-    if (sid > c->last_sid) return h2__fail(c, H2_PROTOCOL_ERROR);
-    h2_stream *s = h2__find(c, sid);
-    if (!s) return 13; /* closed: ignore */
-    if (!inc) { h2_reset(c, sid, H2_PROTOCOL_ERROR); return 13; }
-    if ((int64_t)s->send_win + inc > 0x7fffffff) { h2_reset(c, sid, H2_FLOW_CONTROL_ERROR); return 13; }
-    s->send_win += (int32_t)inc;
-    return 13;
-  }
-  case H2F_CONTINUATION: return h2__fail(c, H2_PROTOCOL_ERROR); /* without a HEADERS before it */
-  default: return (int)(9 + len); /* unknown types are ignored (§4.1) */
+    case H2F_CONTINUATION: return h2__fail(c, H2_PROTOCOL_ERROR); /* without a HEADERS before it */
+    default: return (int)(9 + len);                               /* unknown types are ignored (§4.1) */
   }
 }
 
@@ -492,7 +574,8 @@ static inline int h2__stage_block(h2_conn *c, uint32_t sid, const uint8_t *blk, 
   return 0;
 }
 
-static inline int h2_respond(h2_conn *c, uint32_t sid, int status, const hp_field *f, int n, const uint8_t *body, size_t len, int end) {
+static inline int h2_respond(h2_conn *c, uint32_t sid, int status, const hp_field *f, int n, const uint8_t *body,
+                             size_t len, int end) {
   h2_stream *s = h2__find(c, sid);
   if (!s || (s->flags & H2_ST_RESPONDED)) return H2_E_STATE;
   uint8_t blk[H2_STAGE];
@@ -502,7 +585,10 @@ static inline int h2_respond(h2_conn *c, uint32_t sid, int status, const hp_fiel
   int r = h2__stage_block(c, sid, blk, bl, headers_end ? H2_FL_END_STREAM : 0);
   if (r) return r;
   s->flags |= H2_ST_RESPONDED;
-  if (headers_end) { h2__end(c, s, H2_ST_LOCAL_END); return 0; }
+  if (headers_end) {
+    h2__end(c, s, H2_ST_LOCAL_END);
+    return 0;
+  }
   s->body = body ? body : (const uint8_t *)"", s->body_len = len, s->body_off = 0;
   if (end) s->flags |= H2_ST_BODY_END;
   h2__enqueue(c, s);
@@ -510,7 +596,8 @@ static inline int h2_respond(h2_conn *c, uint32_t sid, int status, const hp_fiel
 }
 static inline int h2_data(h2_conn *c, uint32_t sid, const uint8_t *body, size_t len, int end) {
   h2_stream *s = h2__find(c, sid);
-  if (!s || !(s->flags & H2_ST_RESPONDED) || (s->body && s->body_off < s->body_len) || (s->flags & (H2_ST_BODY_END | H2_ST_TRAILERS)))
+  if (!s || !(s->flags & H2_ST_RESPONDED) || (s->body && s->body_off < s->body_len) ||
+      (s->flags & (H2_ST_BODY_END | H2_ST_TRAILERS)))
     return H2_E_STATE;
   s->body = body, s->body_len = len, s->body_off = 0;
   if (end) s->flags |= H2_ST_BODY_END;
@@ -566,7 +653,10 @@ static inline size_t h2_send(h2_conn *c, uint8_t *out, size_t cap) {
     if ((int64_t)m > s->send_win) m = s->send_win > 0 ? (size_t)s->send_win : 0;
     if ((int64_t)m > c->conn_send_win) m = c->conn_send_win > 0 ? (size_t)c->conn_send_win : 0;
     if (m > cap - w - 9) m = cap - w - 9;
-    if (!m && left) { h2__enqueue(c, s), idle++; continue; } /* blocked by flow control or space */
+    if (!m && left) {
+      h2__enqueue(c, s), idle++;
+      continue;
+    } /* blocked by flow control or space */
     idle = 0;
     int last = m == left;
     uint8_t fl = last && fin_flag && !trl ? H2_FL_END_STREAM : 0;
@@ -575,9 +665,15 @@ static inline size_t h2_send(h2_conn *c, uint8_t *out, size_t cap) {
       memcpy(out + w + 9, s->body + s->body_off, m);
       w += 9 + m, s->body_off += m, s->send_win -= (int32_t)m, c->conn_send_win -= (int64_t)m;
     }
-    if (!last) { h2__enqueue(c, s); continue; }
+    if (!last) {
+      h2__enqueue(c, s);
+      continue;
+    }
     if (trl) {
-      if (w + 9 + s->trailer_len > cap) { h2__enqueue(c, s), idle++; continue; }
+      if (w + 9 + s->trailer_len > cap) {
+        h2__enqueue(c, s), idle++;
+        continue;
+      }
       h2__hdr(out + w, s->trailer_len, H2F_HEADERS, H2_FL_END_HEADERS | H2_FL_END_STREAM, s->id);
       memcpy(out + w + 9, s->trailer, s->trailer_len);
       w += 9 + s->trailer_len;

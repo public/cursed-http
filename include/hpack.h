@@ -41,33 +41,81 @@ enum { HP_N_BAD = 0, HP_N_OK = 1, HP_N_UPPER = 2, HP_N_PSEUDO = 3 };
 typedef struct {
   const uint8_t *name, *value;
   uint32_t nlen, vlen;
-  uint8_t sidx;  /* static-table index of the name (1..61), 0 if not a static name */
+  uint8_t sidx;   /* static-table index of the name (1..61), 0 if not a static name */
   uint8_t nclass; /* HP_N_* */
-  uint8_t vok;   /* value passes RFC 9113 §8.2.1 (no NUL/CR/LF, no leading/trailing SP/HT) */
-  uint8_t never; /* sent as never-indexed */
+  uint8_t vok;    /* value passes RFC 9113 §8.2.1 (no NUL/CR/LF, no leading/trailing SP/HT) */
+  uint8_t never;  /* sent as never-indexed */
 } hp_field;
 
 /* ------------------------------------- static table ------------------------------------- */
-typedef struct { const char *n, *v; uint8_t nl, vl; } hp_sent;
-#define HPS(n, v) {n, v, sizeof(n) - 1, sizeof(v) - 1}
-static const hp_sent hp_static[62] = {
-  {0, 0, 0, 0}, HPS(":authority", ""), HPS(":method", "GET"), HPS(":method", "POST"), HPS(":path", "/"),
-  HPS(":path", "/index.html"), HPS(":scheme", "http"), HPS(":scheme", "https"), HPS(":status", "200"),
-  HPS(":status", "204"), HPS(":status", "206"), HPS(":status", "304"), HPS(":status", "400"),
-  HPS(":status", "404"), HPS(":status", "500"), HPS("accept-charset", ""),
-  HPS("accept-encoding", "gzip, deflate"), HPS("accept-language", ""), HPS("accept-ranges", ""),
-  HPS("accept", ""), HPS("access-control-allow-origin", ""), HPS("age", ""), HPS("allow", ""),
-  HPS("authorization", ""), HPS("cache-control", ""), HPS("content-disposition", ""),
-  HPS("content-encoding", ""), HPS("content-language", ""), HPS("content-length", ""),
-  HPS("content-location", ""), HPS("content-range", ""), HPS("content-type", ""), HPS("cookie", ""),
-  HPS("date", ""), HPS("etag", ""), HPS("expect", ""), HPS("expires", ""), HPS("from", ""),
-  HPS("host", ""), HPS("if-match", ""), HPS("if-modified-since", ""), HPS("if-none-match", ""),
-  HPS("if-range", ""), HPS("if-unmodified-since", ""), HPS("last-modified", ""), HPS("link", ""),
-  HPS("location", ""), HPS("max-forwards", ""), HPS("proxy-authenticate", ""),
-  HPS("proxy-authorization", ""), HPS("range", ""), HPS("referer", ""), HPS("refresh", ""),
-  HPS("retry-after", ""), HPS("server", ""), HPS("set-cookie", ""),
-  HPS("strict-transport-security", ""), HPS("transfer-encoding", ""), HPS("user-agent", ""),
-  HPS("vary", ""), HPS("via", ""), HPS("www-authenticate", "")};
+typedef struct {
+  const char *n, *v;
+  uint8_t nl, vl;
+} hp_sent;
+#define HPS(n, v)                                                                                                      \
+  { n, v, sizeof(n) - 1, sizeof(v) - 1 }
+static const hp_sent hp_static[62] = { { 0, 0, 0, 0 },
+                                       HPS(":authority", ""),
+                                       HPS(":method", "GET"),
+                                       HPS(":method", "POST"),
+                                       HPS(":path", "/"),
+                                       HPS(":path", "/index.html"),
+                                       HPS(":scheme", "http"),
+                                       HPS(":scheme", "https"),
+                                       HPS(":status", "200"),
+                                       HPS(":status", "204"),
+                                       HPS(":status", "206"),
+                                       HPS(":status", "304"),
+                                       HPS(":status", "400"),
+                                       HPS(":status", "404"),
+                                       HPS(":status", "500"),
+                                       HPS("accept-charset", ""),
+                                       HPS("accept-encoding", "gzip, deflate"),
+                                       HPS("accept-language", ""),
+                                       HPS("accept-ranges", ""),
+                                       HPS("accept", ""),
+                                       HPS("access-control-allow-origin", ""),
+                                       HPS("age", ""),
+                                       HPS("allow", ""),
+                                       HPS("authorization", ""),
+                                       HPS("cache-control", ""),
+                                       HPS("content-disposition", ""),
+                                       HPS("content-encoding", ""),
+                                       HPS("content-language", ""),
+                                       HPS("content-length", ""),
+                                       HPS("content-location", ""),
+                                       HPS("content-range", ""),
+                                       HPS("content-type", ""),
+                                       HPS("cookie", ""),
+                                       HPS("date", ""),
+                                       HPS("etag", ""),
+                                       HPS("expect", ""),
+                                       HPS("expires", ""),
+                                       HPS("from", ""),
+                                       HPS("host", ""),
+                                       HPS("if-match", ""),
+                                       HPS("if-modified-since", ""),
+                                       HPS("if-none-match", ""),
+                                       HPS("if-range", ""),
+                                       HPS("if-unmodified-since", ""),
+                                       HPS("last-modified", ""),
+                                       HPS("link", ""),
+                                       HPS("location", ""),
+                                       HPS("max-forwards", ""),
+                                       HPS("proxy-authenticate", ""),
+                                       HPS("proxy-authorization", ""),
+                                       HPS("range", ""),
+                                       HPS("referer", ""),
+                                       HPS("refresh", ""),
+                                       HPS("retry-after", ""),
+                                       HPS("server", ""),
+                                       HPS("set-cookie", ""),
+                                       HPS("strict-transport-security", ""),
+                                       HPS("transfer-encoding", ""),
+                                       HPS("user-agent", ""),
+                                       HPS("vary", ""),
+                                       HPS("via", ""),
+                                       HPS("www-authenticate", "") };
 #undef HPS
 
 /* first static index whose name is (p, n), or 0. One pass over the 61 names, filtered by length and
@@ -86,11 +134,11 @@ typedef struct {
 } hp_ent;
 
 typedef struct {
-  uint32_t limit;      /* SETTINGS_HEADER_TABLE_SIZE we advertised */
-  uint32_t max;        /* current maximum size (last size update) */
-  uint32_t size;       /* sum of entry sizes */
-  uint32_t first, n;   /* ring of descriptors: newest at (first + n - 1) % HP_ENT_MAX */
-  uint32_t used;       /* append position in store */
+  uint32_t limit;       /* SETTINGS_HEADER_TABLE_SIZE we advertised */
+  uint32_t max;         /* current maximum size (last size update) */
+  uint32_t size;        /* sum of entry sizes */
+  uint32_t first, n;    /* ring of descriptors: newest at (first + n - 1) % HP_ENT_MAX */
+  uint32_t used;        /* append position in store */
   uint32_t need_update; /* the limit is below the protocol's initial 4096: the next block must start
                          * with a size update (RFC 7541 §4.2), or the peer's table is not ours */
   hp_ent ent[HP_ENT_MAX];
@@ -118,7 +166,7 @@ static inline void hp__insert(hp_dec *d, const uint8_t *name, uint32_t nl, const
    * arena first), so evicting the entry they came from (RFC 7541 §4.4) is safe */
   uint32_t sz = nl + vl + 32;
   hp__evict(d, sz);
-  if (sz > d->max) return; /* larger than the table: the table is now empty, nothing inserted */
+  if (sz > d->max) return;                   /* larger than the table: the table is now empty, nothing inserted */
   if (d->used + nl + vl > sizeof d->store) { /* compact: live strings total <= max - 32n */
     uint32_t w = 0;
     for (uint32_t k = 0; k < d->n; k++) {
@@ -160,7 +208,10 @@ static inline uint8_t hp__nclass(const uint8_t *p, uint32_t n) {
   return (uint8_t)hv_check_nonempty_name(p, n);
 }
 
-typedef struct { uint8_t *a; size_t used, cap; } hp__arena;
+typedef struct {
+  uint8_t *a;
+  size_t used, cap;
+} hp__arena;
 
 /* string literal (§5.2): raw strings point into the input, Huffman ones are decoded into the arena */
 static inline int hp__str(const uint8_t **pp, const uint8_t *end, hp__arena *ar, const uint8_t **s, uint32_t *sl) {
@@ -170,7 +221,10 @@ static inline int hp__str(const uint8_t **pp, const uint8_t *end, hp__arena *ar,
   if (hp__int(pp, end, 7, &len) || (uint32_t)(end - *pp) < len) return HP_E_COMPRESSION;
   const uint8_t *src = *pp;
   *pp += len;
-  if (!huff) { *s = src, *sl = len; return 0; }
+  if (!huff) {
+    *s = src, *sl = len;
+    return 0;
+  }
   size_t need = (size_t)len * 8 / 5 + 8;
   if (ar->cap - ar->used < need) return HP_E_CALM;
   ssize_t r = hh_decode(ar->a + ar->used, src, len);
@@ -184,7 +238,11 @@ static inline int hp__lookup(const hp_dec *d, uint32_t idx, hp_field *f) {
   if (idx <= 61) {
     const hp_sent *e = &hp_static[idx];
     f->name = (const uint8_t *)e->n, f->nlen = e->nl, f->value = (const uint8_t *)e->v, f->vlen = e->vl;
-    f->sidx = (uint8_t)(idx == 3 ? 2 : idx == 5 ? 4 : idx == 7 ? 6 : idx >= 9 && idx <= 14 ? 8 : idx); /* first entry with this name */
+    f->sidx = (uint8_t)(idx == 3                ? 2
+                        : idx == 5              ? 4
+                        : idx == 7              ? 6
+                        : idx >= 9 && idx <= 14 ? 8
+                                                : idx); /* first entry with this name */
     f->nclass = e->n[0] == ':' ? HP_N_PSEUDO : HP_N_OK, f->vok = 1;
     return 0;
   }
@@ -210,14 +268,14 @@ static inline int hp__pin(hp_dec *d, hp__arena *ar, hp_field *f) {
 static inline int hp_decode_block(hp_dec *d, const uint8_t *in, size_t len, hp_field *out, int maxf, uint8_t *arena,
                                   size_t arena_cap, uint32_t max_list, int *flags) {
   const uint8_t *p = in, *end = in + len;
-  hp__arena ar = {arena, 0, arena_cap};
+  hp__arena ar = { arena, 0, arena_cap };
   uint64_t list = 0;
   int n = 0, fields_seen = 0;
   *flags = 0;
   if (d->need_update && (p >= end || (*p & 0xe0) != 0x20)) return HP_E_COMPRESSION;
   while (p < end) {
     uint8_t b = *p;
-    hp_field f = {0};
+    hp_field f = { 0 };
     uint32_t idx;
     if (b & 0x80) { /* indexed */
       if (hp__int(&p, end, 7, &idx) || hp__lookup(d, idx, &f)) return HP_E_COMPRESSION;
@@ -259,7 +317,10 @@ static inline size_t hp_enc_bound(size_t nlen, size_t vlen) { return nlen + vlen
 
 static inline uint8_t *hp__put_int(uint8_t *p, uint8_t first, int nbits, uint32_t v) {
   uint32_t mask = (1u << nbits) - 1;
-  if (v < mask) { *p++ = (uint8_t)(first | v); return p; }
+  if (v < mask) {
+    *p++ = (uint8_t)(first | v);
+    return p;
+  }
   *p++ = (uint8_t)(first | mask), v -= mask;
   while (v >= 128) *p++ = (uint8_t)(v | 0x80), v >>= 7;
   *p++ = (uint8_t)v;
@@ -270,26 +331,39 @@ static inline uint8_t *hp__put_str(uint8_t *p, const uint8_t *s, size_t n) {
   uint8_t tmp[64];
   if (n <= sizeof tmp - 4) {
     size_t h = hh_encode_upto(tmp, s, n, n);
-    if (h != SIZE_MAX) { p = hp__put_int(p, 0x80, 7, (uint32_t)h); memcpy(p, tmp, h); return p + h; }
+    if (h != SIZE_MAX) {
+      p = hp__put_int(p, 0x80, 7, (uint32_t)h);
+      memcpy(p, tmp, h);
+      return p + h;
+    }
   } else {
     size_t h = hh_encode_len(s, n);
-    if (h < n) { p = hp__put_int(p, 0x80, 7, (uint32_t)h); return p + hh_encode(p, s, n); }
+    if (h < n) {
+      p = hp__put_int(p, 0x80, 7, (uint32_t)h);
+      return p + hh_encode(p, s, n);
+    }
   }
   p = hp__put_int(p, 0, 7, (uint32_t)n);
   memcpy(p, s, n);
   return p + n;
 }
-static inline size_t hp_enc_size_update(uint8_t *dst, uint32_t size) { return (size_t)(hp__put_int(dst, 0x20, 5, size) - dst); }
+static inline size_t hp_enc_size_update(uint8_t *dst, uint32_t size) {
+  return (size_t)(hp__put_int(dst, 0x20, 5, size) - dst);
+}
 static inline size_t hp_enc_status(uint8_t *dst, int status) {
-  static const short codes[7] = {200, 204, 206, 304, 400, 404, 500};
+  static const short codes[7] = { 200, 204, 206, 304, 400, 404, 500 };
   for (int i = 0; i < 7; i++)
-    if (codes[i] == status) { dst[0] = (uint8_t)(0x80 | (8 + i)); return 1; }
-  char v[3] = {(char)('0' + status / 100 % 10), (char)('0' + status / 10 % 10), (char)('0' + status % 10)};
+    if (codes[i] == status) {
+      dst[0] = (uint8_t)(0x80 | (8 + i));
+      return 1;
+    }
+  char v[3] = { (char)('0' + status / 100 % 10), (char)('0' + status / 10 % 10), (char)('0' + status % 10) };
   uint8_t *p = hp__put_int(dst, 0x00, 4, 8);
   return (size_t)(hp__put_str(p, (const uint8_t *)v, 3) - dst);
 }
 /* literal without indexing (or never indexed); the name is a static reference when it is one */
-static inline size_t hp_enc_field(uint8_t *dst, const uint8_t *name, size_t nl, const uint8_t *val, size_t vl, int never) {
+static inline size_t hp_enc_field(uint8_t *dst, const uint8_t *name, size_t nl, const uint8_t *val, size_t vl,
+                                  int never) {
   int si = hp_name_index(name, nl);
   uint8_t *p = dst;
   if (si) p = hp__put_int(p, never ? 0x10 : 0x00, 4, (uint32_t)si);

@@ -11,14 +11,22 @@
 #include <stdio.h>
 #include <string.h>
 
-typedef struct { const char *name; char value[512]; } hs_field;
-typedef struct { const char *label; int n; hs_field f[24]; int post; } hs_set;
+typedef struct {
+  const char *name;
+  char value[512];
+} hs_field;
+typedef struct {
+  const char *label;
+  int n;
+  hs_field f[24];
+  int post;
+} hs_set;
 
 static const char hs_cookie[] =
-  "_ga=GA1.1.1234567890.1730000000; _ga_X7Q2LK9ABC=GS1.1.1730000000.3.1.1730000100.0.0.0; "
-  "session=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwiaWF0IjoxNzMwMDAwMDAwfQ."
-  "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c; consent=necessary%2Canalytics; theme=dark; "
-  "cart=7f3e2a9c-41b8-4d0f-9b2e-55c3a1d0e8f4";
+    "_ga=GA1.1.1234567890.1730000000; _ga_X7Q2LK9ABC=GS1.1.1730000000.3.1.1730000100.0.0.0; "
+    "session=eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIiwiaWF0IjoxNzMwMDAwMDAwfQ."
+    "SflKxwRJSMeKKF2QT4fwpMeJf36POk6yJV_adQssw5c; consent=necessary%2Canalytics; theme=dark; "
+    "cart=7f3e2a9c-41b8-4d0f-9b2e-55c3a1d0e8f4";
 
 static void hs_set_field(hs_set *s, const char *n, const char *v) {
   s->f[s->n].name = n;
@@ -36,7 +44,9 @@ static void hs_init(hs_set *s, int which) {
     hs_set_field(s, ":path", "");
     hs_set_field(s, "sec-ch-ua", "\"Chromium\";v=\"130\", \"Google Chrome\";v=\"130\", \"Not?A_Brand\";v=\"99\"");
     hs_set_field(s, "sec-ch-ua-mobile", "?0");
-    hs_set_field(s, "user-agent", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36");
+    hs_set_field(
+        s, "user-agent",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36");
     hs_set_field(s, "sec-ch-ua-platform", "\"macOS\"");
     hs_set_field(s, "accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8");
     hs_set_field(s, "sec-fetch-site", "same-origin");
@@ -83,14 +93,14 @@ static void hs_fill(hs_set *s, unsigned long i) {
   for (int k = 0; k < s->n; k++) {
     hs_field *f = &s->f[k];
     if (!strcmp(s->label, "browser") && !strcmp(f->name, ":path"))
-      snprintf(f->value, sizeof f->value, "/assets/img/catalog/%04lu-%08llx.webp?w=640&q=75", i % 10000, a & 0xffffffff);
-    else if (!strcmp(f->name, "grpc-timeout"))
-      snprintf(f->value, sizeof f->value, "%lluu", 4999000 + a % 1000);
+      snprintf(f->value, sizeof f->value, "/assets/img/catalog/%04lu-%08llx.webp?w=640&q=75", i % 10000,
+               a & 0xffffffff);
+    else if (!strcmp(f->name, "grpc-timeout")) snprintf(f->value, sizeof f->value, "%lluu", 4999000 + a % 1000);
     else if (!strcmp(f->name, "traceparent"))
       snprintf(f->value, sizeof f->value, "00-%016llx%016llx-%016llx-01", a, b, hs_mix(b));
     else if (!strcmp(f->name, "x-request-id"))
-      snprintf(f->value, sizeof f->value, "%08llx-%04llx-4%03llx-a%03llx-%012llx", a >> 32, a >> 16 & 0xffff,
-               a & 0xfff, b >> 52, b & 0xffffffffffffull);
+      snprintf(f->value, sizeof f->value, "%08llx-%04llx-4%03llx-a%03llx-%012llx", a >> 32, a >> 16 & 0xffff, a & 0xfff,
+               b >> 52, b & 0xffffffffffffull);
   }
 }
 #endif

@@ -14,10 +14,28 @@
 #include "rfc7541_vectors.h"
 
 static long fails, checks;
-#define CHECK(c, ...) do { checks++; if (!(c)) { if (fails++ < 20) { printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } } while (0)
+#define CHECK(c, ...)                                                                                                  \
+  do {                                                                                                                 \
+    checks++;                                                                                                          \
+    if (!(c)) {                                                                                                        \
+      if (fails++ < 20) {                                                                                              \
+        printf("FAIL %s:%d: ", __FILE__, __LINE__);                                                                    \
+        printf(__VA_ARGS__);                                                                                           \
+        printf("\n");                                                                                                  \
+      }                                                                                                                \
+    }                                                                                                                  \
+  } while (0)
 static uint64_t rs = 0x2545f4914f6cdd1dull;
-static uint64_t rnd(void) { rs ^= rs << 13; rs ^= rs >> 7; rs ^= rs << 17; return rs; }
-static long scale(void) { const char *e = getenv("FUZZ"); return e ? atol(e) : 1; }
+static uint64_t rnd(void) {
+  rs ^= rs << 13;
+  rs ^= rs >> 7;
+  rs ^= rs << 17;
+  return rs;
+}
+static long scale(void) {
+  const char *e = getenv("FUZZ");
+  return e ? atol(e) : 1;
+}
 
 static hp_dec D;
 static uint8_t ARENA[1 << 16];
@@ -27,12 +45,15 @@ static void test_rfc(void) {
   long before = fails;
   for (size_t i = 0; i < sizeof rfc7541_cases / sizeof rfc7541_cases[0]; i++) {
     const rfc7541_case *c = &rfc7541_cases[i];
-    if (c->seq == 1) hp_dec_init(&D, c->group >= 5 ? 256 : 4096), D.need_update = 0; /* C.5/C.6: both ends start at 256 */
-    int fl, n = hp_decode_block(&D, (const uint8_t *)c->block, (size_t)c->blen, F, 256, ARENA, sizeof ARENA, 1 << 20, &fl);
+    if (c->seq == 1)
+      hp_dec_init(&D, c->group >= 5 ? 256 : 4096), D.need_update = 0; /* C.5/C.6: both ends start at 256 */
+    int fl,
+        n = hp_decode_block(&D, (const uint8_t *)c->block, (size_t)c->blen, F, 256, ARENA, sizeof ARENA, 1 << 20, &fl);
     CHECK(n == c->n, "C.%d.%d: %d fields", c->group, c->seq, n);
     for (int k = 0; k < n && k < c->n; k++) {
       const char *nm = c->h[2 * k], *v = c->h[2 * k + 1];
-      CHECK(F[k].nlen == strlen(nm) && !memcmp(F[k].name, nm, F[k].nlen) && F[k].vlen == strlen(v) && !memcmp(F[k].value, v, F[k].vlen),
+      CHECK(F[k].nlen == strlen(nm) && !memcmp(F[k].name, nm, F[k].nlen) && F[k].vlen == strlen(v) &&
+                !memcmp(F[k].value, v, F[k].vlen),
             "C.%d.%d field %d", c->group, c->seq, k);
     }
     CHECK(D.size == (uint32_t)c->table_size, "C.%d.%d table size %u want %d", c->group, c->seq, D.size, c->table_size);
@@ -41,25 +62,44 @@ static void test_rfc(void) {
 }
 
 /* --------------------------------- random header lists --------------------------------- */
-static const char *NAMES[] = {":method", ":path", ":authority", ":scheme", "user-agent", "accept", "cookie", "x-trace",
-                              "content-type", "content-length", "grpc-timeout", "x-Upper", "bad name", "accept-encoding",
-                              "authorization", "x-custom-header-with-a-long-name", "te", ""};
+static const char *NAMES[] = { ":method",
+                               ":path",
+                               ":authority",
+                               ":scheme",
+                               "user-agent",
+                               "accept",
+                               "cookie",
+                               "x-trace",
+                               "content-type",
+                               "content-length",
+                               "grpc-timeout",
+                               "x-Upper",
+                               "bad name",
+                               "accept-encoding",
+                               "authorization",
+                               "x-custom-header-with-a-long-name",
+                               "te",
+                               "" };
 static void rand_str(char *o, size_t *n, size_t max) {
   static const char al[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./:;=,?&%()\"' ";
   size_t l = rnd() % 4 == 0 ? rnd() % max : rnd() % 24;
   for (size_t i = 0; i < l; i++) o[i] = rnd() % 50 == 0 ? (char)(rnd() & 0xff) : al[rnd() % (sizeof al - 1)];
   *n = l;
 }
-typedef struct { char n[64], v[600]; size_t nl, vl; uint8_t flags; } tf;
+typedef struct {
+  char n[64], v[600];
+  size_t nl, vl;
+  uint8_t flags;
+} tf;
 static int rand_list(tf *t, int max) {
   int k = (int)(rnd() % (unsigned)max) + 1;
   for (int i = 0; i < k; i++) {
     if (rnd() % 5) {
       const char *nm = NAMES[rnd() % (sizeof NAMES / sizeof NAMES[0])];
       t[i].nl = strlen(nm), memcpy(t[i].n, nm, t[i].nl);
-    } else
-      rand_str(t[i].n, &t[i].nl, 40);
-    if (rnd() % 3 == 0 && i > 0) memcpy(t[i].v, t[i - 1].v, t[i - 1].vl), t[i].vl = t[i - 1].vl; /* repeats get indexed */
+    } else rand_str(t[i].n, &t[i].nl, 40);
+    if (rnd() % 3 == 0 && i > 0)
+      memcpy(t[i].v, t[i - 1].v, t[i - 1].vl), t[i].vl = t[i - 1].vl; /* repeats get indexed */
     else rand_str(t[i].v, &t[i].vl, 500);
     t[i].flags = rnd() % 10 == 0 ? NGHTTP2_NV_FLAG_NO_INDEX : NGHTTP2_NV_FLAG_NONE;
   }
@@ -67,7 +107,11 @@ static int rand_list(tf *t, int max) {
 }
 
 /* decode one block with nghttp2; returns nfields or -1 */
-typedef struct { uint8_t n[1024], v[8192]; size_t nl, vl; int never; } rf;
+typedef struct {
+  uint8_t n[1024], v[8192];
+  size_t nl, vl;
+  int never;
+} rf;
 static rf RF[256];
 static int n2_inflate(nghttp2_hd_inflater *inf, const uint8_t *in, size_t len) {
   int k = 0;
@@ -84,7 +128,10 @@ static int n2_inflate(nghttp2_hd_inflater *inf, const uint8_t *in, size_t len) {
       }
       k++;
     }
-    if (fl & NGHTTP2_HD_INFLATE_FINAL) { nghttp2_hd_inflate_end_headers(inf); return k; }
+    if (fl & NGHTTP2_HD_INFLATE_FINAL) {
+      nghttp2_hd_inflate_end_headers(inf);
+      return k;
+    }
     if (!len && !(fl & NGHTTP2_HD_INFLATE_EMIT)) return -1;
   }
 }
@@ -98,8 +145,10 @@ static int cmp_fields(int n, int k, const char *what) {
   /* validate-once: the cached verdicts must equal a fresh check */
   for (int i = 0; i < n; i++) {
     uint8_t nc = F[i].nlen && F[i].name[0] == ':' ? (hv_check_name(F[i].name, F[i].nlen) ? HP_N_PSEUDO : HP_N_BAD)
-               : F[i].nlen ? (uint8_t)hv_check_nonempty_name(F[i].name, F[i].nlen) : HP_N_BAD;
-    CHECK(F[i].nclass == nc && F[i].vok == (uint8_t)hv_check_value_rfc9113(F[i].value, F[i].vlen), "%s: verdict %d", what, i);
+                 : F[i].nlen                      ? (uint8_t)hv_check_nonempty_name(F[i].name, F[i].nlen)
+                                                  : HP_N_BAD;
+    CHECK(F[i].nclass == nc && F[i].vok == (uint8_t)hv_check_value_rfc9113(F[i].value, F[i].vlen), "%s: verdict %d",
+          what, i);
     CHECK(F[i].sidx == hp_name_index(F[i].name, F[i].nlen), "%s: sidx %d", what, i);
   }
   return ok;
@@ -121,10 +170,15 @@ static void test_diff(void) {
       tf t[24];
       nghttp2_nv nv[24];
       int k = rand_list(t, 24);
-      for (int i = 0; i < k; i++) nv[i] = (nghttp2_nv){(uint8_t *)t[i].n, (uint8_t *)t[i].v, t[i].nl, t[i].vl, t[i].flags};
-      if (rnd() % 16 == 0) nghttp2_hd_deflate_change_table_size(def, (size_t)(rnd() % (limit + 1))); /* -> size update */
+      for (int i = 0; i < k; i++)
+        nv[i] = (nghttp2_nv){ (uint8_t *)t[i].n, (uint8_t *)t[i].v, t[i].nl, t[i].vl, t[i].flags };
+      if (rnd() % 16 == 0)
+        nghttp2_hd_deflate_change_table_size(def, (size_t)(rnd() % (limit + 1))); /* -> size update */
       nghttp2_ssize bl = nghttp2_hd_deflate_hd(def, blk, sizeof blk, nv, (size_t)k);
-      if (bl < 0) { printf("deflate failed\n"); exit(1); }
+      if (bl < 0) {
+        printf("deflate failed\n");
+        exit(1);
+      }
       int fl, n = hp_decode_block(&D, blk, (size_t)bl, F, 256, ARENA, sizeof ARENA, 1 << 20, &fl);
       int kk = n2_inflate(inf, blk, (size_t)bl);
       cmp_fields(n, kk, "block");
@@ -135,10 +189,18 @@ static void test_diff(void) {
         size_t ml = (size_t)bl;
         memcpy(mb, blk, ml);
         switch (rnd() % 4) {
-        case 0: if (ml) mb[rnd() % ml] ^= (uint8_t)(1 << (rnd() % 8)); break;
-        case 1: if (ml) ml = rnd() % ml; break;
-        case 2: if (ml) mb[rnd() % ml] = (uint8_t)rnd(); break;
-        case 3: if (ml < sizeof mb - 4) mb[ml++] = (uint8_t)(0x80 | rnd()); break; /* extra indexed ref */
+          case 0:
+            if (ml) mb[rnd() % ml] ^= (uint8_t)(1 << (rnd() % 8));
+            break;
+          case 1:
+            if (ml) ml = rnd() % ml;
+            break;
+          case 2:
+            if (ml) mb[rnd() % ml] = (uint8_t)rnd();
+            break;
+          case 3:
+            if (ml < sizeof mb - 4) mb[ml++] = (uint8_t)(0x80 | rnd());
+            break; /* extra indexed ref */
         }
         hp_dec save = D;
         nghttp2_hd_inflater *i2;
@@ -154,11 +216,12 @@ static void test_diff(void) {
           if ((n1 < 0) != (n2 < 0) && getenv("DUMP")) {
             for (size_t q = 0; q < ml && q < 48; q++) printf("%02x", mb[q]);
             printf(" (len %zu)\n", ml);
-            for (int q = 0; q < n1 && q < 4; q++) printf("  [%.*s] = [%.*s]\n", (int)F[q].nlen, F[q].name, (int)(F[q].vlen > 40 ? 40 : F[q].vlen), F[q].value);
+            for (int q = 0; q < n1 && q < 4; q++)
+              printf("  [%.*s] = [%.*s]\n", (int)F[q].nlen, F[q].name, (int)(F[q].vlen > 40 ? 40 : F[q].vlen),
+                     F[q].value);
           }
           mut_rej++;
-        } else
-          cmp_fields(n1, n2, "mutant");
+        } else cmp_fields(n1, n2, "mutant");
         mut++;
         nghttp2_hd_inflate_del(i2);
         D = save;
@@ -167,7 +230,8 @@ static void test_diff(void) {
     nghttp2_hd_deflate_del(def);
     nghttp2_hd_inflate_del(inf);
   }
-  printf("differential: %ld blocks, %ld mutants (%ld rejected by both): %s\n", blocks, mut, mut_rej, fails == before ? "ok" : "FAILED");
+  printf("differential: %ld blocks, %ld mutants (%ld rejected by both): %s\n", blocks, mut, mut_rej,
+         fails == before ? "ok" : "FAILED");
 }
 
 static void test_encode(void) {
@@ -180,7 +244,7 @@ static void test_encode(void) {
     int k = rand_list(t, 12);
     uint8_t *p = blk;
     if (it == 0) p += hp_enc_size_update(p, 0);
-    int st = (int)(rnd() % 3 ? (unsigned[]){200, 204, 206, 304, 400, 404, 500}[rnd() % 7] : 100 + rnd() % 500);
+    int st = (int)(rnd() % 3 ? (unsigned[]){ 200, 204, 206, 304, 400, 404, 500 }[rnd() % 7] : 100 + rnd() % 500);
     p += hp_enc_status(p, st);
     for (int i = 0; i < k; i++) {
       if (!t[i].nl || t[i].n[0] == ':') t[i].n[0] = 'x', t[i].nl = t[i].nl ? t[i].nl : 1;

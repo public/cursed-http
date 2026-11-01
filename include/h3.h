@@ -39,18 +39,42 @@
 #ifndef H3_MAX_SECTION
 #define H3_MAX_SECTION 65536 /* largest HEADERS frame payload accepted */
 #endif
-#define H3_MAX_LIST 16384      /* SETTINGS_MAX_FIELD_SECTION_SIZE we advertise */
-#define H3_QPACK_CAP 4096      /* SETTINGS_QPACK_MAX_TABLE_CAPACITY we advertise */
+#define H3_MAX_LIST   16384 /* SETTINGS_MAX_FIELD_SECTION_SIZE we advertise */
+#define H3_QPACK_CAP  4096  /* SETTINGS_QPACK_MAX_TABLE_CAPACITY we advertise */
 #define H3_MAX_FIELDS 256
 
 enum { H3_E_CLOSED = -1, H3_E_AGAIN = -2, H3_E_STATE = -3, H3_E_TOO_BIG = -4 };
 enum {
-  H3_NO_ERROR = 0x100, H3_GENERAL_PROTOCOL_ERROR, H3_INTERNAL_ERROR, H3_STREAM_CREATION_ERROR, H3_CLOSED_CRITICAL_STREAM,
-  H3_FRAME_UNEXPECTED, H3_FRAME_ERROR, H3_EXCESSIVE_LOAD, H3_ID_ERROR, H3_SETTINGS_ERROR, H3_MISSING_SETTINGS,
-  H3_REQUEST_REJECTED, H3_REQUEST_CANCELLED, H3_REQUEST_INCOMPLETE, H3_MESSAGE_ERROR, H3_CONNECT_ERROR, H3_VERSION_FALLBACK,
-  QPACK_DECOMPRESSION_FAILED = 0x200, QPACK_ENCODER_STREAM_ERROR, QPACK_DECODER_STREAM_ERROR
+  H3_NO_ERROR = 0x100,
+  H3_GENERAL_PROTOCOL_ERROR,
+  H3_INTERNAL_ERROR,
+  H3_STREAM_CREATION_ERROR,
+  H3_CLOSED_CRITICAL_STREAM,
+  H3_FRAME_UNEXPECTED,
+  H3_FRAME_ERROR,
+  H3_EXCESSIVE_LOAD,
+  H3_ID_ERROR,
+  H3_SETTINGS_ERROR,
+  H3_MISSING_SETTINGS,
+  H3_REQUEST_REJECTED,
+  H3_REQUEST_CANCELLED,
+  H3_REQUEST_INCOMPLETE,
+  H3_MESSAGE_ERROR,
+  H3_CONNECT_ERROR,
+  H3_VERSION_FALLBACK,
+  QPACK_DECOMPRESSION_FAILED = 0x200,
+  QPACK_ENCODER_STREAM_ERROR,
+  QPACK_DECODER_STREAM_ERROR
 };
-enum { H3F_DATA = 0, H3F_HEADERS = 1, H3F_CANCEL_PUSH = 3, H3F_SETTINGS = 4, H3F_PUSH_PROMISE = 5, H3F_GOAWAY = 7, H3F_MAX_PUSH_ID = 0xd };
+enum {
+  H3F_DATA = 0,
+  H3F_HEADERS = 1,
+  H3F_CANCEL_PUSH = 3,
+  H3F_SETTINGS = 4,
+  H3F_PUSH_PROMISE = 5,
+  H3F_GOAWAY = 7,
+  H3F_MAX_PUSH_ID = 0xd
+};
 
 typedef struct h3_conn h3_conn;
 typedef struct {
@@ -68,13 +92,13 @@ typedef struct {
   hp_field f[H3_MAX_FIELDS];
 } h3_scratch;
 
-#define H3_ST_GOT_HEADERS 1u
+#define H3_ST_GOT_HEADERS  1u
 #define H3_ST_GOT_TRAILERS 2u
-#define H3_ST_REMOTE_END 4u
-#define H3_ST_LOCAL_END 8u
-#define H3_ST_RESPONDED 16u
-#define H3_ST_BODY_END 32u
-#define H3_ST_TRAILERS 64u
+#define H3_ST_REMOTE_END   4u
+#define H3_ST_LOCAL_END    8u
+#define H3_ST_RESPONDED    16u
+#define H3_ST_BODY_END     32u
+#define H3_ST_TRAILERS     64u
 
 typedef struct {
   uint64_t id;
@@ -90,14 +114,14 @@ typedef struct {
 struct h3_conn {
   h3_callbacks cb;
   void *user;
-  uint64_t error;                   /* connection error code once failed */
-  uint64_t out_id[3];               /* control, QPACK encoder, QPACK decoder (ours) */
-  uint8_t ctrl[64];                 /* our control stream: type, SETTINGS, later GOAWAY */
+  uint64_t error;                            /* connection error code once failed */
+  uint64_t out_id[3];                        /* control, QPACK encoder, QPACK decoder (ours) */
+  uint8_t ctrl[64];                          /* our control stream: type, SETTINGS, later GOAWAY */
   uint16_t ctrl_len, ctrl_off, type_sent[2]; /* encoder / decoder stream type byte sent */
-  int64_t in_id[3];                 /* the peer's control / encoder / decoder streams, -1 if none */
-  uint64_t ctrl_skip;               /* rest of an unknown frame on the peer's control stream */
+  int64_t in_id[3];                          /* the peer's control / encoder / decoder streams, -1 if none */
+  uint64_t ctrl_skip;                        /* rest of an unknown frame on the peer's control stream */
   uint8_t got_settings, goaway_sent;
-  uint64_t max_sid;                 /* highest request stream seen + 4 (GOAWAY's id) */
+  uint64_t max_sid; /* highest request stream seen + 4 (GOAWAY's id) */
   uint32_t rr;
   qp_dec qd;
   h3_stream s[H3_MAX_STREAMS];
@@ -107,9 +131,19 @@ static inline uint64_t h3_error(const h3_conn *c) { return c->error; }
 
 /* QUIC varint encode */
 static inline uint8_t *h3__put_vi(uint8_t *p, uint64_t v) {
-  if (v < 64) { *p++ = (uint8_t)v; return p; }
-  if (v < 16384) { *p++ = (uint8_t)(0x40 | v >> 8), *p++ = (uint8_t)v; return p; }
-  if (v < (1u << 30)) { for (int i = 3; i >= 0; i--) p[3 - i] = (uint8_t)(v >> (8 * i)); p[0] |= 0x80; return p + 4; }
+  if (v < 64) {
+    *p++ = (uint8_t)v;
+    return p;
+  }
+  if (v < 16384) {
+    *p++ = (uint8_t)(0x40 | v >> 8), *p++ = (uint8_t)v;
+    return p;
+  }
+  if (v < (1u << 30)) {
+    for (int i = 3; i >= 0; i--) p[3 - i] = (uint8_t)(v >> (8 * i));
+    p[0] |= 0x80;
+    return p + 4;
+  }
   for (int i = 7; i >= 0; i--) p[7 - i] = (uint8_t)(v >> (8 * i));
   p[0] |= 0xc0;
   return p + 8;
@@ -121,7 +155,8 @@ static inline int h3__fail(h3_conn *c, uint64_t code) {
 }
 /* slots probed from (sid / 4) % H3_MAX_STREAMS: O(1) on average */
 static inline h3_stream *h3__find(h3_conn *c, uint64_t sid) {
-  for (uint32_t k = 0, i = (uint32_t)((sid >> 2) % H3_MAX_STREAMS); k < H3_MAX_STREAMS; k++, i = (i + 1) % H3_MAX_STREAMS)
+  for (uint32_t k = 0, i = (uint32_t)((sid >> 2) % H3_MAX_STREAMS); k < H3_MAX_STREAMS;
+       k++, i = (i + 1) % H3_MAX_STREAMS)
     if (c->s[i].active && c->s[i].id == sid) return &c->s[i];
   return NULL;
 }
@@ -140,7 +175,8 @@ static inline void h3__reset(h3_conn *c, h3_stream *s, uint64_t sid, uint64_t co
   if (s && s->active && s->id == sid) h3__close(c, s, code);
 }
 
-static inline void h3_init(h3_conn *c, const h3_callbacks *cb, void *user, uint64_t ctrl_id, uint64_t enc_id, uint64_t dec_id) {
+static inline void h3_init(h3_conn *c, const h3_callbacks *cb, void *user, uint64_t ctrl_id, uint64_t enc_id,
+                           uint64_t dec_id) {
   memset(c, 0, offsetof(h3_conn, qd));
   c->cb = *cb, c->user = user;
   c->out_id[0] = ctrl_id, c->out_id[1] = enc_id, c->out_id[2] = dec_id;
@@ -167,16 +203,22 @@ static inline int h3__vi(const uint8_t *p, const uint8_t *end, uint64_t *v) {
 static inline int h3__reserved_h2(uint64_t t) { return t == 0x2 || t == 0x6 || t == 0x8 || t == 0x9; }
 
 /* --------------------------------------- request streams --------------------------------------- */
-static inline int h3__headers(h3_conn *c, h3_scratch *sc, h3_stream *s, uint64_t sid, const uint8_t *pl, size_t n, int end) {
+static inline int h3__headers(h3_conn *c, h3_scratch *sc, h3_stream *s, uint64_t sid, const uint8_t *pl, size_t n,
+                              int end) {
   int hfl;
-  int k = qp_decode_section(&c->qd, sid, pl, n, sc->f, H3_MAX_FIELDS / 2, sc->arena, sizeof sc->arena, H3_MAX_LIST, &hfl);
+  int k =
+      qp_decode_section(&c->qd, sid, pl, n, sc->f, H3_MAX_FIELDS / 2, sc->arena, sizeof sc->arena, H3_MAX_LIST, &hfl);
   if (k == QP_E_DECOMPRESSION) return h3__fail(c, QPACK_DECOMPRESSION_FAILED);
   if (k < 0) return h3__fail(c, H3_EXCESSIVE_LOAD);
   if (s->flags & H3_ST_GOT_HEADERS) { /* trailers */
     s->flags |= H3_ST_GOT_TRAILERS;
     for (int i = 0; i < k; i++)
-      if (sc->f[i].nclass != HP_N_OK || !sc->f[i].vok) { h3__reset(c, s, sid, H3_MESSAGE_ERROR); return 0; }
-    if (c->cb.on_trailers && c->cb.on_trailers(c, sid, sc->f, k, c->user) && h3__find(c, sid)) h3__reset(c, s, sid, H3_INTERNAL_ERROR);
+      if (sc->f[i].nclass != HP_N_OK || !sc->f[i].vok) {
+        h3__reset(c, s, sid, H3_MESSAGE_ERROR);
+        return 0;
+      }
+    if (c->cb.on_trailers && c->cb.on_trailers(c, sid, sc->f, k, c->user) && h3__find(c, sid))
+      h3__reset(c, s, sid, H3_INTERNAL_ERROR);
     return 0;
   }
   s->flags |= H3_ST_GOT_HEADERS;
@@ -186,37 +228,58 @@ static inline int h3__headers(h3_conn *c, h3_scratch *sc, h3_stream *s, uint64_t
     return 0;
   }
   s->content_length = rq.content_length;
-  if (end && rq.content_length > 0) { h3__reset(c, s, sid, H3_MESSAGE_ERROR); return 0; }
+  if (end && rq.content_length > 0) {
+    h3__reset(c, s, sid, H3_MESSAGE_ERROR);
+    return 0;
+  }
   if (end) s->flags |= H3_ST_REMOTE_END;
-  if (c->cb.on_request && c->cb.on_request(c, sid, &rq, end, c->user) && h3__find(c, sid)) h3__reset(c, s, sid, H3_INTERNAL_ERROR);
+  if (c->cb.on_request && c->cb.on_request(c, sid, &rq, end, c->user) && h3__find(c, sid))
+    h3__reset(c, s, sid, H3_INTERNAL_ERROR);
   return 0;
 }
 
 /* the stream ended (QUIC fin) with everything consumed */
 static inline int h3__req_fin(h3_conn *c, h3_stream *s, uint64_t sid) {
   if (s->data_left || s->skip_left) return h3__fail(c, H3_FRAME_ERROR); /* truncated frame */
-  if (!(s->flags & H3_ST_GOT_HEADERS)) { h3__reset(c, s, sid, H3_REQUEST_INCOMPLETE); return 0; }
+  if (!(s->flags & H3_ST_GOT_HEADERS)) {
+    h3__reset(c, s, sid, H3_REQUEST_INCOMPLETE);
+    return 0;
+  }
   if (s->flags & H3_ST_REMOTE_END) return 0;
-  if (s->content_length >= 0 && s->data_seen != s->content_length) { h3__reset(c, s, sid, H3_MESSAGE_ERROR); return 0; }
+  if (s->content_length >= 0 && s->data_seen != s->content_length) {
+    h3__reset(c, s, sid, H3_MESSAGE_ERROR);
+    return 0;
+  }
   int r = 0;
   if (!(s->flags & H3_ST_GOT_TRAILERS) && c->cb.on_data) r = c->cb.on_data(c, sid, NULL, 0, 1, c->user);
   if (!(s = h3__find(c, sid))) return 0;
-  if (r) { h3__reset(c, s, sid, H3_INTERNAL_ERROR); return 0; }
+  if (r) {
+    h3__reset(c, s, sid, H3_INTERNAL_ERROR);
+    return 0;
+  }
   h3__end(c, s, H3_ST_REMOTE_END);
   return 0;
 }
 
-static inline int h3__request_stream(h3_conn *c, h3_scratch *sc, uint64_t sid, uint64_t offset, const uint8_t *buf, size_t len, int fin) {
+static inline int h3__request_stream(h3_conn *c, h3_scratch *sc, uint64_t sid, uint64_t offset, const uint8_t *buf,
+                                     size_t len, int fin) {
   h3_stream *s = h3__find(c, sid);
   if (!s) {
     /* QUIC opens streams in any order, so only the offset tells a new stream from one we already
      * finished or reset: a new one starts at 0 */
     if (offset) return (int)len;
     if (c->goaway_sent && sid >= c->max_sid) return (int)len;
-    for (uint32_t k = 0, i = (uint32_t)((sid >> 2) % H3_MAX_STREAMS); k < H3_MAX_STREAMS; k++, i = (i + 1) % H3_MAX_STREAMS)
-      if (!c->s[i].active) { s = &c->s[i]; break; }
+    for (uint32_t k = 0, i = (uint32_t)((sid >> 2) % H3_MAX_STREAMS); k < H3_MAX_STREAMS;
+         k++, i = (i + 1) % H3_MAX_STREAMS)
+      if (!c->s[i].active) {
+        s = &c->s[i];
+        break;
+      }
     if (sid + 4 > c->max_sid) c->max_sid = sid + 4;
-    if (!s) { h3__reset(c, NULL, sid, H3_REQUEST_REJECTED); return (int)len; }
+    if (!s) {
+      h3__reset(c, NULL, sid, H3_REQUEST_REJECTED);
+      return (int)len;
+    }
     memset(s, 0, offsetof(h3_stream, hdr));
     s->id = sid, s->active = 1, s->content_length = -1;
   }
@@ -225,15 +288,24 @@ static inline int h3__request_stream(h3_conn *c, h3_scratch *sc, uint64_t sid, u
     if (s->data_left) {
       size_t m = len - pos < s->data_left ? len - pos : (size_t)s->data_left;
       s->data_left -= m, s->data_seen += (int64_t)m, pos += m;
-      if (s->content_length >= 0 && s->data_seen > s->content_length) { h3__reset(c, s, sid, H3_MESSAGE_ERROR); return (int)len; }
+      if (s->content_length >= 0 && s->data_seen > s->content_length) {
+        h3__reset(c, s, sid, H3_MESSAGE_ERROR);
+        return (int)len;
+      }
       int end = fin && pos == len && !s->data_left;
-      if (end && s->content_length >= 0 && s->data_seen != s->content_length) { h3__reset(c, s, sid, H3_MESSAGE_ERROR); return (int)len; }
+      if (end && s->content_length >= 0 && s->data_seen != s->content_length) {
+        h3__reset(c, s, sid, H3_MESSAGE_ERROR);
+        return (int)len;
+      }
       if (c->cb.on_data && c->cb.on_data(c, sid, buf + pos - m, m, end, c->user)) {
         if (h3__find(c, sid)) h3__reset(c, s, sid, H3_INTERNAL_ERROR);
         return (int)len;
       }
       if (!h3__find(c, sid)) return (int)len;
-      if (end) { h3__end(c, s, H3_ST_REMOTE_END); return (int)len; }
+      if (end) {
+        h3__end(c, s, H3_ST_REMOTE_END);
+        return (int)len;
+      }
       continue;
     }
     if (s->skip_left) {
@@ -260,7 +332,10 @@ static inline int h3__request_stream(h3_conn *c, h3_scratch *sc, uint64_t sid, u
       pos += hl + (size_t)flen;
       if (!(s = h3__find(c, sid))) return (int)len; /* reset */
       if (end && (s->flags & H3_ST_GOT_TRAILERS)) {
-        if (s->content_length >= 0 && s->data_seen != s->content_length) { h3__reset(c, s, sid, H3_MESSAGE_ERROR); return (int)len; }
+        if (s->content_length >= 0 && s->data_seen != s->content_length) {
+          h3__reset(c, s, sid, H3_MESSAGE_ERROR);
+          return (int)len;
+        }
         h3__end(c, s, H3_ST_REMOTE_END);
         return (int)len;
       }
@@ -294,7 +369,8 @@ static inline int h3__control(h3_conn *c, const uint8_t *buf, size_t len) {
     if (!a || !b) break;
     size_t hl = (size_t)a + (size_t)b;
     if (!c->got_settings && type != H3F_SETTINGS) return h3__fail(c, H3_MISSING_SETTINGS);
-    if (type == H3F_DATA || type == H3F_HEADERS || type == H3F_PUSH_PROMISE || h3__reserved_h2(type)) return h3__fail(c, H3_FRAME_UNEXPECTED);
+    if (type == H3F_DATA || type == H3F_HEADERS || type == H3F_PUSH_PROMISE || h3__reserved_h2(type))
+      return h3__fail(c, H3_FRAME_UNEXPECTED);
     if (type == H3F_SETTINGS || type == H3F_GOAWAY || type == H3F_MAX_PUSH_ID || type == H3F_CANCEL_PUSH) {
       if (flen > 4096) return h3__fail(c, H3_EXCESSIVE_LOAD);
       if (len - pos - hl < flen) break;
@@ -307,7 +383,8 @@ static inline int h3__control(h3_conn *c, const uint8_t *buf, size_t len) {
           uint64_t id, v;
           int x = h3__vi(p, e, &id), y = x ? h3__vi(p + x, e, &v) : 0;
           if (!x || !y) return h3__fail(c, H3_FRAME_ERROR);
-          if (id == 0x2 || id == 0x3 || id == 0x4 || id == 0x5) return h3__fail(c, H3_SETTINGS_ERROR); /* HTTP/2 settings */
+          if (id == 0x2 || id == 0x3 || id == 0x4 || id == 0x5)
+            return h3__fail(c, H3_SETTINGS_ERROR); /* HTTP/2 settings */
           for (int k = 0; k < nseen; k++)
             if (seen[k] == id) return h3__fail(c, H3_SETTINGS_ERROR);
           if (nseen < 16) seen[nseen++] = id;
@@ -340,11 +417,15 @@ static inline int h3__decoder_stream(h3_conn *c, const uint8_t *buf, size_t len)
   return (int)pos;
 }
 
-static inline int h3_recv(h3_conn *c, h3_scratch *sc, uint64_t sid, uint64_t offset, const uint8_t *buf, size_t len, int fin) {
+static inline int h3_recv(h3_conn *c, h3_scratch *sc, uint64_t sid, uint64_t offset, const uint8_t *buf, size_t len,
+                          int fin) {
   if (c->error) return H3_E_CLOSED;
   if ((sid & 3) == 0) return h3__request_stream(c, sc, sid, offset, buf, len, fin);
   if ((sid & 3) != 2) return h3__fail(c, H3_STREAM_CREATION_ERROR); /* server-initiated ids are ours */
-  int which = sid == (uint64_t)c->in_id[0] ? 0 : sid == (uint64_t)c->in_id[1] ? 1 : sid == (uint64_t)c->in_id[2] ? 2 : -1;
+  int which = sid == (uint64_t)c->in_id[0]   ? 0
+              : sid == (uint64_t)c->in_id[1] ? 1
+              : sid == (uint64_t)c->in_id[2] ? 2
+                                             : -1;
   size_t pos = 0;
   if (which < 0) {
     if (offset) return (int)len; /* an unknown stream type we ignore */
@@ -396,7 +477,8 @@ static inline size_t h3__enc_frame(uint8_t *dst, size_t cap, int status, const h
   memcpy(dst, hdr, hl), memcpy(dst + hl, blk, bl);
   return hl + bl;
 }
-static inline int h3_respond(h3_conn *c, uint64_t sid, int status, const hp_field *f, int n, const uint8_t *body, size_t len, int end) {
+static inline int h3_respond(h3_conn *c, uint64_t sid, int status, const hp_field *f, int n, const uint8_t *body,
+                             size_t len, int end) {
   h3_stream *s = h3__find(c, sid);
   if (!s || (s->flags & H3_ST_RESPONDED)) return H3_E_STATE;
   size_t fl = h3__enc_frame(s->hdr, sizeof s->hdr, status, f, n);
@@ -408,7 +490,8 @@ static inline int h3_respond(h3_conn *c, uint64_t sid, int status, const hp_fiel
 }
 static inline int h3_data(h3_conn *c, uint64_t sid, const uint8_t *body, size_t len, int end) {
   h3_stream *s = h3__find(c, sid);
-  if (!s || !(s->flags & H3_ST_RESPONDED) || (s->body && s->body_off < s->body_len) || (s->flags & (H3_ST_BODY_END | H3_ST_TRAILERS)))
+  if (!s || !(s->flags & H3_ST_RESPONDED) || (s->body && s->body_off < s->body_len) ||
+      (s->flags & (H3_ST_BODY_END | H3_ST_TRAILERS)))
     return H3_E_STATE;
   s->body = body, s->body_len = len, s->body_off = 0;
   if (end) s->flags |= H3_ST_BODY_END;
@@ -486,7 +569,11 @@ static inline size_t h3_stream_send(h3_conn *c, uint64_t sid, uint8_t *out, size
   if (left && cap - w > 3) { /* one DATA frame: type, length, as much body as fits */
     size_t room = cap - w - 1;
     size_t m = left, vl = m < 64 ? 1 : m < 16384 ? 2 : m < (1u << 30) ? 4 : 8;
-    while (m + vl > room) { m = room > vl ? room - vl : 0; vl = m < 64 ? 1 : m < 16384 ? 2 : 4; if (!m) break; }
+    while (m + vl > room) {
+      m = room > vl ? room - vl : 0;
+      vl = m < 64 ? 1 : m < 16384 ? 2 : 4;
+      if (!m) break;
+    }
     if (m) {
       out[w++] = H3F_DATA;
       w = (size_t)(h3__put_vi(out + w, m) - out);
@@ -497,7 +584,10 @@ static inline size_t h3_stream_send(h3_conn *c, uint64_t sid, uint8_t *out, size
     if (s->flags & H3_ST_TRAILERS) {
       size_t m = (size_t)(s->trl_len - s->trl_off) < cap - w ? (size_t)(s->trl_len - s->trl_off) : cap - w;
       memcpy(out + w, s->trl + s->trl_off, m), s->trl_off = (uint16_t)(s->trl_off + m), w += m;
-      if (s->trl_off == s->trl_len) { *fin = 1, s->body = NULL; h3__end(c, s, H3_ST_LOCAL_END); }
+      if (s->trl_off == s->trl_len) {
+        *fin = 1, s->body = NULL;
+        h3__end(c, s, H3_ST_LOCAL_END);
+      }
     } else if (s->flags & H3_ST_BODY_END) {
       *fin = 1, s->body = NULL;
       h3__end(c, s, H3_ST_LOCAL_END);

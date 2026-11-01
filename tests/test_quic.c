@@ -9,13 +9,33 @@
 #include "rfc9001_vectors.h"
 
 static long fails, checks;
-#define CHECK(c, ...) do { checks++; if (!(c)) { if (fails++ < 20) { printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } } while (0)
+#define CHECK(c, ...)                                                                                                  \
+  do {                                                                                                                 \
+    checks++;                                                                                                          \
+    if (!(c)) {                                                                                                        \
+      if (fails++ < 20) {                                                                                              \
+        printf("FAIL %s:%d: ", __FILE__, __LINE__);                                                                    \
+        printf(__VA_ARGS__);                                                                                           \
+        printf("\n");                                                                                                  \
+      }                                                                                                                \
+    }                                                                                                                  \
+  } while (0)
 static uint64_t rs = 0x6a09e667f3bcc909ull;
-static uint64_t rnd(void) { rs ^= rs << 13; rs ^= rs >> 7; rs ^= rs << 17; return rs; }
-static size_t hex(uint8_t *o, const char *h) { size_t n = 0; for (; *h; h += 2) sscanf(h, "%2hhx", &o[n++]); return n; }
+static uint64_t rnd(void) {
+  rs ^= rs << 13;
+  rs ^= rs >> 7;
+  rs ^= rs << 17;
+  return rs;
+}
+static size_t hex(uint8_t *o, const char *h) {
+  size_t n = 0;
+  for (; *h; h += 2) sscanf(h, "%2hhx", &o[n++]);
+  return n;
+}
 
 /* protect a packet with header h (pn at pn_off, pnl bytes) the way quic_send does */
-static size_t protect(quic_key *k, uint8_t *out, const uint8_t *h, size_t hl, size_t pn_off, uint64_t pn, const uint8_t *pl, size_t pll) {
+static size_t protect(quic_key *k, uint8_t *out, const uint8_t *h, size_t hl, size_t pn_off, uint64_t pn,
+                      const uint8_t *pl, size_t pll) {
   memcpy(out, h, hl);
   size_t ct = ptls_aead_encrypt(k->aead, out + hl, pl, pll, pn, out, hl);
   uint8_t mask[16];
@@ -29,7 +49,7 @@ static void test_rfc9001(void) {
   long before = fails;
   uint8_t dcid[8], pkt[1500], want[1500], pl[1500];
   hex(dcid, rfc9001_client_dcid);
-  quic_key crx = {0}, ctx_ = {0}, srx = {0}, stx = {0};
+  quic_key crx = { 0 }, ctx_ = { 0 }, srx = { 0 }, stx = { 0 };
   /* the server's view: rx = client keys, tx = server keys */
   CHECK(!quic__initial_keys(&crx, &stx, dcid, 8, &ptls_openssl_aes128gcmsha256), "initial keys");
   /* A.2: remove protection from the client Initial, compare with the CRYPTO frame + PADDING */
@@ -58,16 +78,16 @@ static void test_rfc9001(void) {
   size_t got = protect(&stx, pkt, sh, shl, shl - 2, 1, pl, spl);
   CHECK(got == wl && !memcmp(pkt, want, wl), "A.3 server Initial: %zu vs %zu bytes", got, wl);
   /* ... and the transport's own receive path decrypts it back (as a client would): keys swapped */
-  quic_key crx2 = {0}, ctx2 = {0};
+  quic_key crx2 = { 0 }, ctx2 = { 0 };
   CHECK(!quic__initial_keys(&ctx2, &crx2, dcid, 8, &ptls_openssl_aes128gcmsha256), "client-side keys");
   quic__mask(&crx2, pkt + (shl - 2) + 4, mask);
   CHECK((uint8_t)(pkt[0] ^ (mask[0] & 0x0f)) == 0xc1, "A.3 unmask");
   /* A.5: ChaCha20-Poly1305 short header, pn 654360564 (3-byte encoding) */
   uint8_t secret[32];
   hex(secret, rfc9001_a5_secret);
-  quic_key cc = {0};
+  quic_key cc = { 0 };
   CHECK(!quic__key_setup(&cc, &ptls_openssl_chacha20poly1305sha256, 1, secret) && cc.chacha, "A.5 keys");
-  uint8_t h5[4] = {0x42, 0x00, 0xbf, 0xf4};
+  uint8_t h5[4] = { 0x42, 0x00, 0xbf, 0xf4 };
   got = protect(&cc, pkt, h5, 4, 1, 654360564, (const uint8_t *)"\x01", 1);
   wl = hex(want, rfc9001_a5_packet);
   CHECK(got == wl && !memcmp(pkt, want, wl), "A.5 ChaCha20 packet");
@@ -91,7 +111,8 @@ static void test_blocks(void) {
     uint8_t b[16], *e = quic__put_vi(b, v);
     const uint8_t *p = b;
     uint64_t back;
-    CHECK(!quic__vi(&p, e, &back) && back == v && p == e && (size_t)(e - b) == quic__vi_len(v), "varint %llu", (unsigned long long)v);
+    CHECK(!quic__vi(&p, e, &back) && back == v && p == e && (size_t)(e - b) == quic__vi_len(v), "varint %llu",
+          (unsigned long long)v);
   }
   /* packet number decoding: RFC 9000 A.3's example, and random round trips */
   CHECK(quic__decode_pn(0xa82f30ea, 0x9b32, 16) == 0xa82f9b32, "RFC 9000 A.3 example");
@@ -102,10 +123,11 @@ static void test_blocks(void) {
     uint64_t largest = rnd() % (1ull << 40), pn = largest + 1 + rnd() % 30000;
     int bits = 16;
     if (pn - largest >= (1u << 15)) continue;
-    CHECK(quic__decode_pn(largest, pn & 0xffff, bits) == pn, "pn %llu largest %llu", (unsigned long long)pn, (unsigned long long)largest);
+    CHECK(quic__decode_pn(largest, pn & 0xffff, bits) == pn, "pn %llu largest %llu", (unsigned long long)pn,
+          (unsigned long long)largest);
   }
   /* reassembly: random permutation of chunks, duplicates and overlaps */
-  quic_ctx x = {0};
+  quic_ctx x = { 0 };
   x.alloc = quic__default_alloc;
   static uint8_t src[200000];
   for (size_t i = 0; i < sizeof src; i++) src[i] = (uint8_t)rnd();
@@ -130,21 +152,24 @@ static void test_blocks(void) {
   }
   /* send buffer: acks in random order free everything; losses come back */
   for (int t = 0; t < 50; t++) {
-    quic_sbuf b = {0};
+    quic_sbuf b = { 0 };
     size_t total = 1000 + rnd() % 100000;
     uint8_t *w = quic__sb_reserve(&x, &b, total);
     memcpy(w, src, total), b.len = total, b.sent = total, b.fin = 1, b.fin_sent = 1;
     size_t chunk = 1 + rnd() % 2000, nck = (total + chunk - 1) / chunk;
     size_t *order = malloc(nck * sizeof *order);
     for (size_t i = 0; i < nck; i++) order[i] = i;
-    for (size_t i = nck - 1; i > 0; i--) { size_t j = rnd() % (i + 1), tmp = order[i]; order[i] = order[j], order[j] = tmp; }
+    for (size_t i = nck - 1; i > 0; i--) {
+      size_t j = rnd() % (i + 1), tmp = order[i];
+      order[i] = order[j], order[j] = tmp;
+    }
     for (size_t i = 0; i < nck; i++) {
       uint64_t off = order[i] * chunk, len = off + chunk > total ? total - off : chunk;
       if (rnd() % 4 == 0) quic__sb_lost(&x, &b, off, len, off + len == total);
       quic__sb_ack(&x, &b, off, len, off + len == total);
     }
-    CHECK(b.len == 0 && b.base == total && b.fin_acked && b.lost.n == 0 && b.acked.n == 0, "send buffer %d: len %zu base %llu lost %d", t, b.len,
-          (unsigned long long)b.base, b.lost.n);
+    CHECK(b.len == 0 && b.base == total && b.fin_acked && b.lost.n == 0 && b.acked.n == 0,
+          "send buffer %d: len %zu base %llu lost %d", t, b.len, (unsigned long long)b.base, b.lost.n);
     free(order), quic__sb_free(&x, &b);
   }
   /* ACK ranges: random pns; duplicates are recognised while their range is remembered, and the
@@ -176,9 +201,10 @@ static int64_t eat_all(quic_conn *c, uint64_t sid, uint64_t off, const uint8_t *
   (void)c, (void)sid, (void)off, (void)d, (void)fin, (void)u;
   return (int64_t)len;
 }
-static quic_ctx FX = {NULL, quic__default_alloc};
+static quic_ctx FX = { NULL, quic__default_alloc };
 static void fresh(quic_conn *c) {
-  for (int i = 0; i < QUIC_MAX_STREAMS; i++) if (c->s[i].used) quic__stream_free(c, &c->s[i]);
+  for (int i = 0; i < QUIC_MAX_STREAMS; i++)
+    if (c->s[i].used) quic__stream_free(c, &c->s[i]);
   quic__rs_free(&FX, &c->closed[0]), quic__rs_free(&FX, &c->closed[1]);
   memset(c, 0, sizeof *c);
   c->ctx = &FX, c->cb.on_stream = eat_all;
@@ -195,29 +221,55 @@ static void test_frames(void) {
   static quic_conn C;
   static uint8_t big[2000];
   uint8_t f[64], *p;
-  struct { const char *what; int space; const char *hex; uint64_t want; } t[] = {
-    {"STREAM on our own uni stream", QUIC_SP_APP, "0b0301" "78", QUIC_STREAM_STATE_ERROR},
-    {"STREAM beyond MAX_STREAMS", QUIC_SP_APP, "0b1001" "78", QUIC_STREAM_LIMIT_ERROR},
-    {"NEW_TOKEN from a client", QUIC_SP_APP, "070100", QUIC_PROTOCOL_VIOLATION},
-    {"HANDSHAKE_DONE from a client", QUIC_SP_APP, "1e", QUIC_PROTOCOL_VIOLATION},
-    {"STREAM in an Initial packet", QUIC_SP_INITIAL, "0b0001" "78", QUIC_PROTOCOL_VIOLATION},
-    {"ACK of a packet never sent", QUIC_SP_APP, "020f000000", QUIC_PROTOCOL_VIOLATION},
-    {"ACK first range beyond largest", QUIC_SP_APP, "0205000006", QUIC_FRAME_ENCODING_ERROR},
-    {"unknown frame type", QUIC_SP_APP, "4040", QUIC_FRAME_ENCODING_ERROR},
-    {"STOP_SENDING on the client's uni stream", QUIC_SP_APP, "050200", QUIC_STREAM_STATE_ERROR},
-    {"MAX_STREAM_DATA on the client's uni stream", QUIC_SP_APP, "11024000", QUIC_STREAM_STATE_ERROR},
-    {"truncated STREAM frame", QUIC_SP_APP, "0b000578", QUIC_FRAME_ENCODING_ERROR},
-    {"RETIRE_CONNECTION_ID of a CID never issued", QUIC_SP_APP, "1901", QUIC_PROTOCOL_VIOLATION},
-    {"final size changes", QUIC_SP_APP, "0f000004" "41424344" "0f0000054142434445", QUIC_FINAL_SIZE_ERROR},
-    {"data beyond the final size", QUIC_SP_APP, "0f000002" "4142" "0e00020441424344", QUIC_FINAL_SIZE_ERROR},
-    {"RESET_STREAM below data received", QUIC_SP_APP, "0a000441424344" "04000003", QUIC_FINAL_SIZE_ERROR},
-    {"an empty packet", QUIC_SP_APP, "", QUIC_PROTOCOL_VIOLATION},
+  struct {
+    const char *what;
+    int space;
+    const char *hex;
+    uint64_t want;
+  } t[] = {
+    { "STREAM on our own uni stream", QUIC_SP_APP,
+      "0b0301"
+      "78",
+      QUIC_STREAM_STATE_ERROR },
+    { "STREAM beyond MAX_STREAMS", QUIC_SP_APP,
+      "0b1001"
+      "78",
+      QUIC_STREAM_LIMIT_ERROR },
+    { "NEW_TOKEN from a client", QUIC_SP_APP, "070100", QUIC_PROTOCOL_VIOLATION },
+    { "HANDSHAKE_DONE from a client", QUIC_SP_APP, "1e", QUIC_PROTOCOL_VIOLATION },
+    { "STREAM in an Initial packet", QUIC_SP_INITIAL,
+      "0b0001"
+      "78",
+      QUIC_PROTOCOL_VIOLATION },
+    { "ACK of a packet never sent", QUIC_SP_APP, "020f000000", QUIC_PROTOCOL_VIOLATION },
+    { "ACK first range beyond largest", QUIC_SP_APP, "0205000006", QUIC_FRAME_ENCODING_ERROR },
+    { "unknown frame type", QUIC_SP_APP, "4040", QUIC_FRAME_ENCODING_ERROR },
+    { "STOP_SENDING on the client's uni stream", QUIC_SP_APP, "050200", QUIC_STREAM_STATE_ERROR },
+    { "MAX_STREAM_DATA on the client's uni stream", QUIC_SP_APP, "11024000", QUIC_STREAM_STATE_ERROR },
+    { "truncated STREAM frame", QUIC_SP_APP, "0b000578", QUIC_FRAME_ENCODING_ERROR },
+    { "RETIRE_CONNECTION_ID of a CID never issued", QUIC_SP_APP, "1901", QUIC_PROTOCOL_VIOLATION },
+    { "final size changes", QUIC_SP_APP,
+      "0f000004"
+      "41424344"
+      "0f0000054142434445",
+      QUIC_FINAL_SIZE_ERROR },
+    { "data beyond the final size", QUIC_SP_APP,
+      "0f000002"
+      "4142"
+      "0e00020441424344",
+      QUIC_FINAL_SIZE_ERROR },
+    { "RESET_STREAM below data received", QUIC_SP_APP,
+      "0a000441424344"
+      "04000003",
+      QUIC_FINAL_SIZE_ERROR },
+    { "an empty packet", QUIC_SP_APP, "", QUIC_PROTOCOL_VIOLATION },
   };
   for (size_t i = 0; i < sizeof t / sizeof t[0]; i++) {
     fresh(&C);
     size_t n = hex(f, t[i].hex);
     uint64_t got = frames(&C, t[i].space, f, n);
-    CHECK(got == t[i].want, "%s: got 0x%llx want 0x%llx", t[i].what, (unsigned long long)got, (unsigned long long)t[i].want);
+    CHECK(got == t[i].want, "%s: got 0x%llx want 0x%llx", t[i].what, (unsigned long long)got,
+          (unsigned long long)t[i].want);
   }
   /* connection flow control: 1001 bytes against MAX_DATA 1000 (the stream window is larger) */
   fresh(&C);
@@ -237,8 +289,12 @@ static void test_frames(void) {
   CHECK(frames(&C, QUIC_SP_APP, huge, (size_t)(p - huge)) == QUIC_FLOW_CONTROL_ERROR, "stream flow control");
   /* things that are fine: PADDING, PING, PATH_CHALLENGE (answered) */
   fresh(&C);
-  size_t n = hex(f, "000000" "01" "1a0102030405060708");
-  CHECK(frames(&C, QUIC_SP_APP, f, n) == 0 && C.path_response_pending && !memcmp(C.path_response, "\1\2\3\4\5\6\7\x08", 8), "PATH_CHALLENGE");
+  size_t n = hex(f, "000000"
+                    "01"
+                    "1a0102030405060708");
+  CHECK(frames(&C, QUIC_SP_APP, f, n) == 0 && C.path_response_pending &&
+            !memcmp(C.path_response, "\1\2\3\4\5\6\7\x08", 8),
+        "PATH_CHALLENGE");
   fresh(&C);
   printf("frame errors: %s\n", fails == before ? "ok" : "FAILED");
 }
@@ -254,9 +310,10 @@ static void test_accept_rfc(void) {
   static quic_conn c;
   static uint8_t pkt[1500];
   size_t n = hex(pkt, rfc9001_a2_packet);
-  static const quic_callbacks cb = {0};
+  static const quic_callbacks cb = { 0 };
   quic_accept(&c, &qx, pkt, n, 0, &cb, NULL);
-  CHECK(c.sp[QUIC_SP_INITIAL].nrcv == 1 && c.sp[QUIC_SP_INITIAL].rcv[0].lo == 2 && !c.undecryptable, "A.2 via quic_accept: decrypted pn 2");
+  CHECK(c.sp[QUIC_SP_INITIAL].nrcv == 1 && c.sp[QUIC_SP_INITIAL].rcv[0].lo == 2 && !c.undecryptable,
+        "A.2 via quic_accept: decrypted pn 2");
   quic_free(&c);
   printf("A.2 through quic_accept: %s\n", fails == before ? "ok" : "FAILED");
 }

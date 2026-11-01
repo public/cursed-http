@@ -34,7 +34,7 @@ static inline int h_build_request(const hp_field *f, int n, h_request *rq, hp_fi
       else if (h_eq(x->name, x->nlen, ":scheme")) dst = &rq->scheme, dl = &rq->scheme_len;
       else if (h_eq(x->name, x->nlen, ":authority")) dst = &rq->authority, dl = &rq->authority_len;
       else if (h_eq(x->name, x->nlen, ":path")) dst = &rq->path, dl = &rq->path_len;
-      else return 0; /* unknown or response pseudo-header */
+      else return 0;      /* unknown or response pseudo-header */
       if (*dst) return 0; /* duplicate */
       *dst = x->value ? x->value : (const uint8_t *)"", *dl = x->vlen;
       continue;
@@ -43,23 +43,33 @@ static inline int h_build_request(const hp_field *f, int n, h_request *rq, hp_fi
     seen_regular = 1;
     /* connection-specific fields (§8.2.2) */
     switch (x->nlen) {
-    case 2: if (h_eq(x->name, 2, "te") && !h_eq(x->value, x->vlen, "trailers")) return 0; break;
-    case 7: if (h_eq(x->name, 7, "upgrade")) return 0; break;
-    case 10: if (h_eq(x->name, 10, "connection") || h_eq(x->name, 10, "keep-alive")) return 0; break;
-    case 14:
-      if (x->sidx == 28) { /* content-length: digits only; repeats must agree */
-        if (!x->vlen || x->vlen > 18) return 0;
-        int64_t v = 0;
-        for (uint32_t k = 0; k < x->vlen; k++) {
-          if ((uint8_t)(x->value[k] - '0') > 9) return 0;
-          v = v * 10 + (x->value[k] - '0');
+      case 2:
+        if (h_eq(x->name, 2, "te") && !h_eq(x->value, x->vlen, "trailers")) return 0;
+        break;
+      case 7:
+        if (h_eq(x->name, 7, "upgrade")) return 0;
+        break;
+      case 10:
+        if (h_eq(x->name, 10, "connection") || h_eq(x->name, 10, "keep-alive")) return 0;
+        break;
+      case 14:
+        if (x->sidx == 28) { /* content-length: digits only; repeats must agree */
+          if (!x->vlen || x->vlen > 18) return 0;
+          int64_t v = 0;
+          for (uint32_t k = 0; k < x->vlen; k++) {
+            if ((uint8_t)(x->value[k] - '0') > 9) return 0;
+            v = v * 10 + (x->value[k] - '0');
+          }
+          if (rq->content_length >= 0 && rq->content_length != v) return 0;
+          rq->content_length = v;
         }
-        if (rq->content_length >= 0 && rq->content_length != v) return 0;
-        rq->content_length = v;
-      }
-      break;
-    case 16: if (h_eq(x->name, 16, "proxy-connection")) return 0; break;
-    case 17: if (x->sidx == 57) return 0; break; /* transfer-encoding */
+        break;
+      case 16:
+        if (h_eq(x->name, 16, "proxy-connection")) return 0;
+        break;
+      case 17:
+        if (x->sidx == 57) return 0;
+        break; /* transfer-encoding */
     }
     regular[nreg++] = *x;
   }

@@ -32,108 +32,112 @@
 #define QP_ENT_MAX (QP_TABLE_MAX / 32)
 enum { QP_E_DECOMPRESSION = -1, QP_E_CALM = -2, QP_E_ENCODER = -3, QP_E_TRUNC = -4 /* internal: need more bytes */ };
 
-typedef struct { const char *n, *v; uint8_t nl, vl, hsidx; } qp_sent;
-#define QPS(n, v, h) {n, v, sizeof(n) - 1, sizeof(v) - 1, h}
+typedef struct {
+  const char *n, *v;
+  uint8_t nl, vl, hsidx;
+} qp_sent;
+#define QPS(n, v, h)                                                                                                   \
+  { n, v, sizeof(n) - 1, sizeof(v) - 1, h }
 static const qp_sent qp_static[99] = {
-  QPS(":authority", "", 1), /* 0 */
-  QPS(":path", "/", 4), /* 1 */
-  QPS("age", "0", 21), /* 2 */
-  QPS("content-disposition", "", 25), /* 3 */
-  QPS("content-length", "0", 28), /* 4 */
-  QPS("cookie", "", 32), /* 5 */
-  QPS("date", "", 33), /* 6 */
-  QPS("etag", "", 34), /* 7 */
-  QPS("if-modified-since", "", 40), /* 8 */
-  QPS("if-none-match", "", 41), /* 9 */
-  QPS("last-modified", "", 44), /* 10 */
-  QPS("link", "", 45), /* 11 */
-  QPS("location", "", 46), /* 12 */
-  QPS("referer", "", 51), /* 13 */
-  QPS("set-cookie", "", 55), /* 14 */
-  QPS(":method", "CONNECT", 2), /* 15 */
-  QPS(":method", "DELETE", 2), /* 16 */
-  QPS(":method", "GET", 2), /* 17 */
-  QPS(":method", "HEAD", 2), /* 18 */
-  QPS(":method", "OPTIONS", 2), /* 19 */
-  QPS(":method", "POST", 2), /* 20 */
-  QPS(":method", "PUT", 2), /* 21 */
-  QPS(":scheme", "http", 6), /* 22 */
-  QPS(":scheme", "https", 6), /* 23 */
-  QPS(":status", "103", 8), /* 24 */
-  QPS(":status", "200", 8), /* 25 */
-  QPS(":status", "304", 8), /* 26 */
-  QPS(":status", "404", 8), /* 27 */
-  QPS(":status", "503", 8), /* 28 */
-  QPS("accept", "*/*", 19), /* 29 */
-  QPS("accept", "application/dns-message", 19), /* 30 */
-  QPS("accept-encoding", "gzip, deflate, br", 16), /* 31 */
-  QPS("accept-ranges", "bytes", 18), /* 32 */
-  QPS("access-control-allow-headers", "cache-control", 0), /* 33 */
-  QPS("access-control-allow-headers", "content-type", 0), /* 34 */
-  QPS("access-control-allow-origin", "*", 20), /* 35 */
-  QPS("cache-control", "max-age=0", 24), /* 36 */
-  QPS("cache-control", "max-age=2592000", 24), /* 37 */
-  QPS("cache-control", "max-age=604800", 24), /* 38 */
-  QPS("cache-control", "no-cache", 24), /* 39 */
-  QPS("cache-control", "no-store", 24), /* 40 */
-  QPS("cache-control", "public, max-age=31536000", 24), /* 41 */
-  QPS("content-encoding", "br", 26), /* 42 */
-  QPS("content-encoding", "gzip", 26), /* 43 */
-  QPS("content-type", "application/dns-message", 31), /* 44 */
-  QPS("content-type", "application/javascript", 31), /* 45 */
-  QPS("content-type", "application/json", 31), /* 46 */
-  QPS("content-type", "application/x-www-form-urlencoded", 31), /* 47 */
-  QPS("content-type", "image/gif", 31), /* 48 */
-  QPS("content-type", "image/jpeg", 31), /* 49 */
-  QPS("content-type", "image/png", 31), /* 50 */
-  QPS("content-type", "text/css", 31), /* 51 */
-  QPS("content-type", "text/html; charset=utf-8", 31), /* 52 */
-  QPS("content-type", "text/plain", 31), /* 53 */
-  QPS("content-type", "text/plain;charset=utf-8", 31), /* 54 */
-  QPS("range", "bytes=0-", 50), /* 55 */
-  QPS("strict-transport-security", "max-age=31536000", 56), /* 56 */
-  QPS("strict-transport-security", "max-age=31536000; includesubdomains", 56), /* 57 */
-  QPS("strict-transport-security", "max-age=31536000; includesubdomains; preload", 56), /* 58 */
-  QPS("vary", "accept-encoding", 59), /* 59 */
-  QPS("vary", "origin", 59), /* 60 */
-  QPS("x-content-type-options", "nosniff", 0), /* 61 */
-  QPS("x-xss-protection", "1; mode=block", 0), /* 62 */
-  QPS(":status", "100", 8), /* 63 */
-  QPS(":status", "204", 8), /* 64 */
-  QPS(":status", "206", 8), /* 65 */
-  QPS(":status", "302", 8), /* 66 */
-  QPS(":status", "400", 8), /* 67 */
-  QPS(":status", "403", 8), /* 68 */
-  QPS(":status", "421", 8), /* 69 */
-  QPS(":status", "425", 8), /* 70 */
-  QPS(":status", "500", 8), /* 71 */
-  QPS("accept-language", "", 17), /* 72 */
-  QPS("access-control-allow-credentials", "FALSE", 0), /* 73 */
-  QPS("access-control-allow-credentials", "TRUE", 0), /* 74 */
-  QPS("access-control-allow-headers", "*", 0), /* 75 */
-  QPS("access-control-allow-methods", "get", 0), /* 76 */
-  QPS("access-control-allow-methods", "get, post, options", 0), /* 77 */
-  QPS("access-control-allow-methods", "options", 0), /* 78 */
-  QPS("access-control-expose-headers", "content-length", 0), /* 79 */
-  QPS("access-control-request-headers", "content-type", 0), /* 80 */
-  QPS("access-control-request-method", "get", 0), /* 81 */
-  QPS("access-control-request-method", "post", 0), /* 82 */
-  QPS("alt-svc", "clear", 0), /* 83 */
-  QPS("authorization", "", 23), /* 84 */
+  QPS(":authority", "", 1),                                                                   /* 0 */
+  QPS(":path", "/", 4),                                                                       /* 1 */
+  QPS("age", "0", 21),                                                                        /* 2 */
+  QPS("content-disposition", "", 25),                                                         /* 3 */
+  QPS("content-length", "0", 28),                                                             /* 4 */
+  QPS("cookie", "", 32),                                                                      /* 5 */
+  QPS("date", "", 33),                                                                        /* 6 */
+  QPS("etag", "", 34),                                                                        /* 7 */
+  QPS("if-modified-since", "", 40),                                                           /* 8 */
+  QPS("if-none-match", "", 41),                                                               /* 9 */
+  QPS("last-modified", "", 44),                                                               /* 10 */
+  QPS("link", "", 45),                                                                        /* 11 */
+  QPS("location", "", 46),                                                                    /* 12 */
+  QPS("referer", "", 51),                                                                     /* 13 */
+  QPS("set-cookie", "", 55),                                                                  /* 14 */
+  QPS(":method", "CONNECT", 2),                                                               /* 15 */
+  QPS(":method", "DELETE", 2),                                                                /* 16 */
+  QPS(":method", "GET", 2),                                                                   /* 17 */
+  QPS(":method", "HEAD", 2),                                                                  /* 18 */
+  QPS(":method", "OPTIONS", 2),                                                               /* 19 */
+  QPS(":method", "POST", 2),                                                                  /* 20 */
+  QPS(":method", "PUT", 2),                                                                   /* 21 */
+  QPS(":scheme", "http", 6),                                                                  /* 22 */
+  QPS(":scheme", "https", 6),                                                                 /* 23 */
+  QPS(":status", "103", 8),                                                                   /* 24 */
+  QPS(":status", "200", 8),                                                                   /* 25 */
+  QPS(":status", "304", 8),                                                                   /* 26 */
+  QPS(":status", "404", 8),                                                                   /* 27 */
+  QPS(":status", "503", 8),                                                                   /* 28 */
+  QPS("accept", "*/*", 19),                                                                   /* 29 */
+  QPS("accept", "application/dns-message", 19),                                               /* 30 */
+  QPS("accept-encoding", "gzip, deflate, br", 16),                                            /* 31 */
+  QPS("accept-ranges", "bytes", 18),                                                          /* 32 */
+  QPS("access-control-allow-headers", "cache-control", 0),                                    /* 33 */
+  QPS("access-control-allow-headers", "content-type", 0),                                     /* 34 */
+  QPS("access-control-allow-origin", "*", 20),                                                /* 35 */
+  QPS("cache-control", "max-age=0", 24),                                                      /* 36 */
+  QPS("cache-control", "max-age=2592000", 24),                                                /* 37 */
+  QPS("cache-control", "max-age=604800", 24),                                                 /* 38 */
+  QPS("cache-control", "no-cache", 24),                                                       /* 39 */
+  QPS("cache-control", "no-store", 24),                                                       /* 40 */
+  QPS("cache-control", "public, max-age=31536000", 24),                                       /* 41 */
+  QPS("content-encoding", "br", 26),                                                          /* 42 */
+  QPS("content-encoding", "gzip", 26),                                                        /* 43 */
+  QPS("content-type", "application/dns-message", 31),                                         /* 44 */
+  QPS("content-type", "application/javascript", 31),                                          /* 45 */
+  QPS("content-type", "application/json", 31),                                                /* 46 */
+  QPS("content-type", "application/x-www-form-urlencoded", 31),                               /* 47 */
+  QPS("content-type", "image/gif", 31),                                                       /* 48 */
+  QPS("content-type", "image/jpeg", 31),                                                      /* 49 */
+  QPS("content-type", "image/png", 31),                                                       /* 50 */
+  QPS("content-type", "text/css", 31),                                                        /* 51 */
+  QPS("content-type", "text/html; charset=utf-8", 31),                                        /* 52 */
+  QPS("content-type", "text/plain", 31),                                                      /* 53 */
+  QPS("content-type", "text/plain;charset=utf-8", 31),                                        /* 54 */
+  QPS("range", "bytes=0-", 50),                                                               /* 55 */
+  QPS("strict-transport-security", "max-age=31536000", 56),                                   /* 56 */
+  QPS("strict-transport-security", "max-age=31536000; includesubdomains", 56),                /* 57 */
+  QPS("strict-transport-security", "max-age=31536000; includesubdomains; preload", 56),       /* 58 */
+  QPS("vary", "accept-encoding", 59),                                                         /* 59 */
+  QPS("vary", "origin", 59),                                                                  /* 60 */
+  QPS("x-content-type-options", "nosniff", 0),                                                /* 61 */
+  QPS("x-xss-protection", "1; mode=block", 0),                                                /* 62 */
+  QPS(":status", "100", 8),                                                                   /* 63 */
+  QPS(":status", "204", 8),                                                                   /* 64 */
+  QPS(":status", "206", 8),                                                                   /* 65 */
+  QPS(":status", "302", 8),                                                                   /* 66 */
+  QPS(":status", "400", 8),                                                                   /* 67 */
+  QPS(":status", "403", 8),                                                                   /* 68 */
+  QPS(":status", "421", 8),                                                                   /* 69 */
+  QPS(":status", "425", 8),                                                                   /* 70 */
+  QPS(":status", "500", 8),                                                                   /* 71 */
+  QPS("accept-language", "", 17),                                                             /* 72 */
+  QPS("access-control-allow-credentials", "FALSE", 0),                                        /* 73 */
+  QPS("access-control-allow-credentials", "TRUE", 0),                                         /* 74 */
+  QPS("access-control-allow-headers", "*", 0),                                                /* 75 */
+  QPS("access-control-allow-methods", "get", 0),                                              /* 76 */
+  QPS("access-control-allow-methods", "get, post, options", 0),                               /* 77 */
+  QPS("access-control-allow-methods", "options", 0),                                          /* 78 */
+  QPS("access-control-expose-headers", "content-length", 0),                                  /* 79 */
+  QPS("access-control-request-headers", "content-type", 0),                                   /* 80 */
+  QPS("access-control-request-method", "get", 0),                                             /* 81 */
+  QPS("access-control-request-method", "post", 0),                                            /* 82 */
+  QPS("alt-svc", "clear", 0),                                                                 /* 83 */
+  QPS("authorization", "", 23),                                                               /* 84 */
   QPS("content-security-policy", "script-src 'none'; object-src 'none'; base-uri 'none'", 0), /* 85 */
-  QPS("early-data", "1", 0), /* 86 */
-  QPS("expect-ct", "", 0), /* 87 */
-  QPS("forwarded", "", 0), /* 88 */
-  QPS("if-range", "", 42), /* 89 */
-  QPS("origin", "", 0), /* 90 */
-  QPS("purpose", "prefetch", 0), /* 91 */
-  QPS("server", "", 54), /* 92 */
-  QPS("timing-allow-origin", "*", 0), /* 93 */
-  QPS("upgrade-insecure-requests", "1", 0), /* 94 */
-  QPS("user-agent", "", 58), /* 95 */
-  QPS("x-forwarded-for", "", 0), /* 96 */
-  QPS("x-frame-options", "deny", 0), /* 97 */
-  QPS("x-frame-options", "sameorigin", 0), /* 98 */
+  QPS("early-data", "1", 0),                                                                  /* 86 */
+  QPS("expect-ct", "", 0),                                                                    /* 87 */
+  QPS("forwarded", "", 0),                                                                    /* 88 */
+  QPS("if-range", "", 42),                                                                    /* 89 */
+  QPS("origin", "", 0),                                                                       /* 90 */
+  QPS("purpose", "prefetch", 0),                                                              /* 91 */
+  QPS("server", "", 54),                                                                      /* 92 */
+  QPS("timing-allow-origin", "*", 0),                                                         /* 93 */
+  QPS("upgrade-insecure-requests", "1", 0),                                                   /* 94 */
+  QPS("user-agent", "", 58),                                                                  /* 95 */
+  QPS("x-forwarded-for", "", 0),                                                              /* 96 */
+  QPS("x-frame-options", "deny", 0),                                                          /* 97 */
+  QPS("x-frame-options", "sameorigin", 0),                                                    /* 98 */
 };
 #undef QPS
 
@@ -143,15 +147,15 @@ typedef struct {
 } qp_ent;
 
 typedef struct {
-  uint32_t max_cap;     /* advertised SETTINGS_QPACK_MAX_TABLE_CAPACITY */
-  uint32_t cap;         /* set by the peer's encoder (Set Dynamic Table Capacity) */
+  uint32_t max_cap; /* advertised SETTINGS_QPACK_MAX_TABLE_CAPACITY */
+  uint32_t cap;     /* set by the peer's encoder (Set Dynamic Table Capacity) */
   uint32_t size;
-  uint64_t inserted;    /* Insert Count: absolute index of the next entry */
-  uint64_t known;       /* Insert Count the peer has been told about */
-  uint32_t first, n;    /* ring of the n newest entries; absolute index of ent[first] = inserted - n */
+  uint64_t inserted; /* Insert Count: absolute index of the next entry */
+  uint64_t known;    /* Insert Count the peer has been told about */
+  uint32_t first, n; /* ring of the n newest entries; absolute index of ent[first] = inserted - n */
   uint32_t used;
   uint32_t fb_len;
-  uint8_t fb[256];      /* pending decoder-stream bytes */
+  uint8_t fb[256]; /* pending decoder-stream bytes */
   qp_ent ent[QP_ENT_MAX];
   uint8_t store[2 * QP_TABLE_MAX];
 } qp_dec;
@@ -163,7 +167,9 @@ static inline void qp_dec_init(qp_dec *d, uint32_t max_cap) {
 
 /* QPACK integers are HPACK integers (RFC 9204 §4.1.1), but 62-bit; we cap them at 2^32 */
 #define qp__int hp__int
-static inline uint8_t *qp__put_int(uint8_t *p, uint8_t first, int nbits, uint64_t v) { return hp__put_int(p, first, nbits, (uint32_t)v); }
+static inline uint8_t *qp__put_int(uint8_t *p, uint8_t first, int nbits, uint64_t v) {
+  return hp__put_int(p, first, nbits, (uint32_t)v);
+}
 
 static inline void qp__feedback(qp_dec *d, uint8_t first, int nbits, uint64_t v) {
   if (d->fb_len + 12 > sizeof d->fb) return; /* the caller is not draining; nothing safe to drop... */
@@ -187,7 +193,8 @@ static inline void qp__evict(qp_dec *d, uint32_t want) {
     d->first = (d->first + 1) % QP_ENT_MAX, d->n--;
   }
 }
-static inline int qp__insert(qp_dec *d, const uint8_t *name, uint32_t nl, const uint8_t *val, uint32_t vl, uint8_t sidx, uint8_t nclass, uint8_t vok) {
+static inline int qp__insert(qp_dec *d, const uint8_t *name, uint32_t nl, const uint8_t *val, uint32_t vl, uint8_t sidx,
+                             uint8_t nclass, uint8_t vok) {
   uint32_t sz = nl + vl + 32;
   if (sz > d->cap) return QP_E_ENCODER; /* §3.2.2: an entry larger than the capacity is an error */
   qp__evict(d, sz);
@@ -220,7 +227,8 @@ static inline int qp__int2(const uint8_t **pp, const uint8_t *end, int nbits, ui
   if (!qp__int(pp, end, nbits, v)) return 0;
   return end - *pp >= 6 ? err : QP_E_TRUNC; /* 2^32 fits in 1 + 5 bytes */
 }
-static inline int qp__str(const uint8_t **pp, const uint8_t *end, int nbits, hp__arena *ar, const uint8_t **s, uint32_t *sl) {
+static inline int qp__str(const uint8_t **pp, const uint8_t *end, int nbits, hp__arena *ar, const uint8_t **s,
+                          uint32_t *sl) {
   if (*pp >= end) return QP_E_TRUNC;
   int huff = **pp & (1 << nbits), r;
   uint32_t len;
@@ -228,7 +236,10 @@ static inline int qp__str(const uint8_t **pp, const uint8_t *end, int nbits, hp_
   if ((uint32_t)(end - *pp) < len) return QP_E_TRUNC;
   const uint8_t *src = *pp;
   *pp += len;
-  if (!huff) { *s = src, *sl = len; return 0; }
+  if (!huff) {
+    *s = src, *sl = len;
+    return 0;
+  }
   size_t need = (size_t)len * 8 / 5 + 8;
   if (ar->cap - ar->used < need) return QP_E_CALM;
   ssize_t dl = hh_decode(ar->a + ar->used, src, len);
@@ -255,10 +266,15 @@ static inline int qp__enc_instr(qp_dec *d, const uint8_t *p0, const uint8_t *end
   uint8_t b = *p;
   uint32_t v;
   uint8_t scratch[2 * QP_TABLE_MAX];
-  hp__arena ar = {scratch, 0, sizeof scratch};
-  hp_field f = {0};
+  hp__arena ar = { scratch, 0, sizeof scratch };
+  hp_field f = { 0 };
   int r;
-#define QP_NEED(x) do { int r_ = (x); if (r_ == QP_E_TRUNC) return 0; if (r_) return QP_E_ENCODER; } while (0)
+#define QP_NEED(x)                                                                                                     \
+  do {                                                                                                                 \
+    int r_ = (x);                                                                                                      \
+    if (r_ == QP_E_TRUNC) return 0;                                                                                    \
+    if (r_) return QP_E_ENCODER;                                                                                       \
+  } while (0)
   if (b & 0x80) { /* Insert With Name Reference: 1 T idx(6) value */
     QP_NEED(qp__int2(&p, end, 6, &v, QP_E_ENCODER));
     if (b & 0x40) {
@@ -321,10 +337,10 @@ static inline int qp__pin(qp_dec *d, hp__arena *ar, hp_field *f) {
   return 0;
 }
 
-static inline int qp_decode_section(qp_dec *d, uint64_t stream_id, const uint8_t *in, size_t len, hp_field *out, int maxf,
-                                    uint8_t *arena, size_t arena_cap, uint32_t max_list, int *flags) {
+static inline int qp_decode_section(qp_dec *d, uint64_t stream_id, const uint8_t *in, size_t len, hp_field *out,
+                                    int maxf, uint8_t *arena, size_t arena_cap, uint32_t max_list, int *flags) {
   const uint8_t *p = in, *end = in + len;
-  hp__arena ar = {arena, 0, arena_cap};
+  hp__arena ar = { arena, 0, arena_cap };
   uint32_t enc_ric, delta;
   *flags = 0;
   /* prefix (§4.5.1): Required Insert Count (8-bit prefix), then S + Delta Base (7-bit prefix) */
@@ -353,7 +369,7 @@ static inline int qp_decode_section(qp_dec *d, uint64_t stream_id, const uint8_t
   int n = 0;
   while (p < end) {
     uint8_t b = *p;
-    hp_field f = {0};
+    hp_field f = { 0 };
     uint32_t v;
     int r;
     if (b & 0x80) { /* Indexed Field Line: 1 T idx(6) */
@@ -429,18 +445,25 @@ static inline uint8_t *qp__put_str(uint8_t *p, int nbits, uint8_t first, const u
   memcpy(p, s, n);
   return p + n;
 }
-static inline size_t qp_enc_prefix(uint8_t *dst) { dst[0] = 0, dst[1] = 0; return 2; } /* RIC 0, base 0 */
+static inline size_t qp_enc_prefix(uint8_t *dst) {
+  dst[0] = 0, dst[1] = 0;
+  return 2;
+} /* RIC 0, base 0 */
 static inline int qp__static_find(const uint8_t *n, size_t nl, const uint8_t *v, size_t vl, int *name_only) {
   int name_idx = -1;
   for (int i = 0; i < 99; i++)
     if (qp_static[i].nl == nl && !memcmp(qp_static[i].n, n, nl)) {
-      if (qp_static[i].vl == vl && !memcmp(qp_static[i].v, v, vl)) { *name_only = 0; return i; }
+      if (qp_static[i].vl == vl && !memcmp(qp_static[i].v, v, vl)) {
+        *name_only = 0;
+        return i;
+      }
       if (name_idx < 0) name_idx = i;
     }
   *name_only = 1;
   return name_idx;
 }
-static inline size_t qp_enc_field(uint8_t *dst, const uint8_t *name, size_t nl, const uint8_t *val, size_t vl, int never) {
+static inline size_t qp_enc_field(uint8_t *dst, const uint8_t *name, size_t nl, const uint8_t *val, size_t vl,
+                                  int never) {
   int name_only, i = qp__static_find(name, nl, val, vl, &name_only);
   uint8_t *p = dst;
   if (i >= 0 && !name_only && !never) return (size_t)(qp__put_int(p, 0xc0, 6, (uint32_t)i) - dst);
@@ -449,7 +472,7 @@ static inline size_t qp_enc_field(uint8_t *dst, const uint8_t *name, size_t nl, 
   return (size_t)(qp__put_str(p, 7, 0x00, val, vl) - dst);
 }
 static inline size_t qp_enc_status(uint8_t *dst, int status) {
-  char v[3] = {(char)('0' + status / 100 % 10), (char)('0' + status / 10 % 10), (char)('0' + status % 10)};
+  char v[3] = { (char)('0' + status / 100 % 10), (char)('0' + status / 10 % 10), (char)('0' + status % 10) };
   return qp_enc_field(dst, (const uint8_t *)":status", 7, (const uint8_t *)v, 3, 0);
 }
 static inline size_t qp_enc_bound(size_t nlen, size_t vlen) { return nlen + vlen + 16; }

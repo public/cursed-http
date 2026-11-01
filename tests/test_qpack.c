@@ -14,11 +14,32 @@
 #include <nghttp3/nghttp3.h>
 
 static long fails, checks;
-#define CHECK(c, ...) do { checks++; if (!(c)) { if (fails++ < 20) { printf("FAIL %s:%d: ", __FILE__, __LINE__); printf(__VA_ARGS__); printf("\n"); } } } while (0)
+#define CHECK(c, ...)                                                                                                  \
+  do {                                                                                                                 \
+    checks++;                                                                                                          \
+    if (!(c)) {                                                                                                        \
+      if (fails++ < 20) {                                                                                              \
+        printf("FAIL %s:%d: ", __FILE__, __LINE__);                                                                    \
+        printf(__VA_ARGS__);                                                                                           \
+        printf("\n");                                                                                                  \
+      }                                                                                                                \
+    }                                                                                                                  \
+  } while (0)
 static uint64_t rs = 0x853c49e6748fea9bull;
-static uint64_t rnd(void) { rs ^= rs << 13; rs ^= rs >> 7; rs ^= rs << 17; return rs; }
-static long scale(void) { const char *e = getenv("FUZZ"); return e ? atol(e) : 1; }
-static void hex(uint8_t *o, size_t *n, const char *h) { *n = 0; for (; *h; h += 2) sscanf(h, "%2hhx", &o[(*n)++]); }
+static uint64_t rnd(void) {
+  rs ^= rs << 13;
+  rs ^= rs >> 7;
+  rs ^= rs << 17;
+  return rs;
+}
+static long scale(void) {
+  const char *e = getenv("FUZZ");
+  return e ? atol(e) : 1;
+}
+static void hex(uint8_t *o, size_t *n, const char *h) {
+  *n = 0;
+  for (; *h; h += 2) sscanf(h, "%2hhx", &o[(*n)++]);
+}
 
 static qp_dec D;
 static uint8_t ARENA[1 << 16];
@@ -44,7 +65,8 @@ static void test_rfc(void) {
   CHECK(qp_dec_encoder(&D, b, n) == (int)n && D.size == 106 && D.inserted == 2, "B.2 encoder: size %u", D.size);
   hex(b, &n, "03811011");
   k = qp_decode_section(&D, 4, b, n, F, 256, ARENA, sizeof ARENA, 1 << 20, &fl);
-  CHECK(k == 2 && field_is(&F[0], ":authority", "www.example.com") && field_is(&F[1], ":path", "/sample/path"), "B.2 section");
+  CHECK(k == 2 && field_is(&F[0], ":authority", "www.example.com") && field_is(&F[1], ":path", "/sample/path"),
+        "B.2 section");
   size_t m = qp_dec_feedback(&D, fb, sizeof fb);
   CHECK(m == 1 && fb[0] == 0x84, "B.2 decoder stream: %zu bytes %02x", m, fb[0]);
   /* B.3 */
@@ -57,7 +79,9 @@ static void test_rfc(void) {
   CHECK(qp_dec_encoder(&D, b, n) == 1 && D.size == 217, "B.4 duplicate: size %u", D.size);
   hex(b, &n, "050080c181");
   k = qp_decode_section(&D, 8, b, n, F, 256, ARENA, sizeof ARENA, 1 << 20, &fl);
-  CHECK(k == 3 && field_is(&F[0], ":authority", "www.example.com") && field_is(&F[1], ":path", "/") && field_is(&F[2], "custom-key", "custom-value"), "B.4 section");
+  CHECK(k == 3 && field_is(&F[0], ":authority", "www.example.com") && field_is(&F[1], ":path", "/") &&
+            field_is(&F[2], "custom-key", "custom-value"),
+        "B.4 section");
   m = qp_dec_feedback(&D, fb, sizeof fb); /* the section ack (we decoded it; the RFC's decoder cancelled) */
   CHECK(m == 1 && fb[0] == 0x88, "B.4 section ack");
   qp_dec_cancel(&D, 8);
@@ -65,7 +89,8 @@ static void test_rfc(void) {
   CHECK(m == 1 && fb[0] == 0x48, "B.4 Stream Cancellation(8)");
   /* B.5 */
   hex(b, &n, "810d637573746f6d2d76616c756532");
-  CHECK(qp_dec_encoder(&D, b, n) == (int)n && D.size == 215 && D.inserted == 5 && D.n == 4, "B.5: size %u entries %u", D.size, D.n);
+  CHECK(qp_dec_encoder(&D, b, n) == (int)n && D.size == 215 && D.inserted == 5 && D.n == 4, "B.5: size %u entries %u",
+        D.size, D.n);
   hex(b, &n, "0000"); /* evicted entry 0 must be gone; entry 4 present */
   CHECK(qp__abs(&D, 0) == NULL && qp__abs(&D, 4) && D.store[qp__abs(&D, 4)->off] == 'c', "B.5 eviction");
   /* every cut of B.2's encoder stream: complete instructions only, the rest waits */
@@ -79,16 +104,25 @@ static void test_rfc(void) {
   }
   /* an entry larger than the capacity is an encoder-stream error (§3.2.2) */
   qp_dec_init(&D, 4096);
-  hex(b, &n, "3f21" "4a637573746f6d2d6b6579" "40" "414141414141414141414141414141414141414141414141414141414141414141414141");
+  hex(b, &n,
+      "3f21"
+      "4a637573746f6d2d6b6579"
+      "40"
+      "414141414141414141414141414141414141414141414141414141414141414141414141");
   b[13] = 36; /* value length 36: 10 + 36 + 32 = 78 > 64 */
   CHECK(qp_dec_encoder(&D, b, n) == QP_E_ENCODER, "entry larger than the capacity");
   printf("rfc9204 B.1-B.5: %s\n", fails == before ? "ok" : "FAILED");
 }
 
 /* ---------------------------------------- differential ---------------------------------------- */
-static const char *NAMES[] = {":method", ":path", ":authority", ":scheme", "user-agent", "accept", "cookie", "x-trace",
-                              "content-type", "accept-encoding", "authorization", "x-Upper", "custom-key", "te", "x-long-custom-header-name"};
-typedef struct { char n[48], v[300]; size_t nl, vl; uint8_t flags; } tf;
+static const char *NAMES[] = { ":method",       ":path",   ":authority", ":scheme",      "user-agent",
+                               "accept",        "cookie",  "x-trace",    "content-type", "accept-encoding",
+                               "authorization", "x-Upper", "custom-key", "te",           "x-long-custom-header-name" };
+typedef struct {
+  char n[48], v[300];
+  size_t nl, vl;
+  uint8_t flags;
+} tf;
 static int rand_list(tf *t, int max, int seq) {
   static const char al[] = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./:;=,?&%\" ";
   int k = 1 + (int)(rnd() % (unsigned)max);
@@ -100,7 +134,8 @@ static int rand_list(tf *t, int max, int seq) {
       t[i].vl = (size_t)len;
     } else {
       t[i].vl = rnd() % 4 == 0 ? rnd() % 250 : rnd() % 20;
-      for (size_t j = 0; j < t[i].vl; j++) t[i].v[j] = rnd() % 60 == 0 ? (char)(rnd() & 0xff) : al[rnd() % (sizeof al - 1)];
+      for (size_t j = 0; j < t[i].vl; j++)
+        t[i].v[j] = rnd() % 60 == 0 ? (char)(rnd() & 0xff) : al[rnd() % (sizeof al - 1)];
     }
     t[i].flags = rnd() % 12 == 0 ? NGHTTP3_NV_FLAG_NEVER_INDEX : 0;
     (void)seq;
@@ -108,7 +143,10 @@ static int rand_list(tf *t, int max, int seq) {
   return k;
 }
 
-typedef struct { uint8_t n[512], v[4096]; size_t nl, vl; } rf;
+typedef struct {
+  uint8_t n[512], v[4096];
+  size_t nl, vl;
+} rf;
 static rf RF[256];
 static int n3_section(nghttp3_qpack_decoder *dec, int64_t sid, const uint8_t *in, size_t len) {
   const nghttp3_mem *mem = nghttp3_mem_default();
@@ -128,7 +166,10 @@ static int n3_section(nghttp3_qpack_decoder *dec, int64_t sid, const uint8_t *in
       k++;
       nghttp3_rcbuf_decref(nv.name), nghttp3_rcbuf_decref(nv.value);
     }
-    if (fl & NGHTTP3_QPACK_DECODE_FLAG_FINAL) { ok = k; break; }
+    if (fl & NGHTTP3_QPACK_DECODE_FLAG_FINAL) {
+      ok = k;
+      break;
+    }
     if (fl & NGHTTP3_QPACK_DECODE_FLAG_BLOCKED) break;
     if (!len && !(fl & NGHTTP3_QPACK_DECODE_FLAG_EMIT)) break;
   }
@@ -138,13 +179,16 @@ static int n3_section(nghttp3_qpack_decoder *dec, int64_t sid, const uint8_t *in
 static void cmp(int n, int k, const char *what) {
   int ok = n == k;
   for (int i = 0; ok && i < n; i++)
-    ok = F[i].nlen == RF[i].nl && !memcmp(F[i].name, RF[i].n, RF[i].nl) && F[i].vlen == RF[i].vl && !memcmp(F[i].value, RF[i].v, RF[i].vl);
+    ok = F[i].nlen == RF[i].nl && !memcmp(F[i].name, RF[i].n, RF[i].nl) && F[i].vlen == RF[i].vl &&
+         !memcmp(F[i].value, RF[i].v, RF[i].vl);
   CHECK(ok, "%s: %d vs %d fields", what, n, k);
   for (int i = 0; i < n; i++) { /* cached verdicts == fresh checks */
     uint8_t nc = F[i].nlen && F[i].name[0] == ':' ? (hv_check_name(F[i].name, F[i].nlen) ? HP_N_PSEUDO : HP_N_BAD)
-               : F[i].nlen ? (uint8_t)hv_check_nonempty_name(F[i].name, F[i].nlen) : HP_N_BAD;
+                 : F[i].nlen                      ? (uint8_t)hv_check_nonempty_name(F[i].name, F[i].nlen)
+                                                  : HP_N_BAD;
     CHECK(F[i].nclass == nc && F[i].vok == (uint8_t)hv_check_value_rfc9113(F[i].value, F[i].vlen) &&
-          F[i].sidx == hp_name_index(F[i].name, F[i].nlen), "%s: verdict %d", what, i);
+              F[i].sidx == hp_name_index(F[i].name, F[i].nlen),
+          "%s: verdict %d", what, i);
   }
 }
 
@@ -166,11 +210,15 @@ static void test_live(void) {
       tf t[24];
       nghttp3_nv nv[24];
       int k = rand_list(t, 20, r);
-      for (int i = 0; i < k; i++) nv[i] = (nghttp3_nv){(uint8_t *)t[i].n, (uint8_t *)t[i].v, t[i].nl, t[i].vl, t[i].flags};
+      for (int i = 0; i < k; i++)
+        nv[i] = (nghttp3_nv){ (uint8_t *)t[i].n, (uint8_t *)t[i].v, t[i].nl, t[i].vl, t[i].flags };
       nghttp3_buf pb, rb, eb;
       nghttp3_buf_init(&pb), nghttp3_buf_init(&rb), nghttp3_buf_init(&eb);
       int64_t sid = 4 * (int64_t)(c * 100 + r);
-      if (nghttp3_qpack_encoder_encode(enc, &pb, &rb, &eb, sid, nv, (size_t)k)) { printf("encode failed\n"); exit(1); }
+      if (nghttp3_qpack_encoder_encode(enc, &pb, &rb, &eb, sid, nv, (size_t)k)) {
+        printf("encode failed\n");
+        exit(1);
+      }
       /* encoder stream: both decoders read it; ours in random cuts */
       size_t el = (size_t)(eb.last - eb.pos);
       CHECK(nghttp3_qpack_decoder_read_encoder(ref, eb.pos, el) == (nghttp3_ssize)el, "nghttp3 read_encoder");
@@ -198,8 +246,11 @@ static void test_live(void) {
       size_t fn;
       while ((fn = qp_dec_feedback(&D, fbk, sizeof fbk)) > 0) {
         nghttp3_ssize rr = nghttp3_qpack_encoder_read_decoder(enc, fbk, fn);
-        CHECK(rr == (nghttp3_ssize)fn, "nghttp3 rejected our decoder stream: %d (%s) on %zu bytes %02x %02x, sid %lld r=%d ric-byte %02x inserted %llu",
-              (int)rr, nghttp3_strerror((int)rr), fn, fbk[0], fn > 1 ? fbk[1] : 0, (long long)sid, r, sec[0], (unsigned long long)D.inserted);
+        CHECK(
+            rr == (nghttp3_ssize)fn,
+            "nghttp3 rejected our decoder stream: %d (%s) on %zu bytes %02x %02x, sid %lld r=%d ric-byte %02x inserted %llu",
+            (int)rr, nghttp3_strerror((int)rr), fn, fbk[0], fn > 1 ? fbk[1] : 0, (long long)sid, r, sec[0],
+            (unsigned long long)D.inserted);
         if (rr != (nghttp3_ssize)fn) goto next_conn;
       }
       /* a mutant of the section, decoded against the same table states (sections do not change the
@@ -207,9 +258,9 @@ static void test_live(void) {
       if (rnd() % 16 == 0 && pl + rl) { /* real feedback is already delivered; the mutant's ack is dropped below */
         size_t ml = pl + rl;
         switch (rnd() % 3) {
-        case 0: sec[rnd() % ml] ^= (uint8_t)(1 << (rnd() % 8)); break;
-        case 1: ml = rnd() % ml; break;
-        case 2: sec[rnd() % ml] = (uint8_t)rnd(); break;
+          case 0: sec[rnd() % ml] ^= (uint8_t)(1 << (rnd() % 8)); break;
+          case 1: ml = rnd() % ml; break;
+          case 2: sec[rnd() % ml] = (uint8_t)rnd(); break;
         }
         n = qp_decode_section(&D, (uint64_t)sid + 1, sec, ml, F, 256, ARENA, sizeof ARENA, 1 << 20, &fl);
         kk = n3_section(ref, sid + 1, sec, ml);
@@ -218,8 +269,7 @@ static void test_live(void) {
           rejected++, mutants++;
           nghttp3_buf_free(&pb, mem), nghttp3_buf_free(&rb, mem), nghttp3_buf_free(&eb, mem);
           goto next_conn;
-        } else
-          cmp(n, kk, "mutant");
+        } else cmp(n, kk, "mutant");
         mutants++;
         while (qp_dec_feedback(&D, fbk, sizeof fbk) > 0) {} /* drop the ack for the mutant's stream */
       }
@@ -229,8 +279,8 @@ static void test_live(void) {
     nghttp3_qpack_encoder_del(enc);
     nghttp3_qpack_decoder_del(ref);
   }
-  printf("live vs nghttp3: %ld sections (%ld using the dynamic table), %ld mutants (%ld rejected by both): %s\n", sections,
-         dyn_sections, mutants, rejected, fails == before ? "ok" : "FAILED");
+  printf("live vs nghttp3: %ld sections (%ld using the dynamic table), %ld mutants (%ld rejected by both): %s\n",
+         sections, dyn_sections, mutants, rejected, fails == before ? "ok" : "FAILED");
 }
 
 static void test_encoder(void) {
@@ -243,7 +293,7 @@ static void test_encoder(void) {
     tf t[24];
     int k = rand_list(t, 12, 0);
     uint8_t *p = blk + qp_enc_prefix(blk);
-    int st = (int)(rnd() % 2 ? (unsigned[]){200, 204, 304, 404, 500, 503, 103}[rnd() % 7] : 100 + rnd() % 500);
+    int st = (int)(rnd() % 2 ? (unsigned[]){ 200, 204, 304, 404, 500, 503, 103 }[rnd() % 7] : 100 + rnd() % 500);
     p += qp_enc_status(p, st);
     for (int i = 0; i < k; i++) {
       if (t[i].n[0] == ':') t[i].n[0] = 'x';
@@ -254,7 +304,8 @@ static void test_encoder(void) {
     snprintf(sv, sizeof sv, "%d", st);
     int ok = n == k + 1 && RF[0].nl == 7 && !memcmp(RF[0].n, ":status", 7) && RF[0].vl == 3 && !memcmp(RF[0].v, sv, 3);
     for (int i = 0; ok && i < k; i++)
-      ok = RF[i + 1].nl == t[i].nl && !memcmp(RF[i + 1].n, t[i].n, t[i].nl) && RF[i + 1].vl == t[i].vl && !memcmp(RF[i + 1].v, t[i].v, t[i].vl);
+      ok = RF[i + 1].nl == t[i].nl && !memcmp(RF[i + 1].n, t[i].n, t[i].nl) && RF[i + 1].vl == t[i].vl &&
+           !memcmp(RF[i + 1].v, t[i].v, t[i].vl);
     CHECK(ok, "encode %ld: %d fields", it, n);
   }
   nghttp3_qpack_decoder_del(ref);

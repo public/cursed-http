@@ -29,7 +29,7 @@ static h2_scratch SC;
 
 static int on_request(h2_conn *h, uint32_t sid, const h2_request *rq, int end, void *u) {
   conn *c = u;
-  static const hp_field ct = {(const uint8_t *)"content-type", (const uint8_t *)"text/plain", 12, 10, 0, 0, 0, 0};
+  static const hp_field ct = { (const uint8_t *)"content-type", (const uint8_t *)"text/plain", 12, 10, 0, 0, 0, 0 };
   c->body[(sid / 2) % 2048] = 0;
   if (end) return h2_respond(h, sid, 200, &ct, 1, (const uint8_t *)"hello, world\n", 13, 1) < 0;
   (void)rq;
@@ -40,7 +40,7 @@ static int on_data(h2_conn *h, uint32_t sid, const uint8_t *d, size_t n, int end
   (void)d;
   c->body[(sid / 2) % 2048] += (long)n;
   if (!end) return 0;
-  static const hp_field ct = {(const uint8_t *)"content-type", (const uint8_t *)"text/plain", 12, 10, 0, 0, 0, 0};
+  static const hp_field ct = { (const uint8_t *)"content-type", (const uint8_t *)"text/plain", 12, 10, 0, 0, 0, 0 };
   char *r = c->reply[(sid / 2) % 2048];
   int len = snprintf(r, 24, "%ld\n", c->body[(sid / 2) % 2048]);
   return h2_respond(h, sid, 200, &ct, 1, (const uint8_t *)r, (size_t)len, 1) < 0;
@@ -49,7 +49,7 @@ static int on_trailers(h2_conn *h, uint32_t sid, const hp_field *f, int n, void 
   (void)f, (void)n;
   return on_data(h, sid, NULL, 0, 1, u);
 }
-static const h2_callbacks CB = {on_request, on_data, on_trailers, NULL, NULL};
+static const h2_callbacks CB = { on_request, on_data, on_trailers, NULL, NULL };
 
 static void drop(int i) {
   close(C[i]->fd);
@@ -65,7 +65,11 @@ static int flush(conn *c) {
     for (size_t o = 0; o < n;) {
       ssize_t w = write(c->fd, out + o, n - o);
       if (w < 0 && errno == EINTR) continue;
-      if (w < 0 && errno == EAGAIN) { struct pollfd p = {c->fd, POLLOUT, 0}; poll(&p, 1, 1000); continue; }
+      if (w < 0 && errno == EAGAIN) {
+        struct pollfd p = { c->fd, POLLOUT, 0 };
+        poll(&p, 1, 1000);
+        continue;
+      }
       if (w <= 0) return -1;
       o += (size_t)w;
     }
@@ -77,8 +81,13 @@ int main(int argc, char **argv) {
   signal(SIGPIPE, SIG_IGN);
   int ls = socket(AF_INET, SOCK_STREAM, 0);
   setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
-  struct sockaddr_in a = {.sin_family = AF_INET, .sin_port = htons((uint16_t)port), .sin_addr.s_addr = htonl(INADDR_ANY)};
-  if (bind(ls, (struct sockaddr *)&a, sizeof a) || listen(ls, 128)) { perror("listen"); return 1; }
+  struct sockaddr_in a = { .sin_family = AF_INET,
+                           .sin_port = htons((uint16_t)port),
+                           .sin_addr.s_addr = htonl(INADDR_ANY) };
+  if (bind(ls, (struct sockaddr *)&a, sizeof a) || listen(ls, 128)) {
+    perror("listen");
+    return 1;
+  }
   fprintf(stderr, "h2_server: h2c on port %d\n", port);
   for (;;) {
     struct pollfd p[MAXC + 1];
@@ -107,13 +116,22 @@ int main(int argc, char **argv) {
       if (!C[i] || !(p[k].revents & (POLLIN | POLLHUP | POLLERR))) continue;
       conn *c = C[i];
       ssize_t r = read(c->fd, c->in + c->inlen, sizeof c->in - c->inlen);
-      if (r <= 0) { drop(i); continue; }
+      if (r <= 0) {
+        drop(i);
+        continue;
+      }
       c->inlen += (size_t)r;
       int dead = 0;
       for (;;) { /* h2_recv stops early under output backpressure: drain and go again */
         int u = h2_recv(&c->h2, &SC, c->in, c->inlen);
-        if (flush(c)) { dead = 1; break; }
-        if (u < 0) { dead = 1; break; }
+        if (flush(c)) {
+          dead = 1;
+          break;
+        }
+        if (u < 0) {
+          dead = 1;
+          break;
+        }
         memmove(c->in, c->in + u, c->inlen - (size_t)u), c->inlen -= (size_t)u;
         if (!u || !c->inlen) break;
       }

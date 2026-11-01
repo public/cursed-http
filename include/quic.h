@@ -36,31 +36,44 @@
 #include "qhp.h"
 
 #ifndef QUIC_MAX_STREAMS
-#define QUIC_MAX_STREAMS 128            /* stream slots: client bidi + uni + our uni */
+#define QUIC_MAX_STREAMS 128 /* stream slots: client bidi + uni + our uni */
 #endif
-#define QUIC_MAX_BIDI 100               /* initial_max_streams_bidi we advertise */
-#define QUIC_MAX_UNI 8                  /* initial_max_streams_uni */
-#define QUIC_STREAM_WIN (256u << 10)    /* initial_max_stream_data_bidi_remote / _uni */
-#define QUIC_CONN_WIN (4u << 20)        /* initial_max_data */
-#define QUIC_MAX_UDP 1472               /* max_udp_payload_size we accept; we send <= QUIC_SEND_MAX */
-#define QUIC_SEND_MAX 1252
-#define QUIC_MIN_INITIAL 1200
-#define QUIC_SCID_LEN 8
-#define QUIC_IDLE_MS 30000
+#define QUIC_MAX_BIDI      100          /* initial_max_streams_bidi we advertise */
+#define QUIC_MAX_UNI       8            /* initial_max_streams_uni */
+#define QUIC_STREAM_WIN    (256u << 10) /* initial_max_stream_data_bidi_remote / _uni */
+#define QUIC_CONN_WIN      (4u << 20)   /* initial_max_data */
+#define QUIC_MAX_UDP       1472         /* max_udp_payload_size we accept; we send <= QUIC_SEND_MAX */
+#define QUIC_SEND_MAX      1252
+#define QUIC_MIN_INITIAL   1200
+#define QUIC_SCID_LEN      8
+#define QUIC_IDLE_MS       30000
 #define QUIC_MAX_ACK_DELAY 25
-#define QUIC_ACK_RANGES 32
-#define QUIC_SENT_MAX 1024              /* packets in flight per space */
-#define QUIC_FREC_MAX 10                /* frames remembered per sent packet */
-#define QUIC_V1 0x00000001u
+#define QUIC_ACK_RANGES    32
+#define QUIC_SENT_MAX      1024 /* packets in flight per space */
+#define QUIC_FREC_MAX      10   /* frames remembered per sent packet */
+#define QUIC_V1            0x00000001u
 
 enum { QUIC_E_DROP = -1, QUIC_E_CLOSED = -2, QUIC_E_NOMEM = -3, QUIC_E_VN = -4 /* send Version Negotiation */ };
 enum { QUIC_SP_INITIAL, QUIC_SP_HANDSHAKE, QUIC_SP_APP, QUIC_NSP };
 /* transport error codes (RFC 9000 §20.1) */
 enum {
-  QUIC_NO_ERROR, QUIC_INTERNAL_ERROR, QUIC_CONNECTION_REFUSED, QUIC_FLOW_CONTROL_ERROR, QUIC_STREAM_LIMIT_ERROR,
-  QUIC_STREAM_STATE_ERROR, QUIC_FINAL_SIZE_ERROR, QUIC_FRAME_ENCODING_ERROR, QUIC_TRANSPORT_PARAMETER_ERROR,
-  QUIC_CONNECTION_ID_LIMIT_ERROR, QUIC_PROTOCOL_VIOLATION, QUIC_INVALID_TOKEN, QUIC_APPLICATION_ERROR,
-  QUIC_CRYPTO_BUFFER_EXCEEDED, QUIC_KEY_UPDATE_ERROR, QUIC_AEAD_LIMIT_REACHED, QUIC_NO_VIABLE_PATH
+  QUIC_NO_ERROR,
+  QUIC_INTERNAL_ERROR,
+  QUIC_CONNECTION_REFUSED,
+  QUIC_FLOW_CONTROL_ERROR,
+  QUIC_STREAM_LIMIT_ERROR,
+  QUIC_STREAM_STATE_ERROR,
+  QUIC_FINAL_SIZE_ERROR,
+  QUIC_FRAME_ENCODING_ERROR,
+  QUIC_TRANSPORT_PARAMETER_ERROR,
+  QUIC_CONNECTION_ID_LIMIT_ERROR,
+  QUIC_PROTOCOL_VIOLATION,
+  QUIC_INVALID_TOKEN,
+  QUIC_APPLICATION_ERROR,
+  QUIC_CRYPTO_BUFFER_EXCEEDED,
+  QUIC_KEY_UPDATE_ERROR,
+  QUIC_AEAD_LIMIT_REACHED,
+  QUIC_NO_VIABLE_PATH
 };
 
 typedef struct quic_conn quic_conn;
@@ -74,7 +87,7 @@ typedef struct {
   /* nonzero if sid has data to give stream_send */
   int (*stream_wants)(quic_conn *c, uint64_t sid, void *user);
   void (*on_stream_reset)(quic_conn *c, uint64_t sid, uint64_t code, void *user); /* RESET_STREAM or STOP_SENDING */
-  void (*on_established)(quic_conn *c, void *user);                             /* handshake complete */
+  void (*on_established)(quic_conn *c, void *user);                               /* handshake complete */
 } quic_callbacks;
 
 typedef struct {
@@ -90,7 +103,10 @@ static inline uint8_t *quic__put_vi(uint8_t *p, uint64_t v) {
   p[0] |= (uint8_t)((n == 1 ? 0 : n == 2 ? 1 : n == 4 ? 2 : 3) << 6);
   return p + n;
 }
-static inline uint8_t *quic__put_vi2(uint8_t *p, uint64_t v) { p[0] = (uint8_t)(0x40 | v >> 8), p[1] = (uint8_t)v; return p + 2; } /* < 16384 */
+static inline uint8_t *quic__put_vi2(uint8_t *p, uint64_t v) {
+  p[0] = (uint8_t)(0x40 | v >> 8), p[1] = (uint8_t)v;
+  return p + 2;
+} /* < 16384 */
 /* decode at *pp; -1 if truncated */
 static inline int quic__vi(const uint8_t **pp, const uint8_t *end, uint64_t *v) {
   const uint8_t *q = qv_get_safe(v, *pp, end);
@@ -102,13 +118,13 @@ static inline int quic__vi(const uint8_t **pp, const uint8_t *end, uint64_t *v) 
 /* ---------------------------------------------- keys ---------------------------------------------- */
 typedef struct {
   ptls_aead_context_t *aead;
-  int chacha;            /* header protection: 0 AES (qhp_aes_key), 1 ChaCha20 */
+  int chacha; /* header protection: 0 AES (qhp_aes_key), 1 ChaCha20 */
   qhp_aes_key hp;
   uint8_t hp_cc[32];
 } quic_key;
 
-static const uint8_t quic_initial_salt[20] = {0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17,
-                                              0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad, 0xcc, 0xbb, 0x7f, 0x0a};
+static const uint8_t quic_initial_salt[20] = { 0x38, 0x76, 0x2c, 0xf7, 0xf5, 0x59, 0x34, 0xb3, 0x4d, 0x17,
+                                               0x9a, 0xe6, 0xa4, 0xc8, 0x0c, 0xad, 0xcc, 0xbb, 0x7f, 0x0a };
 
 static inline void quic__key_free(quic_key *k) {
   if (k->aead) ptls_aead_free(k->aead);
@@ -132,7 +148,8 @@ static inline int quic__key_setup(quic_key *k, ptls_cipher_suite_t *cs, int is_e
   return 0;
 }
 /* a key update replaces the AEAD key and IV only: the header protection key stays (RFC 9001 §6) */
-static inline int quic__key_update(quic_key *k, const quic_key *hp_from, ptls_cipher_suite_t *cs, int is_enc, const uint8_t *secret) {
+static inline int quic__key_update(quic_key *k, const quic_key *hp_from, ptls_cipher_suite_t *cs, int is_enc,
+                                   const uint8_t *secret) {
   uint8_t key[PTLS_MAX_SECRET_SIZE], iv[PTLS_MAX_IV_SIZE];
   ptls_iovec_t sec = ptls_iovec_init(secret, cs->hash->digest_size), none = ptls_iovec_init(NULL, 0);
   if (ptls_hkdf_expand_label(cs->hash, key, cs->aead->key_size, sec, "quic key", none, NULL) ||
@@ -148,12 +165,13 @@ static inline int quic__key_update(quic_key *k, const quic_key *hp_from, ptls_ci
   return 0;
 }
 static inline void quic__mask(const quic_key *k, const uint8_t *sample, uint8_t mask[16]) {
-  const uint8_t *s[1] = {sample};
+  const uint8_t *s[1] = { sample };
   if (k->chacha) qhp_chacha_masks(k->hp_cc, s, mask, 1);
   else qhp_aes_masks(&k->hp, s, mask, 1);
 }
 /* Initial keys from the client's Destination Connection ID (RFC 9001 §5.2) */
-static inline int quic__initial_keys(quic_key *rx, quic_key *tx, const uint8_t *dcid, size_t len, ptls_cipher_suite_t *aes128) {
+static inline int quic__initial_keys(quic_key *rx, quic_key *tx, const uint8_t *dcid, size_t len,
+                                     ptls_cipher_suite_t *aes128) {
   uint8_t isec[32], csec[32], ssec[32];
   ptls_hash_algorithm_t *h = aes128->hash;
   ptls_iovec_t none = ptls_iovec_init(NULL, 0);
@@ -166,8 +184,13 @@ static inline int quic__initial_keys(quic_key *rx, quic_key *tx, const uint8_t *
 
 /* ------------------------------------------ range sets ------------------------------------------ */
 /* sorted, disjoint, non-adjacent [lo, hi) ranges in memory from the context's allocator */
-typedef struct { uint64_t lo, hi; } quic_range;
-typedef struct { quic_range *r; int n, cap; } quic_rset;
+typedef struct {
+  uint64_t lo, hi;
+} quic_range;
+typedef struct {
+  quic_range *r;
+  int n, cap;
+} quic_rset;
 static inline int quic__rs_add(quic_ctx *x, quic_rset *s, uint64_t lo, uint64_t hi) {
   if (lo >= hi) return 0;
   int i = 0;
@@ -222,7 +245,8 @@ typedef struct {
 } quic_rbuf;
 static inline void quic__rb_init(quic_rbuf *b) { memset(b, 0, sizeof *b), b->fin = UINT64_MAX; }
 static inline uint64_t quic__rb_top(const quic_rbuf *b) { return b->have.n ? b->have.r[b->have.n - 1].hi : b->contig; }
-static inline int quic__rb_insert(quic_ctx *x, quic_rbuf *b, uint64_t off, const uint8_t *d, size_t len, uint64_t limit) {
+static inline int quic__rb_insert(quic_ctx *x, quic_rbuf *b, uint64_t off, const uint8_t *d, size_t len,
+                                  uint64_t limit) {
   uint64_t end = off + len;
   if (end > limit) return -QUIC_FLOW_CONTROL_ERROR;
   if (b->fin != UINT64_MAX && end > b->fin) return -QUIC_FINAL_SIZE_ERROR;
@@ -308,15 +332,29 @@ typedef struct {
   uint64_t reset_code, stop_code;
   quic_rbuf in;
   quic_sbuf out;
-  uint64_t max_recv;   /* MAX_STREAM_DATA we granted */
-  uint64_t max_send;   /* MAX_STREAM_DATA the peer granted */
+  uint64_t max_recv; /* MAX_STREAM_DATA we granted */
+  uint64_t max_send; /* MAX_STREAM_DATA the peer granted */
   uint8_t send_max_stream_data, send_reset, send_stop;
 } quic_stream;
 
 /* ------------------------------------------ packet spaces ------------------------------------------ */
-enum { QF_STREAM = 1, QF_CRYPTO, QF_MAX_DATA, QF_MAX_STREAM_DATA, QF_MAX_STREAMS_BIDI, QF_MAX_STREAMS_UNI, QF_HANDSHAKE_DONE,
-       QF_RESET, QF_STOP, QF_PING, QF_ACK };
-typedef struct { uint8_t type, fin; uint64_t a, b, c; } quic_frec; /* STREAM: a sid, b offset, c length */
+enum {
+  QF_STREAM = 1,
+  QF_CRYPTO,
+  QF_MAX_DATA,
+  QF_MAX_STREAM_DATA,
+  QF_MAX_STREAMS_BIDI,
+  QF_MAX_STREAMS_UNI,
+  QF_HANDSHAKE_DONE,
+  QF_RESET,
+  QF_STOP,
+  QF_PING,
+  QF_ACK
+};
+typedef struct {
+  uint8_t type, fin;
+  uint64_t a, b, c;
+} quic_frec; /* STREAM: a sid, b offset, c length */
 typedef struct {
   uint64_t pn;
   int64_t sent_at;
@@ -330,7 +368,9 @@ typedef struct {
   quic_key rx, tx;
   uint8_t have_rx, have_tx, discarded;
   uint64_t next_pn;
-  struct { uint64_t lo, hi; } rcv[QUIC_ACK_RANGES]; /* received pns, descending, for ACK frames */
+  struct {
+    uint64_t lo, hi;
+  } rcv[QUIC_ACK_RANGES]; /* received pns, descending, for ACK frames */
   int nrcv;
   int64_t largest_rcv_at;
   int ack_eliciting_unacked; /* ack-eliciting packets received since our last ACK */
@@ -340,7 +380,7 @@ typedef struct {
   int64_t loss_time, last_ack_eliciting_at;
   quic_rbuf crypto_in;
   quic_sbuf crypto_out;
-  quic_sent *sent;  /* ring, oldest at head */
+  quic_sent *sent; /* ring, oldest at head */
   uint32_t shead, nsent;
 } quic_space;
 
@@ -354,12 +394,12 @@ struct quic_conn {
   ptls_raw_extension_t tpext[2];
   uint8_t dcid[20], scid[QUIC_SCID_LEN], odcid[20], dcid_len, odcid_len;
   quic_space sp[QUIC_NSP];
-  ptls_cipher_suite_t *cs;     /* negotiated suite (for key updates) */
+  ptls_cipher_suite_t *cs; /* negotiated suite (for key updates) */
   uint8_t app_secret_rx[PTLS_MAX_DIGEST_SIZE], app_secret_tx[PTLS_MAX_DIGEST_SIZE];
-  quic_key next_rx;            /* the next key phase's read key, ready for a peer key update */
-  quic_key prev_rx;            /* the previous phase's read key, for late packets (RFC 9001 §6.5) */
+  quic_key next_rx; /* the next key phase's read key, ready for a peer key update */
+  quic_key prev_rx; /* the previous phase's read key, for late packets (RFC 9001 §6.5) */
   uint8_t key_phase, have_next_rx, have_prev_rx;
-  uint64_t phase_first_pn;     /* first packet number seen in the current key phase */
+  uint64_t phase_first_pn; /* first packet number seen in the current key phase */
   int64_t prev_rx_until;
   /* state */
   uint8_t established, confirmed, handshake_done_pending, addr_validated, peer_tp_ok;
@@ -370,7 +410,7 @@ struct quic_conn {
   uint64_t max_data_local, data_recv, data_consumed, max_data_peer, data_sent;
   uint8_t send_max_data, send_max_streams_bidi, send_max_streams_uni;
   uint64_t max_streams_bidi_local, max_streams_uni_local, opened_bidi, opened_uni;
-  quic_rset closed[2];          /* indices of finished client streams (bidi, uni): opening stream N
+  quic_rset closed[2]; /* indices of finished client streams (bidi, uni): opening stream N
                                  * implicitly opens all lower ones, which may still arrive later */
   uint64_t peer_max_streams_uni, peer_init_stream_data_uni, peer_bidi_local, peer_max_ack_delay, peer_ack_delay_exp;
   uint64_t next_uni_id;
@@ -389,11 +429,15 @@ struct quic_conn {
 };
 
 static inline void *quic__default_alloc(void *p, size_t n) {
-  if (!n) { free(p); return NULL; }
+  if (!n) {
+    free(p);
+    return NULL;
+  }
   return realloc(p, n);
 }
-static inline int quic__update_traffic_key(ptls_update_traffic_key_t *self, ptls_t *tls, int is_enc, size_t epoch, const void *secret);
-static ptls_update_traffic_key_t quic__utk = {quic__update_traffic_key};
+static inline int quic__update_traffic_key(ptls_update_traffic_key_t *self, ptls_t *tls, int is_enc, size_t epoch,
+                                           const void *secret);
+static ptls_update_traffic_key_t quic__utk = { quic__update_traffic_key };
 
 static inline void quic_ctx_init(quic_ctx *x, ptls_context_t *tls) {
   x->tls = tls, x->alloc = quic__default_alloc;
@@ -466,41 +510,52 @@ static inline void quic__rtt_sample(quic_conn *c, int64_t latest, int64_t ack_de
 }
 
 /* ----------------------------------------- sent packet records ----------------------------------------- */
-static inline quic_sent *quic__sent_at(quic_space *sp, uint32_t i) { return &sp->sent[(sp->shead + i) % QUIC_SENT_MAX]; }
+static inline quic_sent *quic__sent_at(quic_space *sp, uint32_t i) {
+  return &sp->sent[(sp->shead + i) % QUIC_SENT_MAX];
+}
 static inline void quic__sent_pop_acked(quic_space *sp) {
-  while (sp->nsent && (quic__sent_at(sp, 0)->acked || quic__sent_at(sp, 0)->lost)) sp->shead = (sp->shead + 1) % QUIC_SENT_MAX, sp->nsent--;
+  while (sp->nsent && (quic__sent_at(sp, 0)->acked || quic__sent_at(sp, 0)->lost))
+    sp->shead = (sp->shead + 1) % QUIC_SENT_MAX, sp->nsent--;
 }
 
 static inline void quic__frame_acked(quic_conn *c, quic_space *sp, const quic_frec *f) {
   quic_stream *s;
   switch (f->type) {
-  case QF_STREAM:
-    if ((s = quic__stream(c, f->a))) quic__sb_ack(c->ctx, &s->out, f->b, f->c, f->fin);
-    break;
-  case QF_CRYPTO: quic__sb_ack(c->ctx, &sp->crypto_out, f->b, f->c, 0); break;
-  case QF_ACK: { /* the peer has our ACK up to f->a: stop repeating ranges below it */
-    int w = 0;
-    for (int i = 0; i < sp->nrcv; i++)
-      if (sp->rcv[i].hi > f->a) sp->rcv[w++] = sp->rcv[i];
-    if (w) sp->nrcv = w;
-    break;
-  }
-  default: break;
+    case QF_STREAM:
+      if ((s = quic__stream(c, f->a))) quic__sb_ack(c->ctx, &s->out, f->b, f->c, f->fin);
+      break;
+    case QF_CRYPTO: quic__sb_ack(c->ctx, &sp->crypto_out, f->b, f->c, 0); break;
+    case QF_ACK: { /* the peer has our ACK up to f->a: stop repeating ranges below it */
+      int w = 0;
+      for (int i = 0; i < sp->nrcv; i++)
+        if (sp->rcv[i].hi > f->a) sp->rcv[w++] = sp->rcv[i];
+      if (w) sp->nrcv = w;
+      break;
+    }
+    default: break;
   }
 }
 static inline void quic__frame_lost(quic_conn *c, quic_space *sp, const quic_frec *f) {
   quic_stream *s;
   switch (f->type) {
-  case QF_STREAM: if ((s = quic__stream(c, f->a))) quic__sb_lost(c->ctx, &s->out, f->b, f->c, f->fin); break;
-  case QF_CRYPTO: quic__sb_lost(c->ctx, &sp->crypto_out, f->b, f->c, 0); break;
-  case QF_MAX_DATA: c->send_max_data = 1; break;
-  case QF_MAX_STREAM_DATA: if ((s = quic__stream(c, f->a))) s->send_max_stream_data = 1; break;
-  case QF_MAX_STREAMS_BIDI: c->send_max_streams_bidi = 1; break;
-  case QF_MAX_STREAMS_UNI: c->send_max_streams_uni = 1; break;
-  case QF_HANDSHAKE_DONE: c->handshake_done_pending = 1; break;
-  case QF_RESET: if ((s = quic__stream(c, f->a))) s->send_reset = 1; break;
-  case QF_STOP: if ((s = quic__stream(c, f->a))) s->send_stop = 1; break;
-  default: break;
+    case QF_STREAM:
+      if ((s = quic__stream(c, f->a))) quic__sb_lost(c->ctx, &s->out, f->b, f->c, f->fin);
+      break;
+    case QF_CRYPTO: quic__sb_lost(c->ctx, &sp->crypto_out, f->b, f->c, 0); break;
+    case QF_MAX_DATA: c->send_max_data = 1; break;
+    case QF_MAX_STREAM_DATA:
+      if ((s = quic__stream(c, f->a))) s->send_max_stream_data = 1;
+      break;
+    case QF_MAX_STREAMS_BIDI: c->send_max_streams_bidi = 1; break;
+    case QF_MAX_STREAMS_UNI: c->send_max_streams_uni = 1; break;
+    case QF_HANDSHAKE_DONE: c->handshake_done_pending = 1; break;
+    case QF_RESET:
+      if ((s = quic__stream(c, f->a))) s->send_reset = 1;
+      break;
+    case QF_STOP:
+      if ((s = quic__stream(c, f->a))) s->send_stop = 1;
+      break;
+    default: break;
   }
 }
 
@@ -557,7 +612,8 @@ static inline void quic__discard_space(quic_conn *c, int space) {
 }
 
 /* -------------------------------------------- TLS glue -------------------------------------------- */
-static inline int quic__update_traffic_key(ptls_update_traffic_key_t *self, ptls_t *tls, int is_enc, size_t epoch, const void *secret) {
+static inline int quic__update_traffic_key(ptls_update_traffic_key_t *self, ptls_t *tls, int is_enc, size_t epoch,
+                                           const void *secret) {
   (void)self;
   quic_conn *c = *ptls_get_data_ptr(tls);
   ptls_cipher_suite_t *cs = ptls_get_cipher(tls);
@@ -576,8 +632,8 @@ static inline int quic__update_traffic_key(ptls_update_traffic_key_t *self, ptls
 /* the next key phase's secret (RFC 9001 §6.1) */
 static inline int quic__next_secret(ptls_cipher_suite_t *cs, uint8_t *secret) {
   uint8_t n[PTLS_MAX_DIGEST_SIZE];
-  if (ptls_hkdf_expand_label(cs->hash, n, cs->hash->digest_size, ptls_iovec_init(secret, cs->hash->digest_size), "quic ku",
-                             ptls_iovec_init(NULL, 0), NULL))
+  if (ptls_hkdf_expand_label(cs->hash, n, cs->hash->digest_size, ptls_iovec_init(secret, cs->hash->digest_size),
+                             "quic ku", ptls_iovec_init(NULL, 0), NULL))
     return -1;
   memcpy(secret, n, cs->hash->digest_size);
   return 0;
@@ -604,21 +660,38 @@ static inline int quic__decode_tp(quic_conn *c, const uint8_t *p, const uint8_t 
     int is_int = id == 0x01 || id == 0x03 || (id >= 0x04 && id <= 0x0b) || id == 0x0e;
     if (is_int && (quic__vi(&q, qe, &v) || q != qe)) return -1;
     switch (id) {
-    case 0x00: case 0x02: case 0x10: return -1; /* server-only parameters from a client */
-    case 0x03: if (v < 1200) return -1; break;
-    case 0x04: c->max_data_peer = v; break;
-    case 0x05: bidi_local = v; break;
-    case 0x07: c->peer_init_stream_data_uni = v; break;
-    case 0x09: if (v > (1ull << 60)) return -1; c->peer_max_streams_uni = v; break;
-    case 0x08: if (v > (1ull << 60)) return -1; break;
-    case 0x0a: if (v > 20) return -1; c->peer_ack_delay_exp = v; break;
-    case 0x0b: if (v >= (1u << 14)) return -1; c->peer_max_ack_delay = v; break;
-    case 0x0e: if (v < 2) return -1; break;
-    case 0x0f: /* initial_source_connection_id must equal the client's SCID */
-      if (len != c->dcid_len || memcmp(p, c->dcid, len)) return -1;
-      have_iscid = 1;
-      break;
-    default: break;
+      case 0x00:
+      case 0x02:
+      case 0x10: return -1; /* server-only parameters from a client */
+      case 0x03:
+        if (v < 1200) return -1;
+        break;
+      case 0x04: c->max_data_peer = v; break;
+      case 0x05: bidi_local = v; break;
+      case 0x07: c->peer_init_stream_data_uni = v; break;
+      case 0x09:
+        if (v > (1ull << 60)) return -1;
+        c->peer_max_streams_uni = v;
+        break;
+      case 0x08:
+        if (v > (1ull << 60)) return -1;
+        break;
+      case 0x0a:
+        if (v > 20) return -1;
+        c->peer_ack_delay_exp = v;
+        break;
+      case 0x0b:
+        if (v >= (1u << 14)) return -1;
+        c->peer_max_ack_delay = v;
+        break;
+      case 0x0e:
+        if (v < 2) return -1;
+        break;
+      case 0x0f: /* initial_source_connection_id must equal the client's SCID */
+        if (len != c->dcid_len || memcmp(p, c->dcid, len)) return -1;
+        have_iscid = 1;
+        break;
+      default: break;
     }
     p += len;
   }
@@ -631,7 +704,8 @@ static inline int quic__decode_tp(quic_conn *c, const uint8_t *p, const uint8_t 
 }
 
 
-static inline int quic__on_client_hello(ptls_on_client_hello_t *self, ptls_t *tls, ptls_on_client_hello_parameters_t *params) {
+static inline int quic__on_client_hello(ptls_on_client_hello_t *self, ptls_t *tls,
+                                        ptls_on_client_hello_parameters_t *params) {
   (void)self;
   for (size_t i = 0; i < params->negotiated_protocols.count; i++) {
     ptls_iovec_t p = params->negotiated_protocols.list[i];
@@ -639,7 +713,7 @@ static inline int quic__on_client_hello(ptls_on_client_hello_t *self, ptls_t *tl
   }
   return PTLS_ALERT_NO_APPLICATION_PROTOCOL;
 }
-static ptls_on_client_hello_t quic__och = {quic__on_client_hello};
+static ptls_on_client_hello_t quic__och = { quic__on_client_hello };
 
 static inline int quic__collect_ext(ptls_t *tls, ptls_handshake_properties_t *p, uint16_t type) {
   (void)tls, (void)p;
@@ -668,13 +742,15 @@ static inline int quic__collected_ext(ptls_t *tls, ptls_handshake_properties_t *
   ptls_buffer_init(&c->tpbuf, "", 0);
   if (ptls_buffer_reserve(&c->tpbuf, (size_t)(p - tp))) return PTLS_ERROR_NO_MEMORY;
   memcpy(c->tpbuf.base, tp, (size_t)(p - tp)), c->tpbuf.off = (size_t)(p - tp);
-  c->tpext[0] = (ptls_raw_extension_t){0x39, {c->tpbuf.base, c->tpbuf.off}};
-  c->tpext[1] = (ptls_raw_extension_t){UINT16_MAX, {NULL, 0}};
+  c->tpext[0] = (ptls_raw_extension_t){ 0x39, { c->tpbuf.base, c->tpbuf.off } };
+  c->tpext[1] = (ptls_raw_extension_t){ UINT16_MAX, { NULL, 0 } };
   c->props.additional_extensions = c->tpext;
   return 0;
 }
 
-static inline int quic__space_of_epoch(size_t e) { return e == 0 ? QUIC_SP_INITIAL : e == 2 ? QUIC_SP_HANDSHAKE : QUIC_SP_APP; }
+static inline int quic__space_of_epoch(size_t e) {
+  return e == 0 ? QUIC_SP_INITIAL : e == 2 ? QUIC_SP_HANDSHAKE : QUIC_SP_APP;
+}
 
 /* contiguous CRYPTO bytes of a space go to TLS; its output goes to the spaces' crypto_out */
 static inline void quic__crypto_feed(quic_conn *c, int space) {
@@ -682,7 +758,7 @@ static inline void quic__crypto_feed(quic_conn *c, int space) {
   size_t n = (size_t)(sp->crypto_in.contig - sp->crypto_in.base);
   if (!n || c->closing) return;
   ptls_buffer_t out;
-  size_t eo[5] = {0};
+  size_t eo[5] = { 0 };
   ptls_buffer_init(&out, "", 0);
   size_t epoch = space == QUIC_SP_INITIAL ? 0 : space == QUIC_SP_HANDSHAKE ? 2 : 3;
   int r = ptls_handle_message(c->tls, &out, eo, epoch, sp->crypto_in.buf, n, &c->props);
@@ -692,7 +768,10 @@ static inline void quic__crypto_feed(quic_conn *c, int space) {
     if (!len) continue;
     quic_space *dst = &c->sp[quic__space_of_epoch(e)];
     uint8_t *w = quic__sb_reserve(c->ctx, &dst->crypto_out, len);
-    if (!w) { quic__error(c, QUIC_INTERNAL_ERROR, 0x06); break; }
+    if (!w) {
+      quic__error(c, QUIC_INTERNAL_ERROR, 0x06);
+      break;
+    }
     memcpy(w, out.base + eo[e], len), dst->crypto_out.len += len;
   }
   ptls_buffer_dispose(&out);
@@ -700,7 +779,8 @@ static inline void quic__crypto_feed(quic_conn *c, int space) {
     c->established = c->confirmed = 1; /* the server's handshake is confirmed when it completes (RFC 9001 §4.1.2) */
     c->handshake_done_pending = 1;
     quic__discard_space(c, QUIC_SP_HANDSHAKE);
-    if (c->cs && !quic__next_secret(c->cs, c->app_secret_rx) && !quic__key_update(&c->next_rx, &c->sp[QUIC_SP_APP].rx, c->cs, 0, c->app_secret_rx))
+    if (c->cs && !quic__next_secret(c->cs, c->app_secret_rx) &&
+        !quic__key_update(&c->next_rx, &c->sp[QUIC_SP_APP].rx, c->cs, 0, c->app_secret_rx))
       c->have_next_rx = 1;
     if (c->cb.on_established) c->cb.on_established(c, c->user);
   } else if (r != 0 && r != PTLS_ERROR_IN_PROGRESS) {
@@ -714,16 +794,22 @@ static inline int quic__stream_deliver(quic_conn *c, quic_stream *s) {
     size_t avail = (size_t)(s->in.contig - s->in.base);
     int fin = s->in.fin != UINT64_MAX && s->in.contig == s->in.fin;
     if (s->recv_done || (!avail && !fin)) return 0;
-    int64_t used = c->cb.on_stream ? c->cb.on_stream(c, s->id, s->in.base, s->in.buf, avail, fin, c->user) : (int64_t)avail;
-    if (used < 0) { quic_close(c, (uint64_t)-used); return -1; }
+    int64_t used =
+        c->cb.on_stream ? c->cb.on_stream(c, s->id, s->in.base, s->in.buf, avail, fin, c->user) : (int64_t)avail;
+    if (used < 0) {
+      quic_close(c, (uint64_t)-used);
+      return -1;
+    }
     if (!(s = quic__stream(c, s->id))) return 0;
     if ((size_t)used > avail) used = (int64_t)avail;
     quic__rb_consume(&s->in, (size_t)used);
     c->data_consumed += (uint64_t)used;
     if (fin && (size_t)used == avail) s->recv_done = 1;
     /* reopen windows once half is used */
-    if (!s->recv_done && s->max_recv - s->in.base < QUIC_STREAM_WIN / 2) s->max_recv = s->in.base + QUIC_STREAM_WIN, s->send_max_stream_data = 1;
-    if (c->max_data_local - c->data_consumed < QUIC_CONN_WIN / 2) c->max_data_local = c->data_consumed + QUIC_CONN_WIN, c->send_max_data = 1;
+    if (!s->recv_done && s->max_recv - s->in.base < QUIC_STREAM_WIN / 2)
+      s->max_recv = s->in.base + QUIC_STREAM_WIN, s->send_max_stream_data = 1;
+    if (c->max_data_local - c->data_consumed < QUIC_CONN_WIN / 2)
+      c->max_data_local = c->data_consumed + QUIC_CONN_WIN, c->send_max_data = 1;
     if (!used || s->recv_done) return 0;
   }
 }
@@ -735,8 +821,14 @@ static inline quic_stream *quic__peer_stream(quic_conn *c, uint64_t sid, int *er
   uint64_t idx = sid >> 2, *opened = uni ? &c->opened_uni : &c->opened_bidi;
   quic_stream *s = (sid & 1) || idx < *opened ? quic__stream(c, sid) : NULL; /* beyond opened: new, no lookup */
   if (s) return s;
-  if (sid & 1) { *err = QUIC_STREAM_STATE_ERROR; return NULL; } /* server-initiated: only ours, and we keep those */
-  if (idx >= (uni ? c->max_streams_uni_local : c->max_streams_bidi_local)) { *err = QUIC_STREAM_LIMIT_ERROR; return NULL; }
+  if (sid & 1) {
+    *err = QUIC_STREAM_STATE_ERROR;
+    return NULL;
+  } /* server-initiated: only ours, and we keep those */
+  if (idx >= (uni ? c->max_streams_uni_local : c->max_streams_bidi_local)) {
+    *err = QUIC_STREAM_LIMIT_ERROR;
+    return NULL;
+  }
   if (quic__rs_covers(&c->closed[uni], idx, idx + 1)) return NULL; /* finished and freed: ignore */
   if (idx + 1 > *opened) *opened = idx + 1;
   s = quic__stream_new(c, sid);
@@ -755,7 +847,8 @@ static inline void quic__stream_maybe_free(quic_conn *c, quic_stream *s) {
   }
 }
 
-static inline void quic__on_ack(quic_conn *c, int space, uint64_t largest, uint64_t delay, const uint64_t *rng, int nrng, int64_t now) {
+static inline void quic__on_ack(quic_conn *c, int space, uint64_t largest, uint64_t delay, const uint64_t *rng,
+                                int nrng, int64_t now) {
   quic_space *sp = &c->sp[space];
   int newly_largest = 0;
   int64_t largest_sent_at = 0;
@@ -771,7 +864,9 @@ static inline void quic__on_ack(quic_conn *c, int space, uint64_t largest, uint6
     quic__cc_acked(c, p);
   }
   if (!sp->any_acked || largest > sp->largest_acked) sp->largest_acked = largest, sp->any_acked = 1;
-  if (newly_largest) quic__rtt_sample(c, now - largest_sent_at, space == QUIC_SP_APP ? (int64_t)((delay << c->peer_ack_delay_exp) / 1000) : 0);
+  if (newly_largest)
+    quic__rtt_sample(c, now - largest_sent_at,
+                     space == QUIC_SP_APP ? (int64_t)((delay << c->peer_ack_delay_exp) / 1000) : 0);
   c->pto_count = 0;
   quic__detect_lost(c, space, now);
   quic__sent_pop_acked(sp);
@@ -782,146 +877,241 @@ static inline void quic__on_ack(quic_conn *c, int space, uint64_t largest, uint6
   }
 }
 
-#define QUIC__NEED(x) do { if (x) { quic__error(c, QUIC_FRAME_ENCODING_ERROR, type); return -1; } } while (0)
+#define QUIC__NEED(x)                                                                                                  \
+  do {                                                                                                                 \
+    if (x) {                                                                                                           \
+      quic__error(c, QUIC_FRAME_ENCODING_ERROR, type);                                                                 \
+      return -1;                                                                                                       \
+    }                                                                                                                  \
+  } while (0)
 /* frames of one decrypted packet; returns 0, or -1 once the connection is closing */
-static inline int quic__frames(quic_conn *c, int space, const uint8_t *p, const uint8_t *end, int64_t now, int *ack_eliciting) {
+static inline int quic__frames(quic_conn *c, int space, const uint8_t *p, const uint8_t *end, int64_t now,
+                               int *ack_eliciting) {
   *ack_eliciting = 0;
-  if (p == end) { quic__error(c, QUIC_PROTOCOL_VIOLATION, 0); return -1; } /* a packet must carry a frame */
+  if (p == end) {
+    quic__error(c, QUIC_PROTOCOL_VIOLATION, 0);
+    return -1;
+  } /* a packet must carry a frame */
   while (p < end) {
     uint64_t type = 0; /* reported as the frame type if the type itself does not parse */
     QUIC__NEED(quic__vi(&p, end, &type));
     if (type != 0x00 && type != 0x02 && type != 0x03 && type != 0x1c && type != 0x1d) *ack_eliciting = 1;
     /* Initial and Handshake carry only PADDING, PING, ACK, CRYPTO, CONNECTION_CLOSE (§12.4) */
-    if (space != QUIC_SP_APP && !(type <= 0x03 || type == 0x06 || type == 0x1c)) { quic__error(c, QUIC_PROTOCOL_VIOLATION, type); return -1; }
-    uint64_t a, b, d, e;
-    switch (type) {
-    case 0x00: while (p < end && !*p) p++; break; /* PADDING */
-    case 0x01: break;                             /* PING */
-    case 0x02: case 0x03: { /* ACK */
-      uint64_t largest, delay, count, first;
-      QUIC__NEED(quic__vi(&p, end, &largest) || quic__vi(&p, end, &delay) || quic__vi(&p, end, &count) || quic__vi(&p, end, &first));
-      uint64_t rng[2 * 64];
-      if (first > largest || largest >= c->sp[space].next_pn) { quic__error(c, largest >= c->sp[space].next_pn ? QUIC_PROTOCOL_VIOLATION : QUIC_FRAME_ENCODING_ERROR, type); return -1; }
-      int nr = 0;
-      uint64_t hi = largest, lo = largest - first;
-      rng[0] = lo, rng[1] = hi, nr = 1;
-      for (uint64_t k = 0; k < count; k++) {
-        uint64_t gap, len;
-        QUIC__NEED(quic__vi(&p, end, &gap) || quic__vi(&p, end, &len));
-        if (gap + 2 > lo || len > lo - gap - 2) { quic__error(c, QUIC_FRAME_ENCODING_ERROR, type); return -1; }
-        hi = lo - gap - 2, lo = hi - len;
-        if (nr < 64) rng[2 * nr] = lo, rng[2 * nr + 1] = hi, nr++;
-      }
-      if (type == 0x03) QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b) || quic__vi(&p, end, &d)); /* ECN counts */
-      quic__on_ack(c, space, largest, delay, rng, nr, now);
-      break;
-    }
-    case 0x04: { /* RESET_STREAM */
-      QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b) || quic__vi(&p, end, &d));
-      if ((a & 3) == 3) { quic__error(c, QUIC_STREAM_STATE_ERROR, type); return -1; } /* our uni stream: send-only */
-      int err;
-      quic_stream *s = quic__peer_stream(c, a, &err);
-      if (err) { quic__error(c, (uint64_t)err, type); return -1; }
-      if (!s || s->recv_done) break;
-      if (quic__rb_set_fin(&s->in, d)) { quic__error(c, QUIC_FINAL_SIZE_ERROR, type); return -1; }
-      if (d > s->max_recv) { quic__error(c, QUIC_FLOW_CONTROL_ERROR, type); return -1; }
-      s->recv_done = 1, s->recv_reset = 1;
-      if (c->cb.on_stream_reset) c->cb.on_stream_reset(c, a, b, c->user);
-      if ((s = quic__stream(c, a))) quic__stream_maybe_free(c, s);
-      break;
-    }
-    case 0x05: { /* STOP_SENDING */
-      QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b));
-      if ((a & 3) == 2) { quic__error(c, QUIC_STREAM_STATE_ERROR, type); return -1; } /* the peer's uni stream: we never send on it */
-      quic_stream *s = (a & 1) ? quic__stream(c, a) : NULL;
-      int err = 0;
-      if (!(a & 1)) s = quic__peer_stream(c, a, &err);
-      if (err) { quic__error(c, (uint64_t)err, type); return -1; }
-      if (!s || s->send_done || s->reset_sent) break;
-      s->send_reset = 1, s->reset_code = b; /* answer with RESET_STREAM (§3.5) */
-      if (c->cb.on_stream_reset) c->cb.on_stream_reset(c, a, b, c->user);
-      break;
-    }
-    case 0x06: { /* CRYPTO */
-      QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b) || (uint64_t)(end - p) < b);
-      quic_space *sp = &c->sp[space];
-      int r = quic__rb_insert(c->ctx, &sp->crypto_in, a, p, (size_t)b, sp->crypto_in.base + 65536);
-      if (r) { quic__error(c, r == -QUIC_FLOW_CONTROL_ERROR ? QUIC_CRYPTO_BUFFER_EXCEEDED : (uint64_t)-r, type); return -1; }
-      p += b;
-      quic__crypto_feed(c, space);
-      if (c->closing) return -1;
-      break;
-    }
-    case 0x07: quic__error(c, QUIC_PROTOCOL_VIOLATION, type); return -1; /* NEW_TOKEN from a client */
-    case 0x08: case 0x09: case 0x0a: case 0x0b: case 0x0c: case 0x0d: case 0x0e: case 0x0f: { /* STREAM */
-      uint64_t off = 0, len;
-      QUIC__NEED(quic__vi(&p, end, &a));
-      if (type & 0x04) QUIC__NEED(quic__vi(&p, end, &off));
-      if (type & 0x02) QUIC__NEED(quic__vi(&p, end, &len));
-      else len = (uint64_t)(end - p);
-      QUIC__NEED((uint64_t)(end - p) < len);
-      if (off + len >= (1ull << 62)) { quic__error(c, QUIC_FRAME_ENCODING_ERROR, type); return -1; }
-      if ((a & 3) == 3) { quic__error(c, QUIC_STREAM_STATE_ERROR, type); return -1; } /* data on our send-only stream */
-      int err;
-      quic_stream *s = quic__peer_stream(c, a, &err);
-      if (err) { quic__error(c, (uint64_t)err, type); return -1; }
-      if (s && s->recv_done && s->in.fin != UINT64_MAX && (off + len > s->in.fin || ((type & 0x01) && off + len != s->in.fin))) {
-        quic__error(c, QUIC_FINAL_SIZE_ERROR, type); /* even once all of it was received (RFC 9000 §4.5) */
-        return -1;
-      }
-      if (s && !s->recv_done) {
-        uint64_t before = quic__rb_top(&s->in);
-        int r = quic__rb_insert(c->ctx, &s->in, off, p, (size_t)len, s->max_recv);
-        if (!r && (type & 0x01)) r = quic__rb_set_fin(&s->in, off + len);
-        if (r) { quic__error(c, (uint64_t)-r, type); return -1; }
-        uint64_t after = quic__rb_top(&s->in);
-        if (after > before) {
-          c->data_recv += after - before;
-          if (c->data_recv > c->max_data_local) { quic__error(c, QUIC_FLOW_CONTROL_ERROR, type); return -1; }
-        }
-        if (quic__stream_deliver(c, s) < 0) return -1;
-        if ((s = quic__stream(c, a))) quic__stream_maybe_free(c, s);
-      }
-      p += len;
-      break;
-    }
-    case 0x10: QUIC__NEED(quic__vi(&p, end, &a)); if (a > c->max_data_peer) c->max_data_peer = a; break;
-    case 0x11: { /* MAX_STREAM_DATA */
-      QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b));
-      if ((a & 3) == 2) { quic__error(c, QUIC_STREAM_STATE_ERROR, type); return -1; } /* receive-only for us */
-      quic_stream *s = quic__stream(c, a);
-      if (s && b > s->max_send) s->max_send = b;
-      break;
-    }
-    case 0x12: case 0x13: /* MAX_STREAMS */
-      QUIC__NEED(quic__vi(&p, end, &a));
-      if (a > (1ull << 60)) { quic__error(c, QUIC_FRAME_ENCODING_ERROR, type); return -1; }
-      if (type == 0x13 && a > c->peer_max_streams_uni) c->peer_max_streams_uni = a;
-      break;
-    case 0x14: QUIC__NEED(quic__vi(&p, end, &a)); break;                            /* DATA_BLOCKED */
-    case 0x15: QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b)); break;  /* STREAM_DATA_BLOCKED */
-    case 0x16: case 0x17: QUIC__NEED(quic__vi(&p, end, &a)); break;                /* STREAMS_BLOCKED */
-    case 0x18: { /* NEW_CONNECTION_ID: we keep using the client's first CID (no migration) */
-      QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b) || p >= end);
-      uint8_t l = *p++;
-      if (b > a || l < 1 || l > 20) { quic__error(c, QUIC_FRAME_ENCODING_ERROR, type); return -1; }
-      QUIC__NEED((size_t)(end - p) < (size_t)l + 16);
-      p += l + 16;
-      break;
-    }
-    case 0x19: QUIC__NEED(quic__vi(&p, end, &a)); if (a > 0) { quic__error(c, QUIC_PROTOCOL_VIOLATION, type); return -1; } break;
-    case 0x1a: QUIC__NEED(end - p < 8); memcpy(c->path_response, p, 8), c->path_response_pending = 1, p += 8; break;
-    case 0x1b: QUIC__NEED(end - p < 8); p += 8; break; /* we never challenge */
-    case 0x1c: case 0x1d: { /* CONNECTION_CLOSE */
-      QUIC__NEED(quic__vi(&p, end, &a));
-      if (type == 0x1c) QUIC__NEED(quic__vi(&p, end, &b));
-      QUIC__NEED(quic__vi(&p, end, &e) || (uint64_t)(end - p) < e);
-      p += e;
-      c->draining = 1, c->close_deadline = now + 3 * quic__pto(c, QUIC_SP_APP);
+    if (space != QUIC_SP_APP && !(type <= 0x03 || type == 0x06 || type == 0x1c)) {
+      quic__error(c, QUIC_PROTOCOL_VIOLATION, type);
       return -1;
     }
-    case 0x1e: quic__error(c, QUIC_PROTOCOL_VIOLATION, type); return -1; /* HANDSHAKE_DONE from a client */
-    default: quic__error(c, QUIC_FRAME_ENCODING_ERROR, type); return -1;
+    uint64_t a, b, d, e;
+    switch (type) {
+      case 0x00:
+        while (p < end && !*p) p++;
+        break;          /* PADDING */
+      case 0x01: break; /* PING */
+      case 0x02:
+      case 0x03: { /* ACK */
+        uint64_t largest, delay, count, first;
+        QUIC__NEED(quic__vi(&p, end, &largest) || quic__vi(&p, end, &delay) || quic__vi(&p, end, &count) ||
+                   quic__vi(&p, end, &first));
+        uint64_t rng[2 * 64];
+        if (first > largest || largest >= c->sp[space].next_pn) {
+          quic__error(c, largest >= c->sp[space].next_pn ? QUIC_PROTOCOL_VIOLATION : QUIC_FRAME_ENCODING_ERROR, type);
+          return -1;
+        }
+        int nr = 0;
+        uint64_t hi = largest, lo = largest - first;
+        rng[0] = lo, rng[1] = hi, nr = 1;
+        for (uint64_t k = 0; k < count; k++) {
+          uint64_t gap, len;
+          QUIC__NEED(quic__vi(&p, end, &gap) || quic__vi(&p, end, &len));
+          if (gap + 2 > lo || len > lo - gap - 2) {
+            quic__error(c, QUIC_FRAME_ENCODING_ERROR, type);
+            return -1;
+          }
+          hi = lo - gap - 2, lo = hi - len;
+          if (nr < 64) rng[2 * nr] = lo, rng[2 * nr + 1] = hi, nr++;
+        }
+        if (type == 0x03)
+          QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b) || quic__vi(&p, end, &d)); /* ECN counts */
+        quic__on_ack(c, space, largest, delay, rng, nr, now);
+        break;
+      }
+      case 0x04: { /* RESET_STREAM */
+        QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b) || quic__vi(&p, end, &d));
+        if ((a & 3) == 3) {
+          quic__error(c, QUIC_STREAM_STATE_ERROR, type);
+          return -1;
+        } /* our uni stream: send-only */
+        int err;
+        quic_stream *s = quic__peer_stream(c, a, &err);
+        if (err) {
+          quic__error(c, (uint64_t)err, type);
+          return -1;
+        }
+        if (!s || s->recv_done) break;
+        if (quic__rb_set_fin(&s->in, d)) {
+          quic__error(c, QUIC_FINAL_SIZE_ERROR, type);
+          return -1;
+        }
+        if (d > s->max_recv) {
+          quic__error(c, QUIC_FLOW_CONTROL_ERROR, type);
+          return -1;
+        }
+        s->recv_done = 1, s->recv_reset = 1;
+        if (c->cb.on_stream_reset) c->cb.on_stream_reset(c, a, b, c->user);
+        if ((s = quic__stream(c, a))) quic__stream_maybe_free(c, s);
+        break;
+      }
+      case 0x05: { /* STOP_SENDING */
+        QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b));
+        if ((a & 3) == 2) {
+          quic__error(c, QUIC_STREAM_STATE_ERROR, type);
+          return -1;
+        } /* the peer's uni stream: we never send on it */
+        quic_stream *s = (a & 1) ? quic__stream(c, a) : NULL;
+        int err = 0;
+        if (!(a & 1)) s = quic__peer_stream(c, a, &err);
+        if (err) {
+          quic__error(c, (uint64_t)err, type);
+          return -1;
+        }
+        if (!s || s->send_done || s->reset_sent) break;
+        s->send_reset = 1, s->reset_code = b; /* answer with RESET_STREAM (§3.5) */
+        if (c->cb.on_stream_reset) c->cb.on_stream_reset(c, a, b, c->user);
+        break;
+      }
+      case 0x06: { /* CRYPTO */
+        QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b) || (uint64_t)(end - p) < b);
+        quic_space *sp = &c->sp[space];
+        int r = quic__rb_insert(c->ctx, &sp->crypto_in, a, p, (size_t)b, sp->crypto_in.base + 65536);
+        if (r) {
+          quic__error(c, r == -QUIC_FLOW_CONTROL_ERROR ? QUIC_CRYPTO_BUFFER_EXCEEDED : (uint64_t)-r, type);
+          return -1;
+        }
+        p += b;
+        quic__crypto_feed(c, space);
+        if (c->closing) return -1;
+        break;
+      }
+      case 0x07: quic__error(c, QUIC_PROTOCOL_VIOLATION, type); return -1; /* NEW_TOKEN from a client */
+      case 0x08:
+      case 0x09:
+      case 0x0a:
+      case 0x0b:
+      case 0x0c:
+      case 0x0d:
+      case 0x0e:
+      case 0x0f: { /* STREAM */
+        uint64_t off = 0, len;
+        QUIC__NEED(quic__vi(&p, end, &a));
+        if (type & 0x04) QUIC__NEED(quic__vi(&p, end, &off));
+        if (type & 0x02) QUIC__NEED(quic__vi(&p, end, &len));
+        else len = (uint64_t)(end - p);
+        QUIC__NEED((uint64_t)(end - p) < len);
+        if (off + len >= (1ull << 62)) {
+          quic__error(c, QUIC_FRAME_ENCODING_ERROR, type);
+          return -1;
+        }
+        if ((a & 3) == 3) {
+          quic__error(c, QUIC_STREAM_STATE_ERROR, type);
+          return -1;
+        } /* data on our send-only stream */
+        int err;
+        quic_stream *s = quic__peer_stream(c, a, &err);
+        if (err) {
+          quic__error(c, (uint64_t)err, type);
+          return -1;
+        }
+        if (s && s->recv_done && s->in.fin != UINT64_MAX &&
+            (off + len > s->in.fin || ((type & 0x01) && off + len != s->in.fin))) {
+          quic__error(c, QUIC_FINAL_SIZE_ERROR, type); /* even once all of it was received (RFC 9000 §4.5) */
+          return -1;
+        }
+        if (s && !s->recv_done) {
+          uint64_t before = quic__rb_top(&s->in);
+          int r = quic__rb_insert(c->ctx, &s->in, off, p, (size_t)len, s->max_recv);
+          if (!r && (type & 0x01)) r = quic__rb_set_fin(&s->in, off + len);
+          if (r) {
+            quic__error(c, (uint64_t)-r, type);
+            return -1;
+          }
+          uint64_t after = quic__rb_top(&s->in);
+          if (after > before) {
+            c->data_recv += after - before;
+            if (c->data_recv > c->max_data_local) {
+              quic__error(c, QUIC_FLOW_CONTROL_ERROR, type);
+              return -1;
+            }
+          }
+          if (quic__stream_deliver(c, s) < 0) return -1;
+          if ((s = quic__stream(c, a))) quic__stream_maybe_free(c, s);
+        }
+        p += len;
+        break;
+      }
+      case 0x10:
+        QUIC__NEED(quic__vi(&p, end, &a));
+        if (a > c->max_data_peer) c->max_data_peer = a;
+        break;
+      case 0x11: { /* MAX_STREAM_DATA */
+        QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b));
+        if ((a & 3) == 2) {
+          quic__error(c, QUIC_STREAM_STATE_ERROR, type);
+          return -1;
+        } /* receive-only for us */
+        quic_stream *s = quic__stream(c, a);
+        if (s && b > s->max_send) s->max_send = b;
+        break;
+      }
+      case 0x12:
+      case 0x13: /* MAX_STREAMS */
+        QUIC__NEED(quic__vi(&p, end, &a));
+        if (a > (1ull << 60)) {
+          quic__error(c, QUIC_FRAME_ENCODING_ERROR, type);
+          return -1;
+        }
+        if (type == 0x13 && a > c->peer_max_streams_uni) c->peer_max_streams_uni = a;
+        break;
+      case 0x14: QUIC__NEED(quic__vi(&p, end, &a)); break;                          /* DATA_BLOCKED */
+      case 0x15: QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b)); break; /* STREAM_DATA_BLOCKED */
+      case 0x16:
+      case 0x17: QUIC__NEED(quic__vi(&p, end, &a)); break; /* STREAMS_BLOCKED */
+      case 0x18: { /* NEW_CONNECTION_ID: we keep using the client's first CID (no migration) */
+        QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b) || p >= end);
+        uint8_t l = *p++;
+        if (b > a || l < 1 || l > 20) {
+          quic__error(c, QUIC_FRAME_ENCODING_ERROR, type);
+          return -1;
+        }
+        QUIC__NEED((size_t)(end - p) < (size_t)l + 16);
+        p += l + 16;
+        break;
+      }
+      case 0x19:
+        QUIC__NEED(quic__vi(&p, end, &a));
+        if (a > 0) {
+          quic__error(c, QUIC_PROTOCOL_VIOLATION, type);
+          return -1;
+        }
+        break;
+      case 0x1a:
+        QUIC__NEED(end - p < 8);
+        memcpy(c->path_response, p, 8), c->path_response_pending = 1, p += 8;
+        break;
+      case 0x1b:
+        QUIC__NEED(end - p < 8);
+        p += 8;
+        break; /* we never challenge */
+      case 0x1c:
+      case 0x1d: { /* CONNECTION_CLOSE */
+        QUIC__NEED(quic__vi(&p, end, &a));
+        if (type == 0x1c) QUIC__NEED(quic__vi(&p, end, &b));
+        QUIC__NEED(quic__vi(&p, end, &e) || (uint64_t)(end - p) < e);
+        p += e;
+        c->draining = 1, c->close_deadline = now + 3 * quic__pto(c, QUIC_SP_APP);
+        return -1;
+      }
+      case 0x1e: quic__error(c, QUIC_PROTOCOL_VIOLATION, type); return -1; /* HANDSHAKE_DONE from a client */
+      default: quic__error(c, QUIC_FRAME_ENCODING_ERROR, type); return -1;
     }
   }
   return 0;
@@ -946,18 +1136,30 @@ static inline int quic__rcv_pn(quic_space *sp, uint64_t pn) {
   while (i < sp->nrcv && sp->rcv[i].lo > pn) i++;
   if (i < sp->nrcv && sp->rcv[i].hi + 1 == pn) {
     sp->rcv[i].hi = pn;
-    if (i > 0 && sp->rcv[i - 1].lo == pn + 1) { sp->rcv[i - 1].lo = sp->rcv[i].lo; memmove(&sp->rcv[i], &sp->rcv[i + 1], (size_t)(sp->nrcv - i - 1) * sizeof sp->rcv[0]); sp->nrcv--; }
+    if (i > 0 && sp->rcv[i - 1].lo == pn + 1) {
+      sp->rcv[i - 1].lo = sp->rcv[i].lo;
+      memmove(&sp->rcv[i], &sp->rcv[i + 1], (size_t)(sp->nrcv - i - 1) * sizeof sp->rcv[0]);
+      sp->nrcv--;
+    }
     return 0;
   }
-  if (i > 0 && sp->rcv[i - 1].lo == pn + 1) { sp->rcv[i - 1].lo = pn; return 0; }
-  if (sp->nrcv == QUIC_ACK_RANGES) { if (i == QUIC_ACK_RANGES) return 0; sp->nrcv--; } /* forget the oldest range */
+  if (i > 0 && sp->rcv[i - 1].lo == pn + 1) {
+    sp->rcv[i - 1].lo = pn;
+    return 0;
+  }
+  if (sp->nrcv == QUIC_ACK_RANGES) {
+    if (i == QUIC_ACK_RANGES) return 0;
+    sp->nrcv--;
+  } /* forget the oldest range */
   memmove(&sp->rcv[i + 1], &sp->rcv[i], (size_t)(sp->nrcv - i) * sizeof sp->rcv[0]);
   sp->rcv[i].lo = sp->rcv[i].hi = pn, sp->nrcv++;
   return 0;
 }
 static inline uint64_t quic__largest_rcv(const quic_space *sp) { return sp->nrcv ? sp->rcv[0].hi : 0; }
 
-static inline uint32_t quic__be32(const uint8_t *p) { return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3]; }
+static inline uint32_t quic__be32(const uint8_t *p) {
+  return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
+}
 
 /* one packet at p (datagram end at end): returns the bytes it occupies, or 0 to drop the rest */
 static inline size_t quic__packet(quic_conn *c, uint8_t *p, uint8_t *end, int64_t now) {
@@ -1013,23 +1215,33 @@ static inline size_t quic__packet(quic_conn *c, uint8_t *p, uint8_t *end, int64_
   int phase_flip = space == QUIC_SP_APP && ((first >> 2) & 1) != c->key_phase;
   int late = phase_flip && c->have_prev_rx && pn < c->phase_first_pn;
   if (c->have_prev_rx && now >= c->prev_rx_until) quic__key_free(&c->prev_rx), c->have_prev_rx = 0;
-  ptls_aead_context_t *aead = late ? c->prev_rx.aead : phase_flip ? (c->have_next_rx ? c->next_rx.aead : NULL) : k->aead;
+  ptls_aead_context_t *aead = late         ? c->prev_rx.aead
+                              : phase_flip ? (c->have_next_rx ? c->next_rx.aead : NULL)
+                                           : k->aead;
   if (!aead) return plen;
   uint8_t pt[QUIC_MAX_UDP + 64];
   size_t ctl = plen - hl;
   if (ctl > sizeof pt) return plen;
   size_t ptl = ptls_aead_decrypt(aead, pt, p + hl, ctl, pn, hdr, hl);
-  if (ptl == SIZE_MAX) { c->undecryptable++; return plen; } /* not ours or corrupted: drop the packet only */
-  if ((p[0] & 0x80 ? first & 0x0c : first & 0x18)) { quic__error(c, QUIC_PROTOCOL_VIOLATION, 0); return 0; } /* reserved bits */
+  if (ptl == SIZE_MAX) {
+    c->undecryptable++;
+    return plen;
+  } /* not ours or corrupted: drop the packet only */
+  if ((p[0] & 0x80 ? first & 0x0c : first & 0x18)) {
+    quic__error(c, QUIC_PROTOCOL_VIOLATION, 0);
+    return 0;
+  }                          /* reserved bits */
   if (phase_flip && !late) { /* the peer updated keys: rotate ours (RFC 9001 §6) */
     quic__key_free(&c->prev_rx);
     c->prev_rx = sp->rx, c->have_prev_rx = 1, c->prev_rx_until = now + 3 * quic__pto(c, QUIC_SP_APP);
     sp->rx = c->next_rx, memset(&c->next_rx, 0, sizeof c->next_rx), c->have_next_rx = 0; /* same hp key */
     c->key_phase ^= 1, c->phase_first_pn = pn;
     if (!quic__next_secret(c->cs, c->app_secret_tx)) quic__key_update(&sp->tx, &sp->tx, c->cs, 1, c->app_secret_tx);
-    if (!quic__next_secret(c->cs, c->app_secret_rx) && !quic__key_update(&c->next_rx, &sp->rx, c->cs, 0, c->app_secret_rx)) c->have_next_rx = 1;
+    if (!quic__next_secret(c->cs, c->app_secret_rx) &&
+        !quic__key_update(&c->next_rx, &sp->rx, c->cs, 0, c->app_secret_rx))
+      c->have_next_rx = 1;
   }
-  if (quic__rcv_pn(sp, pn)) return plen; /* duplicate */
+  if (quic__rcv_pn(sp, pn)) return plen;                  /* duplicate */
   if (space == QUIC_SP_HANDSHAKE && !c->addr_validated) { /* RFC 9001 §4.9.1, RFC 9000 §8.1 */
     c->addr_validated = 1;
     quic__discard_space(c, QUIC_SP_INITIAL);
@@ -1049,7 +1261,10 @@ static inline size_t quic__packet(quic_conn *c, uint8_t *p, uint8_t *end, int64_
 static inline int quic_recv(quic_conn *c, uint8_t *d, size_t len, int64_t now) {
   if (c->draining) return QUIC_E_CLOSED;
   c->bytes_recv += len;
-  if (c->closing) { c->close_sent_once = 0; return QUIC_E_CLOSED; } /* answer with CONNECTION_CLOSE again */
+  if (c->closing) {
+    c->close_sent_once = 0;
+    return QUIC_E_CLOSED;
+  } /* answer with CONNECTION_CLOSE again */
   for (uint8_t *p = d, *end = d + len; p < end;) {
     size_t n = quic__packet(c, p, end, now);
     if (!n) break;
@@ -1075,7 +1290,8 @@ static inline size_t quic_version_negotiation(uint8_t *out, size_t cap, const ui
   return (size_t)(p - out);
 }
 
-static inline int quic_accept(quic_conn *c, quic_ctx *x, uint8_t *d, size_t len, int64_t now, const quic_callbacks *cb, void *user) {
+static inline int quic_accept(quic_conn *c, quic_ctx *x, uint8_t *d, size_t len, int64_t now, const quic_callbacks *cb,
+                              void *user) {
   if (len < QUIC_MIN_INITIAL || !(d[0] & 0x80) || len < 7) return QUIC_E_DROP;
   if (quic__be32(d + 1) != QUIC_V1) return QUIC_E_VN;
   if (((d[0] >> 4) & 3) != 0) return QUIC_E_DROP; /* not an Initial */
@@ -1153,7 +1369,8 @@ typedef struct {
   quic_sent rec;
 } quic__pkt;
 
-static inline uint8_t *quic__ack_frame(quic_conn *c, quic_space *sp, int space, uint8_t *p, uint8_t *e, int64_t now, uint64_t *largest) {
+static inline uint8_t *quic__ack_frame(quic_conn *c, quic_space *sp, int space, uint8_t *p, uint8_t *e, int64_t now,
+                                       uint64_t *largest) {
   if (!sp->nrcv || e - p < 32) return p;
   uint64_t delay = space == QUIC_SP_APP ? (uint64_t)((now - sp->largest_rcv_at) * 1000) >> 3 : 0;
   *largest = sp->rcv[0].hi;
@@ -1172,11 +1389,12 @@ static inline uint8_t *quic__ack_frame(quic_conn *c, quic_space *sp, int space, 
 }
 static inline int quic__rec(quic_sent *r, uint8_t type, uint64_t a, uint64_t b, uint64_t cc, int fin) {
   if (r->nf == QUIC_FREC_MAX) return 0;
-  r->f[r->nf++] = (quic_frec){type, (uint8_t)fin, a, b, cc};
+  r->f[r->nf++] = (quic_frec){ type, (uint8_t)fin, a, b, cc };
   return 1;
 }
 /* STREAM or CRYPTO bytes [off, off+n) from a send buffer */
-static inline uint8_t *quic__data_frame(uint8_t *p, int crypto, uint64_t sid, uint64_t off, const uint8_t *d, size_t n, int fin) {
+static inline uint8_t *quic__data_frame(uint8_t *p, int crypto, uint64_t sid, uint64_t off, const uint8_t *d, size_t n,
+                                        int fin) {
   if (crypto) *p++ = 0x06;
   else {
     *p++ = (uint8_t)(0x08 | (off ? 0x04 : 0) | 0x02 | (fin ? 0x01 : 0));
@@ -1188,7 +1406,8 @@ static inline uint8_t *quic__data_frame(uint8_t *p, int crypto, uint64_t sid, ui
   return p + n;
 }
 /* resend lost bytes or send new bytes of b; returns the new write position */
-static inline uint8_t *quic__sb_emit(quic_sbuf *b, int crypto, uint64_t sid, uint8_t *p, uint8_t *e, quic_sent *r, uint64_t new_limit, uint64_t *new_bytes) {
+static inline uint8_t *quic__sb_emit(quic_sbuf *b, int crypto, uint64_t sid, uint8_t *p, uint8_t *e, quic_sent *r,
+                                     uint64_t new_limit, uint64_t *new_bytes) {
   *new_bytes = 0;
   size_t over = crypto ? 1 + 8 + 2 : 1 + 8 + 8 + 2;
   while (b->lost.n && (size_t)(e - p) > over + 1 && r->nf < QUIC_FREC_MAX) {
@@ -1201,7 +1420,8 @@ static inline uint8_t *quic__sb_emit(quic_sbuf *b, int crypto, uint64_t sid, uin
   }
   uint64_t unsent = b->base + b->len - b->sent;
   int fin_due = b->fin && (!b->fin_sent || b->fin_lost) && b->sent == b->base + b->len;
-  if ((unsent || fin_due || (b->fin && b->sent + unsent == b->base + b->len && !b->fin_sent)) && (size_t)(e - p) > over && r->nf < QUIC_FREC_MAX) {
+  if ((unsent || fin_due || (b->fin && b->sent + unsent == b->base + b->len && !b->fin_sent)) &&
+      (size_t)(e - p) > over && r->nf < QUIC_FREC_MAX) {
     size_t n = (size_t)unsent;
     if (n > (size_t)(e - p) - over) n = (size_t)(e - p) - over;
     if (n > new_limit) n = (size_t)new_limit;
@@ -1223,15 +1443,20 @@ static inline int quic__space_wants(quic_conn *c, int space, int64_t now) {
   if (sp->crypto_out.lost.n || sp->crypto_out.sent < sp->crypto_out.base + sp->crypto_out.len) return 1;
   if (c->probes_due) return 1;
   if (space != QUIC_SP_APP || !c->established) return 0;
-  if (c->handshake_done_pending || c->path_response_pending || c->send_max_data || c->send_max_streams_bidi || c->send_max_streams_uni) return 1;
+  if (c->handshake_done_pending || c->path_response_pending || c->send_max_data || c->send_max_streams_bidi ||
+      c->send_max_streams_uni)
+    return 1;
   for (int i = 0; i < QUIC_MAX_STREAMS; i++) {
     quic_stream *s = &c->s[i];
     if (!s->used) continue;
-    if (s->send_max_stream_data || s->send_reset || s->send_stop || s->out.lost.n || (s->out.fin_lost && !s->out.fin_acked)) return 1;
+    if (s->send_max_stream_data || s->send_reset || s->send_stop || s->out.lost.n ||
+        (s->out.fin_lost && !s->out.fin_acked))
+      return 1;
     if (s->send_done || s->reset_sent) continue;
     if (s->out.fin && !s->out.fin_sent && s->out.sent == s->out.base + s->out.len) return 1; /* a bare fin */
-    int room = s->max_send > s->out.sent && c->max_data_peer > c->data_sent;           /* flow control */
-    if (room && (s->out.sent < s->out.base + s->out.len || (!s->out.fin && c->cb.stream_wants && c->cb.stream_wants(c, s->id, c->user))))
+    int room = s->max_send > s->out.sent && c->max_data_peer > c->data_sent;                 /* flow control */
+    if (room && (s->out.sent < s->out.base + s->out.len ||
+                 (!s->out.fin && c->cb.stream_wants && c->cb.stream_wants(c, s->id, c->user))))
       return 1;
   }
   return 0;
@@ -1239,16 +1464,27 @@ static inline int quic__space_wants(quic_conn *c, int space, int64_t now) {
 
 /* frames of an App-space packet beyond ACK */
 static inline uint8_t *quic__app_frames(quic_conn *c, uint8_t *p, uint8_t *e, quic_sent *r, int cc_ok) {
-  if (c->handshake_done_pending && e - p > 1) *p++ = 0x1e, quic__rec(r, QF_HANDSHAKE_DONE, 0, 0, 0, 0), c->handshake_done_pending = 0;
-  if (c->path_response_pending && e - p > 9) *p++ = 0x1b, memcpy(p, c->path_response, 8), p += 8, c->path_response_pending = 0;
-  if (c->send_max_data && e - p > 9) *p++ = 0x10, p = quic__put_vi(p, c->max_data_local), quic__rec(r, QF_MAX_DATA, 0, 0, 0, 0), c->send_max_data = 0;
-  if (c->send_max_streams_bidi && e - p > 9) *p++ = 0x12, p = quic__put_vi(p, c->max_streams_bidi_local), quic__rec(r, QF_MAX_STREAMS_BIDI, 0, 0, 0, 0), c->send_max_streams_bidi = 0;
-  if (c->send_max_streams_uni && e - p > 9) *p++ = 0x13, p = quic__put_vi(p, c->max_streams_uni_local), quic__rec(r, QF_MAX_STREAMS_UNI, 0, 0, 0, 0), c->send_max_streams_uni = 0;
+  if (c->handshake_done_pending && e - p > 1)
+    *p++ = 0x1e, quic__rec(r, QF_HANDSHAKE_DONE, 0, 0, 0, 0), c->handshake_done_pending = 0;
+  if (c->path_response_pending && e - p > 9)
+    *p++ = 0x1b, memcpy(p, c->path_response, 8), p += 8, c->path_response_pending = 0;
+  if (c->send_max_data && e - p > 9)
+    *p++ = 0x10, p = quic__put_vi(p, c->max_data_local), quic__rec(r, QF_MAX_DATA, 0, 0, 0, 0), c->send_max_data = 0;
+  if (c->send_max_streams_bidi && e - p > 9)
+    *p++ = 0x12, p = quic__put_vi(p, c->max_streams_bidi_local), quic__rec(r, QF_MAX_STREAMS_BIDI, 0, 0, 0, 0),
+    c->send_max_streams_bidi = 0;
+  if (c->send_max_streams_uni && e - p > 9)
+    *p++ = 0x13, p = quic__put_vi(p, c->max_streams_uni_local), quic__rec(r, QF_MAX_STREAMS_UNI, 0, 0, 0, 0),
+    c->send_max_streams_uni = 0;
   for (int k = 0; k < QUIC_MAX_STREAMS && r->nf < QUIC_FREC_MAX; k++) {
     quic_stream *s = &c->s[(c->rr + (uint32_t)k) % QUIC_MAX_STREAMS];
     if (!s->used) continue;
-    if (s->send_max_stream_data && e - p > 18) *p++ = 0x11, p = quic__put_vi(p, s->id), p = quic__put_vi(p, s->max_recv), quic__rec(r, QF_MAX_STREAM_DATA, s->id, 0, 0, 0), s->send_max_stream_data = 0;
-    if (s->send_stop && e - p > 18) *p++ = 0x05, p = quic__put_vi(p, s->id), p = quic__put_vi(p, s->stop_code), quic__rec(r, QF_STOP, s->id, 0, 0, 0), s->send_stop = 0, s->stop_sent = 1;
+    if (s->send_max_stream_data && e - p > 18)
+      *p++ = 0x11, p = quic__put_vi(p, s->id), p = quic__put_vi(p, s->max_recv),
+      quic__rec(r, QF_MAX_STREAM_DATA, s->id, 0, 0, 0), s->send_max_stream_data = 0;
+    if (s->send_stop && e - p > 18)
+      *p++ = 0x05, p = quic__put_vi(p, s->id), p = quic__put_vi(p, s->stop_code), quic__rec(r, QF_STOP, s->id, 0, 0, 0),
+      s->send_stop = 0, s->stop_sent = 1;
     if (s->send_reset && e - p > 27) {
       *p++ = 0x04, p = quic__put_vi(p, s->id), p = quic__put_vi(p, s->reset_code), p = quic__put_vi(p, s->out.sent);
       quic__rec(r, QF_RESET, s->id, 0, 0, 0), s->send_reset = 0, s->reset_sent = 1, s->send_done = 1;
@@ -1291,7 +1527,9 @@ static inline size_t quic_send(quic_conn *c, uint8_t *out, size_t cap, int64_t n
   if (limit < 64) return 0;
   if (c->closing) { /* CONNECTION_CLOSE in the highest space with keys */
     if (c->close_sent_once) return 0;
-    int space = c->sp[QUIC_SP_APP].have_tx && c->established ? QUIC_SP_APP : c->sp[QUIC_SP_HANDSHAKE].have_tx && !c->sp[QUIC_SP_HANDSHAKE].discarded ? QUIC_SP_HANDSHAKE : QUIC_SP_INITIAL;
+    int space = c->sp[QUIC_SP_APP].have_tx && c->established                              ? QUIC_SP_APP
+                : c->sp[QUIC_SP_HANDSHAKE].have_tx && !c->sp[QUIC_SP_HANDSHAKE].discarded ? QUIC_SP_HANDSHAKE
+                                                                                          : QUIC_SP_INITIAL;
     if (!c->sp[space].have_tx) return 0;
     c->close_sent_once = 1;
     if (!c->close_deadline) c->close_deadline = now + 3 * quic__pto(c, space);
@@ -1302,7 +1540,7 @@ static inline size_t quic_send(quic_conn *c, uint8_t *out, size_t cap, int64_t n
     if (!app) q = quic__put_vi(q, c->close_frame);
     *q++ = 0; /* no reason phrase */
     /* fall through to the common path with only these frames */
-    quic__pkt pk = {0};
+    quic__pkt pk = { 0 };
     pk.space = space;
     uint8_t *p = out, *e = out + limit;
     (void)e;
@@ -1345,7 +1583,8 @@ static inline size_t quic_send(quic_conn *c, uint8_t *out, size_t cap, int64_t n
   for (int space = 0; space < QUIC_NSP; space++) {
     if (!quic__space_wants(c, space, now)) continue;
     quic_space *sp = &c->sp[space];
-    size_t hdr = space == QUIC_SP_APP ? 1 + c->dcid_len + 2 : 1 + 4 + 1 + c->dcid_len + 1 + QUIC_SCID_LEN + (space == 0) + 2 + 2;
+    size_t hdr =
+        space == QUIC_SP_APP ? 1 + c->dcid_len + 2 : 1 + 4 + 1 + c->dcid_len + 1 + QUIC_SCID_LEN + (space == 0) + 2 + 2;
     if (w + hdr + 16 + 24 > limit) break;
     quic__pkt *k = &pk[np];
     memset(k, 0, sizeof *k);
@@ -1411,7 +1650,8 @@ static inline size_t quic_send(quic_conn *c, uint8_t *out, size_t cap, int64_t n
     h[k->pn_off] ^= mask[1], h[k->pn_off + 1] ^= mask[2];
     o += ct;
     /* remember it */
-    k->rec.size = (uint16_t)(hl + ct), k->rec.ack_eliciting = (uint8_t)k->ack_eliciting, k->rec.in_flight = (uint8_t)k->ack_eliciting;
+    k->rec.size = (uint16_t)(hl + ct), k->rec.ack_eliciting = (uint8_t)k->ack_eliciting,
+    k->rec.in_flight = (uint8_t)k->ack_eliciting;
     if (sp->nsent < QUIC_SENT_MAX) {
       *quic__sent_at(sp, sp->nsent) = k->rec, sp->nsent++;
       if (k->ack_eliciting) c->bytes_in_flight += k->rec.size, sp->last_ack_eliciting_at = now;
@@ -1441,7 +1681,10 @@ static inline int64_t quic_timeout(const quic_conn *c) {
 }
 static inline void quic_on_timeout(quic_conn *c, int64_t now) {
   if (c->draining || c->closing) return;
-  if (now >= c->idle_deadline) { c->draining = 1, c->close_deadline = now; return; } /* idle: close silently */
+  if (now >= c->idle_deadline) {
+    c->draining = 1, c->close_deadline = now;
+    return;
+  } /* idle: close silently */
   int fired = 0;
   for (int i = 0; i < QUIC_NSP; i++) {
     quic_space *sp = &c->sp[i];
@@ -1452,7 +1695,8 @@ static inline void quic_on_timeout(quic_conn *c, int64_t now) {
     quic_space *sp = &c->sp[i];
     if (sp->discarded || !sp->have_tx || !sp->nsent) continue;
     int inflight = 0;
-    for (uint32_t k = 0; k < sp->nsent && !inflight; k++) inflight = quic__sent_at(sp, k)->ack_eliciting && !quic__sent_at(sp, k)->acked;
+    for (uint32_t k = 0; k < sp->nsent && !inflight; k++)
+      inflight = quic__sent_at(sp, k)->ack_eliciting && !quic__sent_at(sp, k)->acked;
     if (inflight && sp->last_ack_eliciting_at + quic__pto(c, i) <= now) {
       c->pto_count++, c->probes_due = 2;
       /* resend what is outstanding in that space as the probe's payload */
