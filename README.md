@@ -14,14 +14,12 @@ This repository holds three single-header parsers plus a learning mode:
 - **[`fbparse.h`](include/fbparse.h)**, a general parser with picohttpparser's API and exactly its results.
 - **[`batchparse.h`](include/batchparse.h)**, which parses many connections' requests in one lane-parallel call.
 
-**Why it exists.** It was written for [cursed-http](https://github.com/public/cursed-http), an entry in the
-[$12 server challenge](https://github.com/arjaythedev/twelve-dollar-server-challenge), where one vCPU serves a small
-JSON API and every nanosecond per request counts. A server that knows its own routes doesn't need a general parser on
-the hot path, so fastparse.h matches the API's request lines directly and leaves everything else to fbparse.h. This
-repository is that server's parser, extracted with its tests and benchmarks.
+**Why it exists.** A server that knows its own routes doesn't need a general parser on the hot path. fastparse.h
+matches the API's request lines directly, pulls out the few things the handler needs, and passes anything unusual
+to fbparse.h, a general parser that gives picohttpparser's exact results, faster. batchparse.h goes one step further
+for event loops that wake up with many connections ready: one call parses a request from each of them.
 
-**Status.** Its one user so far is cursed-http, which the challenge's organisers scored at 275,000 simulated users.
-The parsers are complete for HTTP/1.1 requests and tested on x86-64 (AVX2, AVX-512) and AArch64 (NEON). There are no
+**Status.** The parsers are complete for HTTP/1.1 requests and tested on x86-64 (AVX2, AVX-512) and AArch64 (NEON). There are no
 tagged releases yet; `main` is the current version. It has not had an external security review (see
 [SECURITY.md](SECURITY.md)).
 
@@ -77,7 +75,7 @@ fastparse on every request before it's timed.
 **General traffic** (fbparse.h against the general parsers, +logic):
 
 | corpus | **fbparse.h** | lightning | picohttpparser | httparse ¹ | llhttp | hparse ¹ | fasthttp ² | http-parser |
-|---|---|---|---|---|---|---|---|
+|---|---|---|---|---|---|---|---|---|
 | curl (181 B) | **95.1** | 113.9 | 123.9 | 177.1 | 319.2 | 157.4 | 485.1 | 614.3 |
 | Chrome (1,040 B) | **326.1** | 408.1 | 444.8 | 760.2 | 1,083.9 | 716.6 | 1,546.8 | 2,974.3 |
 | Firefox (813 B) | **292.8** | 364.0 | 394.3 | 654.2 | 943.0 | 572.5 | 1,365.9 | 2,433.6 |
@@ -99,8 +97,8 @@ On an Apple M5 Pro, fbparse.h is the fastest general parser on every corpus, raw
 two Armv8-A NEON forks of it, lightning, llhttp, uWebSockets and http-parser. fastparse.h does the API mix in 14.2 ns,
 against 40.5 for the best general parser.
 
-¹ hparse needs Zig 0.15, which the Xeon box doesn't have, so its numbers are from an earlier run of the same harness.
-httparse is from a separate Xeon run with the box's rustc 1.94.0. It was built like its own bench profile plus
+¹ hparse needs Zig 0.15, which the Xeon test machine doesn't have, so its numbers are from an earlier run of the same harness.
+httparse is from a separate Xeon run with that machine's rustc 1.94.0. It was built like its own bench profile plus
 `target-cpu=native`, so its compile-time AVX2 path is on, and it passed the same correctness gate. Its vs-fbparse
 row uses the same layout-randomised pairs, 8 layouts × 2 rounds.
 ² fasthttp is Go. It is measured by its own harness on the same request bytes (`make compare-go`): it parses with
@@ -712,7 +710,8 @@ The 7 inputs accepted against some reference's rejection don't affect framing or
 - **The API corpus** is 4,096 requests in a read-heavy mix: 46% `GET /feed`, 46% `GET /posts/:id`, 7% `POST like`,
   1% `POST /posts`, the POSTs with a ~150-byte JWT.
   - It is formatted the way a minimal Go load generator writes requests, with `Accept-Encoding: gzip`: the
-    "gocli -gzip" corpus. k6's format gives the same ordering.
+    "gocli -gzip" corpus. The same requests as the k6 load-testing tool formats them (the "k6" corpus) give the same
+    ordering.
 - **The general corpora** are 512 requests per shape: curl, Chrome, Firefox, HTTP/1.0, 2–20 KB heads with big
   cookies ("long headers"), chunked POSTs, and odd but valid shapes.
 - **Raw and +logic.** General parsers are measured two ways:
