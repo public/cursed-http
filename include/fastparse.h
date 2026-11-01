@@ -1152,12 +1152,13 @@ FP_INLINE uint64_t fp_tm_tick(void) {
 FP_INLINE uint64_t fp_tm_tick(void) { return 0; }
 #endif
 // constant compare (accumulated; nonzero = mismatch) and slot scan, per backend
+#define FP_TM_256 (FP_BACKEND == 2 || FP_BACKEND == 3) // 256-bit vectors; the SSE2 baseline (4) takes the scalar code
 static const unsigned char fp_tm_win[64] = {
   255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
   255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255
 }; // + 32 zeros: mask of n bytes at 32 - n
 typedef struct {
-#if FP_BACKEND >= 2
+#if FP_TM_256
   __m256i v;
 #elif FP_BACKEND == 1
   uint8x16_t v;
@@ -1165,7 +1166,7 @@ typedef struct {
   uint64_t s;
 } fp_tmacc_t;
 FP_INLINE void fp_tm_init(int simd, fp_tmacc_t *a) {
-#if FP_BACKEND >= 2
+#if FP_TM_256
   if (simd) {
     a->v = _mm256_setzero_si256();
     return;
@@ -1181,7 +1182,7 @@ FP_INLINE void fp_tm_init(int simd, fp_tmacc_t *a) {
 }
 // bytes [0, n) of p against t (t readable to n rounded up to 32; p readable to n + 31); n >= 1
 FP_INLINE void fp_tm_cmp(int simd, fp_tmacc_t *a, const char *p, const unsigned char *t, int n) {
-#if FP_BACKEND >= 2
+#if FP_TM_256
   if (simd) {
 #define FP_X(o)                                                                                                        \
   _mm256_xor_si256(_mm256_loadu_si256((const void *)(p + (o))), _mm256_loadu_si256((const void *)(t + (o))))
@@ -1224,7 +1225,7 @@ FP_INLINE void fp_tm_cmp(int simd, fp_tmacc_t *a, const char *p, const unsigned 
   a->s |= fp_ld64(p + n - 8) ^ tl;
 }
 FP_INLINE int fp_tm_bad(int simd, const fp_tmacc_t *a) {
-#if FP_BACKEND >= 2
+#if FP_TM_256
   if (simd) return !_mm256_testz_si256(a->v, a->v);
 #elif FP_BACKEND == 1
   if (simd) return vmaxvq_u8(a->v) != 0;
@@ -1234,7 +1235,7 @@ FP_INLINE int fp_tm_bad(int simd, const fp_tmacc_t *a) {
 }
 // first byte at index >= p (and < lim) that is CR or LF (or SP: path), or -1
 FP_INLINE int fp_tm_scan(int simd, const char *b, int p, int lim, const int path) {
-#if FP_BACKEND >= 2
+#if FP_TM_256
   if (simd) {
     const __m256i CR = _mm256_set1_epi8('\r'), LF = _mm256_set1_epi8('\n'), SP = _mm256_set1_epi8(' ');
     for (; p < lim; p += 32) {
@@ -1281,7 +1282,7 @@ FP_INLINE int fp_tm_scan(int simd, const char *b, int p, int lim, const int path
 // general parser falls back on whatever the headers (l0 < 16, see fp_reqline): leave it to that parser.
 FP_INLINE int fp_tm_rl(int simd, const char *b, int lim, int *me, int *pe) {
   int x, y;
-#if FP_BACKEND >= 2
+#if FP_TM_256
   if (simd && lim >= 32) { // both ends from one mask when the request line's start fits in 32 bytes
     __m256i v = _mm256_loadu_si256((const void *)b);
     uint32_t m = (uint32_t)_mm256_movemask_epi8(_mm256_or_si256(
