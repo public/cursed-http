@@ -588,13 +588,17 @@ typedef struct {
   uint64_t off;
   int fin;
 } sbuf;
-static sbuf SB[600];
-static int NSB;
+/* per-stream receive buffers, found by stream id as a transport's stream table would (a client's
+ * request streams 0, 4, 8, ... and its unidirectional streams 2, 6, 10, ...); NSB bumps a
+ * generation so each connection starts with empty buffers that keep their memory */
+static sbuf SB[2 * R + 8];
+static int64_t SBGEN[2 * R + 8];
+static int64_t NSB;
 static sbuf *sb_get(int64_t id) {
-  for (int i = 0; i < NSB; i++)
-    if (SB[i].id == id) return &SB[i];
-  SB[NSB] = (sbuf){ id, SB[NSB].p, 0, SB[NSB].cap, 0, 0 }; /* keep the buffer across connections */
-  return &SB[NSB++];
+  size_t i = (size_t)(id >> 2) * 2 + ((id & 2) != 0);
+  if (i >= sizeof SB / sizeof SB[0]) exit(29);
+  if (SBGEN[i] != NSB + 1) SBGEN[i] = NSB + 1, SB[i] = (sbuf){ id, SB[i].p, 0, SB[i].cap, 0, 0 };
+  return &SB[i];
 }
 static void sb_put(sbuf *b, const uint8_t *d, size_t n) {
   if (b->n + n > b->cap) b->cap = (b->n + n) * 2 + 4096, b->p = realloc(b->p, b->cap);
@@ -654,7 +658,7 @@ static int rec_data(nghttp3_conn *c, int64_t sid, const uint8_t *d, size_t n, vo
 static void record_h3(int s) {
   static h3_conn S;
   h3_init(&S, &H3CB, NULL, 3, 7, 11);
-  NSB = 0, REC_ENDED = 0;
+  NSB++, REC_ENDED = 0;
   nghttp3_callbacks cb = { 0 };
   cb.end_stream = rec_end, cb.recv_data = rec_data;
   nghttp3_settings st;
@@ -708,7 +712,7 @@ static double h3_ours(int s) {
   static h3_conn S;
   double best = 1e18;
   for (int p = 0; p < PASSES / 4 + 1; p++) {
-    H3_DONE = 0, NSB = 0;
+    H3_DONE = 0, NSB++;
     double t0 = now_ns();
     h3_init(&S, &H3CB, NULL, 3, 7, 11);
     for (int i = 0; i < H3N[s]; i++) {
@@ -844,9 +848,14 @@ int main(int argc, char **argv) {
     return 0;
   }
   if (argc > 1) PASSES = atoi(argv[1]);
-  if (argc > 2) { /* profile one piece: ./bench_h2h3 passes h2|n2 */
-    build_sets(), record_client(0);
-    printf("%s: %.0f ns/request\n", argv[2], !strcmp(argv[2], "h2") ? h2_ours(0) : h2_n2(0));
+  if (argc > 2) { /* profile one piece: ./bench_h2h3 passes h2|n2|h3|n3 [set] */
+    int set = argc > 3 ? atoi(argv[3]) : 0, h3 = argv[2][1] == '3';
+    build_sets(), h3 ? record_h3(set) : record_client(set);
+    double t = !strcmp(argv[2], "h2")   ? h2_ours(set)
+               : !strcmp(argv[2], "n2") ? h2_n2(set)
+               : !strcmp(argv[2], "h3") ? h3_ours(set)
+                                        : h3_n3(set);
+    printf("%s %s: %.0f ns/request\n", argv[2], L[set], t);
     return 0;
   }
   build_sets();
