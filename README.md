@@ -6,9 +6,10 @@
 *Formerly cursed-http-parser. Links to the old name redirect here.*
 
 Fast HTTP/1.1 request parsers in C, built on SIMD bitmasks (AVX2, AVX-512, NEON, with a scalar fallback).
-They are header-only, stateless and never allocate.
+They are header-only, stateless and never allocate. Alongside them are header-only, sans-IO **HTTP/2, HTTP/3
+and QUIC** server engines ([below](#http2-http3-and-quic)).
 
-This repository holds three single-header parsers plus a learning mode:
+This repository holds three single-header HTTP/1.1 parsers plus a learning mode:
 - **[`fastparse.h`](include/fastparse.h)**, a fast path for *your* API. Its routes are generated from a JSON spec,
   and it hands back the route, the numeric id, the `Bearer` token and the body framing directly.
 - **`fast_parse_learn()`**, the learning mode of fastparse.h. It learns each route's most common header layout at
@@ -21,7 +22,8 @@ matches the API's request lines directly, pulls out the few things the handler n
 to fbparse.h, a general parser that gives picohttpparser's exact results, faster. batchparse.h goes one step further
 for event loops that wake up with many connections ready: one call parses a request from each of them.
 
-**Status.** The parsers are complete for HTTP/1.1 requests and tested on x86-64 (AVX2, AVX-512) and AArch64 (NEON). There are no
+**Status.** The parsers are complete for HTTP/1.1 requests and tested on x86-64 (AVX2, AVX-512) and AArch64 (NEON).
+The HTTP/2, HTTP/3 and QUIC engines are newer: server side only, with the limits listed in [H2H3.md](H2H3.md). There are no
 tagged releases yet; `main` is the current version. It has not had an external security review (see
 [SECURITY.md](SECURITY.md)).
 
@@ -130,6 +132,49 @@ make compare-go
 ```
 
 The full tables and the method are under [Benchmarks](#benchmarks).
+
+## HTTP/2, HTTP/3 and QUIC
+
+Server-side engines in the same style: header-only, sans-IO (bytes in, events out, bytes to send), and the
+caller owns the memory. They bring no sockets or event loop; you feed them what you read and write out what
+they produce. The full design, test list, limits and benchmarks are in **[H2H3.md](H2H3.md)**.
+
+| header | what |
+|---|---|
+| [`hfield.h`](include/hfield.h) | SIMD header-field validation (AVX-512, AVX2, NEON, SWAR), the Huffman codec, branchless QUIC varints |
+| [`hpack.h`](include/hpack.h) | HPACK (RFC 7541) decoder with a dynamic table; static-only response encoder |
+| [`hreq.h`](include/hreq.h) | request header rules shared by HTTP/2 and HTTP/3 |
+| [`h2.h`](include/h2.h) | HTTP/2 server connection (RFC 9113): flow control, trailers, zero-copy bodies, backpressure |
+| [`qpack.h`](include/qpack.h) | QPACK (RFC 9204) decoder with a dynamic table; static-only response encoder |
+| [`h3.h`](include/h3.h) | HTTP/3 server (RFC 9114) over abstract QUIC streams, so it runs on any QUIC stack |
+| [`qhp.h`](include/qhp.h) | batched QUIC header-protection masks (AES-NI, ARMv8 AES, ChaCha20 AVX2/NEON) |
+| [`quic.h`](include/quic.h) | QUIC v1 server transport (RFC 9000/9001/9002); TLS 1.3 via [picotls](https://github.com/h2o/picotls) + OpenSSL libcrypto |
+
+Everything but `quic.h` is dependency-free and never allocates. `quic.h` grows stream buffers through a
+caller-supplied allocator.
+
+**Fast.** On the Xeon, `h2.h` uses 3.5–4.9× less CPU per request than an nghttp2 server, in memory (browser
+request: 2,337 → 525 ns). HPACK decoding is 1.8–2.3× faster than nghttp2's, QPACK 1.4–2.5× faster than nghttp3's.
+The main reason: each header is validated once, when it enters the dynamic table, and the verdict is cached.
+nghttp2 and nghttp3 re-check every byte of every header on every request.
+
+**Tested** against the reference implementations and real clients:
+- h2spec strict mode, 147/147;
+- the RFC 7541, 9204 and 9001 examples;
+- differential runs against nghttp2, nghttp3 and an ngtcp2 client over a simulated lossy, reordering network;
+- curl (HTTP/2) and aioquic (HTTP/3) against the example servers over real sockets;
+- planted bugs, and ASan/UBSan.
+
+Not formally verified, and not yet interop-tested against browsers.
+
+Runnable servers: [`examples/h2_server.c`](examples/h2_server.c) (HTTP/2 over TCP, h2c) and
+[`examples/h3_server.c`](examples/h3_server.c) (HTTP/3 over UDP).
+
+```bash
+scripts/fetch-thirdparty.sh nghttp2 nghttp3 h2spec picotls ngtcp2
+make test-h2h3      # every HTTP/2 / HTTP/3 / QUIC test
+make real-clients   # curl and aioquic against the example servers
+```
 
 ## Usage
 
@@ -251,6 +296,7 @@ make bench
 
 ## Contents
 
+- [HTTP/2, HTTP/3 and QUIC](#http2-http3-and-quic) (details in [H2H3.md](H2H3.md))
 - [Why it's fast](#why-its-fast)
 - [API](#api)
 - [The spec and the generator](#the-spec-and-the-generator)
@@ -554,6 +600,12 @@ make conformance  # 298 third-party conformance cases x every truncation (llhttp
 make compare-all  # + uWebSockets, lightning, http-parser, pico Armv8-A forks, httparse, hparse
 make compare-go   # + fasthttp (Go >= 1.26) on the same corpora
 make extras-check # both, as quick correctness gates (CI / Docker)
+
+# HTTP/2, HTTP/3, QUIC (after scripts/fetch-thirdparty.sh nghttp2 nghttp3 h2spec picotls ngtcp2; see H2H3.md)
+make test-h2h3    # HPACK, h2, QPACK, h3 and QUIC tests, differential against nghttp2 / nghttp3 / ngtcp2
+make h2spec       # HTTP/2 conformance (Go)
+make real-clients # curl over HTTP/2 and aioquic over HTTP/3, against the example servers
+make mutants-h2 mutants-quic
 ```
 
 Linux in Docker, from any host:
@@ -941,6 +993,9 @@ hardware.
 
 ## Limits and semantic differences
 
+These are the HTTP/1.1 parsers' limits. For HTTP/2, HTTP/3 and QUIC, see
+[H2H3.md](H2H3.md#status-what-is-tested-what-is-not).
+
 fastparse.h is deliberately partial: what it doesn't check, it either ignores safely or declines with
 `FP_FALLBACK`.
 
@@ -1008,6 +1063,13 @@ This project builds on, and is measured against:
   [softwaredc/lightning](https://github.com/softwaredc/lightning), [valyala/fasthttp](https://github.com/valyala/fasthttp)
   and [volyrique's Armv8-A picohttpparser branches](https://github.com/volyrique/picohttpparser): comparison and
   conformance references
+* [nghttp2](https://github.com/nghttp2/nghttp2), [nghttp3](https://github.com/ngtcp2/nghttp3) and
+  [ngtcp2](https://github.com/ngtcp2/ngtcp2): the HTTP/2, HTTP/3 and QUIC references the differential tests
+  compare against; [h2spec](https://github.com/summerwind/h2spec) and
+  [aioquic](https://github.com/aiortc/aioquic): conformance and real-client tests
+* [h2o/picotls](https://github.com/h2o/picotls): the TLS 1.3 handshake under `quic.h`; and
+  [h2o](https://github.com/h2o/h2o) and [HAProxy](https://www.haproxy.org/), whose validate-once and
+  one-block dynamic-table designs the HPACK and QPACK code borrows
 * [narfindustries/http-garden](https://github.com/narfindustries/http-garden): request-smuggling payloads that
   found real framing bugs here
 * Http11Probe (Diogo Martins, MIT): the HTTP/1.1 conformance probe whose request shapes `tests/probe_cases.h`
