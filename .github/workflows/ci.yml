@@ -12,7 +12,7 @@ jobs:
             cc: gcc
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: make CC=${{ matrix.cc }} test-quick
       - if: runner.os == 'Linux'
         run: make CC=${{ matrix.cc }} asan
@@ -26,6 +26,6 @@ jobs:
   lint:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - run: docker build -q -t lint -f ci/lint.Dockerfile ci
       - run: docker run --rm -e LINT_LOCAL=1 -v "$PWD":/r -w /r lint bash scripts/lint.sh
