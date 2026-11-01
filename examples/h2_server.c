@@ -1,6 +1,7 @@
 /* examples/h2_server.c: a minimal HTTP/2 (h2c, prior knowledge) server on include/h2.h, for h2spec
  * and manual testing. One thread, poll(), one h2_conn per connection.
- *   ./h2_server [port]          GET anything -> 200 "hello, world\n"; POST -> 200 with the body length
+ *   ./h2_server [port]          GET /big/N -> N bytes; GET anything else -> 200 "hello, world\n";
+ *                               POST -> 200 with the body length
  * Not a production server: no TLS, no timeouts, connections are malloc'd. */
 #include <errno.h>
 #include <fcntl.h>
@@ -27,12 +28,21 @@ typedef struct {
 static conn *C[MAXC];
 static h2_scratch SC;
 
+/* GET /big/N: N bytes (N <= 1 MiB), for responses spanning many frames or packets */
+static uint8_t BIG[1 << 20];
+static size_t big_len(const uint8_t *path, uint32_t len) {
+  if (len < 6 || memcmp(path, "/big/", 5)) return SIZE_MAX;
+  size_t n = 0;
+  for (uint32_t i = 5; i < len && path[i] >= '0' && path[i] <= '9'; i++) n = n * 10 + (size_t)(path[i] - '0');
+  return n > sizeof BIG ? sizeof BIG : n;
+}
 static int on_request(h2_conn *h, uint32_t sid, const h2_request *rq, int end, void *u) {
   conn *c = u;
   static const hp_field ct = { (const uint8_t *)"content-type", (const uint8_t *)"text/plain", 12, 10, 0, 0, 0, 0 };
   c->body[(sid / 2) % 2048] = 0;
+  size_t big = big_len(rq->path, rq->path_len);
+  if (end && big != SIZE_MAX) return h2_respond(h, sid, 200, &ct, 1, BIG, big, 1) < 0;
   if (end) return h2_respond(h, sid, 200, &ct, 1, (const uint8_t *)"hello, world\n", 13, 1) < 0;
-  (void)rq;
   return 0;
 }
 static int on_data(h2_conn *h, uint32_t sid, const uint8_t *d, size_t n, int end, void *u) {
@@ -78,6 +88,7 @@ static int flush(conn *c) {
 
 int main(int argc, char **argv) {
   int port = argc > 1 ? atoi(argv[1]) : 8080, one = 1;
+  memset(BIG, 'x', sizeof BIG);
   signal(SIGPIPE, SIG_IGN);
   int ls = socket(AF_INET, SOCK_STREAM, 0);
   setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);

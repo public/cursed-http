@@ -1,6 +1,7 @@
 /* examples/h3_server.c: a minimal HTTP/3 server on include/quic.h + include/h3.h over UDP.
  * One thread, poll(), up to 64 connections found by our connection ID.
- *   ./h3_server cert.pem key.pem [port]     GET anything -> 200 "hello, world\n"
+ *   ./h3_server cert.pem key.pem [port]     GET /big/N -> N bytes; GET anything else -> "hello, world\n";
+ *                                           POST -> "ok\n"
  * Not a production server: no Retry/address validation tokens, no connection ID rotation,
  * connections are malloc'd. Build: see mk/h2h3.mk (needs picotls + OpenSSL libcrypto). */
 #include <errno.h>
@@ -34,9 +35,19 @@ static int64_t now_ms(void) {
   return (int64_t)t.tv_sec * 1000 + t.tv_nsec / 1000000;
 }
 
+/* GET /big/N: N bytes (N <= 1 MiB), for responses spanning many frames or packets */
+static uint8_t BIG[1 << 20];
+static size_t big_len(const uint8_t *path, uint32_t len) {
+  if (len < 6 || memcmp(path, "/big/", 5)) return SIZE_MAX;
+  size_t n = 0;
+  for (uint32_t i = 5; i < len && path[i] >= '0' && path[i] <= '9'; i++) n = n * 10 + (size_t)(path[i] - '0');
+  return n > sizeof BIG ? sizeof BIG : n;
+}
 static int on_request(h3_conn *h, uint64_t sid, const h_request *rq, int end, void *u) {
-  (void)rq, (void)u;
+  (void)u;
   static const hp_field ct = { (const uint8_t *)"content-type", (const uint8_t *)"text/plain", 12, 10, 0, 0, 0, 0 };
+  size_t big = big_len(rq->path, rq->path_len);
+  if (end && big != SIZE_MAX) return h3_respond(h, sid, 200, &ct, 1, BIG, big, 1) < 0;
   return end ? h3_respond(h, sid, 200, &ct, 1, (const uint8_t *)"hello, world\n", 13, 1) < 0 : 0;
 }
 static int on_data(h3_conn *h, uint64_t sid, const uint8_t *d, size_t n, int end, void *u) {
@@ -104,6 +115,7 @@ int main(int argc, char **argv) {
     return 1;
   }
   int port = argc > 3 ? atoi(argv[3]) : 4433;
+  memset(BIG, 'x', sizeof BIG);
   static ptls_context_t tls;
   static ptls_openssl_sign_certificate_t sign;
   tls.random_bytes = ptls_openssl_random_bytes, tls.get_time = &ptls_get_time;

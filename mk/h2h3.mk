@@ -121,3 +121,8 @@ $(H2B)/h3_server: examples/h3_server.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls
 
 $(H2B)/bench_h2h3: bench/bench_h2h3.c bench/h2_headers.h $(H2HDRS) $(H2B)/libnghttp2.a $(H2B)/libnghttp3.a
 	$(H2CC) -Ibench -DH2_MAX_STREAMS=1000 $(N2INC) $(N3INC) $< $(H2B)/libnghttp2.a $(H2B)/libnghttp3.a -o $@
+
+# the example servers against real clients (curl over HTTP/2, aioquic over HTTP/3), loopback sockets
+real-clients:
+	bash tests/real_clients.sh
+.PHONY: real-clients

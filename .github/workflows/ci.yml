@@ -29,3 +29,16 @@ jobs:
       - uses: actions/checkout@v4
       - run: docker build -q -t lint -f ci/lint.Dockerfile ci
       - run: docker run --rm -e LINT_LOCAL=1 -v "$PWD":/r -w /r lint bash scripts/lint.sh
+
+  h2h3:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libssl-dev openssl curl python3-venv
+      - run: scripts/fetch-thirdparty.sh nghttp2 nghttp3 h2spec picotls ngtcp2
+      - run: make test-h2h3
+      - run: make h2spec
+      - run: make real-clients
