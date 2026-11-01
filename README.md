@@ -358,6 +358,8 @@ fp_batch_t fast_parse_many_learn(const char *buf, int len, req_t *out, int max, 
 fp_tmpl_t X = {0};                                     // ~50 KB, one per thread, zero-initialised
 int fast_parse_tmpl(const char *buf, int len, req_t *r, fp_tmpl_t *X);     // same results as fast_parse
 fp_batch_t fast_parse_many_tmpl(const char *buf, int len, req_t *out, int max, fp_tmpl_t *X);
+void fp_tmpl_mode(fp_tmpl_t *X, int mode);   // FP_TM_AUTO (default), FP_TM_ALWAYS or FP_TM_OFF
+int fp_tmpl_seed(fp_tmpl_t *X, const char *buf, int len, int pin);   // learn from sample requests; pin: never evict
 ```
 
 `FP_FALLBACK` is always safe: hand the bytes to a full parser (`fb_parse_req`) or answer 400.
@@ -379,9 +381,14 @@ HAProxy), where the request lines and headers are whatever clients send.
   routes that ask for the spec's headers decline (the general parser fills `hdr`). This is argued and tested
   (differential suite, direct tries of every learned template, a slot fuzzer, the libFuzzer/Hypothesis oracle, the
   conformance suites), not formally verified.
-- **A cost model** keeps it from losing: every 8th window of 1,024 requests, a 16-request burst times both paths on
-  the same bytes (TSC on x86, `cntvct_el0` on arm64; `-DFP_TM_NOCOST` turns it off). A template more than 12.5%
-  slower than `fast_parse` is switched off; the table bypasses itself while it saves nothing.
+- **A cost model**, from counters only (no clock), keeps it from losing. The table bypasses itself while failed
+  template tries plus misses exceed ~1 per request (`FP_TM_COST`). That ratio is calibrated on a Xeon: a hit costs
+  ~0.8 of `fast_parse`, a failed try ~0.2. While bypassed, a probe of 64 requests every 1–8 windows keeps the counters
+  and the learning current. `-DFP_TM_NOCOST` turns it off.
+- **Caller hints**, for traffic you know: `fp_tmpl_mode` with `FP_TM_ALWAYS` (a few request shapes, e.g. one
+  API's clients) or `FP_TM_OFF`. `fp_tmpl_seed` takes sample requests back to back, with at least two of each shape,
+  so the table hits from the first live request; with `pin = 1` those templates are never evicted. Seeded templates
+  are learned and checked like any other.
 - **Status:** in development. Xeon numbers and the verdict are in the pull request that adds it.
 
 ### fbparse.h

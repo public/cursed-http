@@ -816,6 +816,62 @@ int main(int argc, char **argv) {
           FAIL("CONNECTION line became a slot (template %d line %d)\n", i, k);
     printf("Connection variants: %ld template results, all identical to fast_parse; %d templates\n", claimed, XC.n);
   }
+  // 3g. caller hints: fp_tmpl_mode (OFF never hits, ALWAYS never bypasses) and fp_tmpl_seed (templates before
+  // any traffic; pinned ones survive other traffic); every result checked against fast_parse
+  {
+    static fp_tmpl_t XM[3], XP;
+    static char rq[2048 + PAD], sb[512 * 1100 + PAD];
+    long hits[3] = { 0 }, bypassed = 0;
+    for (int m = 0; m < 3; m++) {
+      memset(&XM[m], 0, sizeof XM[m]);
+      fp_tmpl_mode(&XM[m], m);
+    }
+    for (int i = 0; i < 20000 / Q; i++) {
+      int l = gen(rq, 4);
+      memset(rq + l, 0x5a, PAD);
+      req_t f, x;
+      int a = P_fast(rq, l, &f);
+      for (int m = 0; m < 3; m++) {
+        long h = (long)XM[m].hits;
+        int c = fast_parse_tmpl(rq, l, &x, &XM[m]);
+        hits[m] += (long)XM[m].hits - h;
+        if (!same(a, &f, c, &x) || (a > 0 && f.id != x.id))
+          FAIL("MODE MISMATCH mode %d req %d: fast=%d tmpl=%d\n", m, i, a, c);
+      }
+      bypassed += XM[FP_TM_ALWAYS].bypass;
+    }
+    if (hits[FP_TM_OFF] || bypassed || !hits[FP_TM_ALWAYS])
+      FAIL("MODES: off hit %ld times, always bypassed %ld times, always hit %ld\n", hits[FP_TM_OFF], bypassed,
+           hits[FP_TM_ALWAYS]);
+    printf("modes on proxy traffic: auto %ld hits (bypass %d), always %ld, off %ld\n", hits[0], XM[0].bypass, hits[1],
+           hits[2]);
+    int u = 0;
+    for (int i = 0; i < 512; i++) u += gen(sb + u, 1); // 512 mload -gzip requests, back to back
+    memset(sb + u, 0x5a, PAD);
+    memset(&XP, 0, sizeof XP);
+    int nt = fp_tmpl_seed(&XP, sb, u, 1), npin = 0;
+    for (int i = 0; i < XP.n; i++) npin += XP.t[i].pin;
+    long h0 = (long)XP.hits;
+    int first = -1;
+    for (int ph = 0; ph < 2; ph++)
+      for (int i = 0; i < 6000; i++) { // mload -gzip (seeded), then proxy (can't evict the pins)
+        int l = gen(rq, ph ? 4 : 1);
+        memset(rq + l, 0x5a, PAD);
+        req_t f, x;
+        int a = P_fast(rq, l, &f), c = fast_parse_tmpl(rq, l, &x, &XP);
+        if (!same(a, &f, c, &x) || (a > 0 && f.id != x.id))
+          FAIL("SEED MISMATCH phase %d req %d: fast=%d tmpl=%d\n", ph, i, a, c);
+        if (ph == 0 && first < 0 && XP.hits > (uint64_t)h0) first = i;
+      }
+    int still = 0;
+    for (int i = 0; i < XP.n; i++) still += XP.t[i].pin;
+    if (!nt || npin != nt || still != npin || first != 0)
+      FAIL("SEED: %d templates, %d pinned, %d pinned after proxy traffic, first hit at request %d\n", nt, npin, still,
+           first);
+    printf(
+        "seeded from 512 requests: %d templates, all pinned; first request hit; %d still pinned after 6000 proxy requests\n",
+        nt, still);
+  }
   printf("TOTAL FAILURES: %d\n", fails);
   if (!bench) return fails != 0;
 

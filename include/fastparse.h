@@ -1115,9 +1115,8 @@ typedef struct {
   uint8_t cl_seg, au_seg;
   int8_t cl_slot, au_slot; // line start = segment base + *_s; end = slot end, or base + *_e
   uint16_t cl_s, cl_e, au_s, au_e;
-  uint32_t hits, whits; // all-time (halved per window) and this window's
-  uint32_t cy_t, cy_g, ns;
-  uint8_t slow; // cost samples: try loop vs general parser (cycles, decayed); slow = not tried
+  uint32_t hits, whits;                                             // all-time (halved per window) and this window's
+  uint8_t pin;                                                      // never evicted (fp_tmpl_seed)
   _Alignas(64) unsigned char cb[FP_TM_CB + 32 * (FP_TM_SLOTS + 2)]; // constants, each segment padded to 32 bytes
   // cold: the representative request and its slots, for relearning
   int hend, nl, pe; // pe: end of the path
@@ -1132,24 +1131,17 @@ typedef struct {
   int n, npend; // ord: templates in the order they are tried
   int wreq, whit, bypass, cool, backoff;
   unsigned pnext, sctr, nwin;
-  int64_t save;
-  int nsave; // cost samples: sum of (general parser - template path) cycles, decayed
-  uint64_t hits, misses, learned, generalized, evicted;
+  int mode, stale, pint, hold;
+  uint32_t wtp, acost, atp;           // mode: FP_TM_AUTO/ALWAYS/OFF; cost model counters (fp_tm_window)
+  uint64_t tries0, misses0, learned0; // tries, misses and templates learned at the window's start
+  uint64_t hits, misses, learned, generalized, evicted, tries; // tries: failed template tries
 } fp_tmpl_t; // zero-init; meant to be one per server thread (size: see RESULTS.md)
 
-// Cycle counter for the cost samples (any monotonic tick works: only ratios of sums are used). Without
-// one (-DFP_TM_NOCOST, or an unknown target) templates are always tried.
-#if !defined(FP_TM_NOCOST) && (defined(__x86_64__) || defined(__i386__))
-FP_INLINE uint64_t fp_tm_tick(void) { return __builtin_ia32_rdtsc(); } // no header: avx512_emu.h stays usable
-#elif !defined(FP_TM_NOCOST) && defined(__aarch64__)
-FP_INLINE uint64_t fp_tm_tick(void) {
-  uint64_t t;
-  __asm__ volatile("mrs %0, cntvct_el0" : "=r"(t));
-  return t;
-}
-#else
-#define FP_TM_NOTICK 1
-FP_INLINE uint64_t fp_tm_tick(void) { return 0; }
+#define FP_TM_AUTO   0 // fp_tmpl_t.mode: templates while they pay (the cost model below), the default
+#define FP_TM_ALWAYS 1 // always try templates (traffic known to be a few request shapes)
+#define FP_TM_OFF    2 // never: the general parser only, nothing learned
+#ifndef FP_TM_COST     // bypass while failed tries + misses exceed this per request (x16)
+#define FP_TM_COST 16
 #endif
 // constant compare (accumulated; nonzero = mismatch) and slot scan, per backend
 #define FP_TM_256 (FP_BACKEND == 2 || FP_BACKEND == 3) // 256-bit vectors; the SSE2 baseline (4) takes the scalar code
@@ -1504,7 +1496,10 @@ __attribute__((noinline, cold)) static void fp_tm_learn(fp_tmpl_t *X, const char
       slot = X->n;
       X->ord[X->n++] = (uint8_t)slot;
     } else {
-      int wt = X->ord[X->n - 1];
+      int k = X->n - 1;
+      while (k >= 0 && X->t[X->ord[k]].pin) k--; // the least hit unpinned template
+      if (k < 0) return;
+      int wt = X->ord[k];
       if (X->t[wt].whits * 16 > (uint32_t)X->whit + 16) return;
       slot = wt;
       X->evicted++;
@@ -1512,6 +1507,7 @@ __attribute__((noinline, cold)) static void fp_tm_learn(fp_tmpl_t *X, const char
     }
     P->hits = 0;
     P->whits = 0;
+    P->pin = 0;
     X->t[slot] = *P;
     X->learned++;
     *P = X->pend[--X->npend];
@@ -1523,7 +1519,8 @@ __attribute__((noinline, cold)) static void fp_tm_learn(fp_tmpl_t *X, const char
 }
 // end of a window of 1024 requests: reorder by hits, decay, and stop trying while templates don't pay
 __attribute__((noinline, cold)) static void fp_tm_window(fp_tmpl_t *X) {
-  for (int i = 1; i < X->n; i++) // insertion sort by this window's hits, then all-time hits
+  for (int i = 1; i < X->n && X->wtp;
+       i++) // insertion sort by this window's hits, then all-time hits (bypassed: probe windows only)
     for (int j = i; j > 0; j--) {
       const fp_tm_t *a = &X->t[X->ord[j - 1]], *c = &X->t[X->ord[j]];
       if (c->whits < a->whits || (c->whits == a->whits && c->hits <= a->hits)) break;
@@ -1531,31 +1528,55 @@ __attribute__((noinline, cold)) static void fp_tm_window(fp_tmpl_t *X) {
       X->ord[j] = X->ord[j - 1];
       X->ord[j - 1] = o;
     }
-  // Cost (sampled requests, see fp_core_tmpl): templates whose hits take more cycles than the general
-  // parser are switched off; the table bypasses while the template path saves nothing per request
-  // (a miss costs the failed loop). Sampling continues during bypass, so it ends when that changes.
-  for (int i = 0; i < X->n; i++) {
+  for (int i = 0; i < X->n && X->wtp; i++) {
     fp_tm_t *T = &X->t[i];
-    if (T->ns >= 16 && T->cy_t > T->cy_g + T->cy_g / 8) T->slow = 1; // > 12.5% slower than the general parser
     T->hits = (T->hits >> 1) + T->whits;
     T->whits = 0;
   }
-  if (++X->nwin % 64 == 0) // every 64 windows: measure the switched-off ones afresh
-    for (int i = 0; i < X->n; i++)
-      if (X->t[i].slow) {
-        X->t[i].slow = 0;
-        X->t[i].ns = X->t[i].cy_t = X->t[i].cy_g = 0;
+  // Cost model, from counters only (no clock): on the Xeon a template hit costs ~0.8 of the general parser,
+  // a failed try ~0.2 and a miss the general parser plus its tries (RESULTS.md), so the template path pays
+  // while failed tries + misses stay under ~1 per request (FP_TM_COST / 16). Bypass when both the decayed
+  // history and this window are over it, except in up to 2 windows in a row that learned a template (the
+  // misses that taught it may be transient). While bypassed, the first 64 requests of a probe window take the template
+  // path to keep the counters and learning current: every window right after the switch, then every 2nd,
+  // 4th, 8th while probes confirm it, and every window while stale (under 1/4 hits: the traffic moved on;
+  // the general parser then learns too, at most every 256th request; probes learn from every miss). A probe window under the limit,
+  // or with 7/8 hits, ends bypass.
+  uint32_t cost = (uint32_t)(X->tries - X->tries0 + X->misses - X->misses0);
+  X->acost = (X->acost >> 1) + cost;
+  X->atp = (X->atp >> 1) + X->wtp;
+  X->tries0 = X->tries;
+  X->misses0 = X->misses;
+#ifndef FP_TM_NOCOST // -DFP_TM_NOCOST: FP_TM_AUTO acts as FP_TM_ALWAYS
+  if (X->mode == FP_TM_AUTO && X->atp >= 32) {
+    uint64_t lim = (uint64_t)X->atp * FP_TM_COST, wlim = (uint64_t)X->wtp * FP_TM_COST;
+    int over = (uint64_t)X->acost * 16 > lim && (uint64_t)cost * 16 > wlim; // the history and this window
+    if (!X->bypass) {
+      if (!over) X->hold = 0;
+      else if (X->learned != X->learned0 && X->hold < 2) X->hold++; // just learned: wait, up to 2 windows
+      else {
+        X->bypass = 1;
+        X->pint = 1;
+        X->hold = 0;
       }
-#ifndef FP_TM_NOTICK
-  X->bypass = X->nsave >= 32 && X->save < 0;
-  if (X->nwin % 8 == 1) {
-    X->save -= X->save / 4;
-    X->nsave -= X->nsave / 4;
-  } // decay once per sampling burst
+    } else if (X->wtp >= 32) {                                                              // a probe window
+      if ((uint64_t)cost * 16 < wlim || (uint32_t)X->whit * 8 >= X->wtp * 7) X->bypass = 0; // under the limit, or 7/8
+      // hits (templates learned in this probe are tried last until the next sort, so its cost reads high)
+      else if (X->pint < 8) X->pint *= 2; // confirmed: probe half as often
+    }
+  }
 #endif
+  X->learned0 = X->learned;
+  if (X->mode != FP_TM_AUTO) X->bypass = X->mode == FP_TM_OFF;
+  if (X->pint < 1) X->pint = 8;
+  if (X->wtp >= 32)
+    X->stale = X->bypass && (uint32_t)X->whit * 4 < X->wtp; // windows with enough template-path requests
+  if (X->stale && X->backoff > 255) X->backoff = 255;
+  X->nwin++;
   if (!X->bypass && X->whit * 2 >= X->wreq) X->backoff = 0;
   X->wreq = 0;
   X->whit = 0;
+  X->wtp = 0;
 }
 
 // the try loop: -2 = no template matched; *hit = the template that did
@@ -1564,13 +1585,14 @@ FP_INLINE int fp_tm_loop(const char *b, int len, req_t *r, fp_tmpl_t *X, const i
   if (!fp_tm_rl(simd, b, lim, &me, &pe)) return -2;
   for (int i = 0; i < X->n; i++) {
     fp_tm_t *T = &X->t[X->ord[i]];
-    if (T->slow) continue;
     int c = fp_tm_try(b, len, r, T, simd, lim, me, pe);
     if (c != -2) {
       *hit = T;
+      X->tries += i;
       return c;
     }
   }
+  X->tries += X->n;
   return -2;
 }
 FP_INLINE int fp_core_gen(const char *b, int len, req_t *r, const int simd) {
@@ -1579,47 +1601,11 @@ FP_INLINE int fp_core_gen(const char *b, int len, req_t *r, const int simd) {
 // out of line: misses and cost samples call the general parser, so the template entry stays small
 __attribute__((noinline)) static int fp_tm_gen1(const char *b, int len, req_t *r) { return fp_core_gen(b, len, r, 1); }
 __attribute__((noinline)) static int fp_tm_gen0(const char *b, int len, req_t *r) { return fp_core_gen(b, len, r, 0); }
-// The first 16 requests of every 8th 1024-request window are cost samples: the general parser and the template
-// loop both run on the same bytes (alternating which goes first; the first 2 of the burst only warm both
-// paths' code and predictors), and the saving (general - template path; a miss saves minus the failed
-// loop) is accumulated, overall and per template that hit. The result is the template path's, as always.
-__attribute__((noinline, cold)) static int fp_tm_sample(const char *b, int len, req_t *r, fp_tmpl_t *X,
-                                                        const int simd) {
+// the template path: the try loop, else the general parser (and learning from it)
+FP_INLINE int fp_tm_path(const char *b, int len, req_t *r, fp_tmpl_t *X, const int simd) {
   fp_tm_t *T = 0;
-  int c;
-#ifndef FP_TM_NOTICK
-  req_t g;
-  uint64_t t0, t1, t2;
-  int first = X->wreq & 1;
-  if (first) {
-    t0 = fp_tm_tick();
-    simd ? fp_tm_gen1(b, len, &g) : fp_tm_gen0(b, len, &g);
-    t1 = fp_tm_tick();
-    c = fp_tm_loop(b, len, r, X, simd, &T);
-    t2 = fp_tm_tick();
-  } else {
-    t0 = fp_tm_tick();
-    c = fp_tm_loop(b, len, r, X, simd, &T);
-    t1 = fp_tm_tick();
-    simd ? fp_tm_gen1(b, len, &g) : fp_tm_gen0(b, len, &g);
-    t2 = fp_tm_tick();
-  }
-  int64_t ct = (int64_t)(first ? t2 - t1 : t1 - t0), cg = (int64_t)(first ? t1 - t0 : t2 - t1);
-  if (X->wreq > 2 && ct < (1 << 16) && cg < (1 << 16)) { // else warm-up, or preempted
-    X->save += T ? cg - ct : -ct;
-    X->nsave++;
-    if (T) {
-      if (T->ns >= 64) {
-        T->cy_t -= T->cy_t / 64;
-        T->cy_g -= T->cy_g / 64;
-      } else T->ns++;
-      T->cy_t += (uint32_t)ct;
-      T->cy_g += (uint32_t)cg;
-    }
-  }
-#else
-  c = fp_tm_loop(b, len, r, X, simd, &T);
-#endif
+  int c = fp_tm_loop(b, len, r, X, simd, &T);
+  X->wtp++;
   if (c != -2) {
     T->whits++;
     X->whit++;
@@ -1633,30 +1619,60 @@ __attribute__((noinline, cold)) static int fp_tm_sample(const char *b, int len, 
   }
   return c;
 }
+// bypassed, in a probe window's first 64 requests or while stale (cold): a probe, else the general parser,
+// learning only while the templates are stale
+__attribute__((noinline, cold)) static int fp_tm_bypass(const char *b, int len, req_t *r, fp_tmpl_t *X,
+                                                        const int simd) {
+  if (X->mode != FP_TM_OFF && X->wreq < 64 && (X->stale || !(X->nwin & (unsigned)(X->pint - 1))) && X->n) {
+    X->cool = 0; // probe: learns from every miss (64 requests at most)
+    return fp_tm_path(b, len, r, X, simd);
+  }
+  int c = simd ? fp_tm_gen1(b, len, r) : fp_tm_gen0(b, len, r);
+  if (X->stale && c > 0) fp_tm_learn(X, b, r->body_off);
+  return c;
+}
 FP_INLINE int fp_core_tmpl(const char *b, int len, req_t *r, fp_tmpl_t *X, const int simd) {
   if (++X->wreq >= 1024) fp_tm_window(X);
-  if (FP_UNLIKELY(X->wreq <= 16) && !(X->nwin & 7) && X->n) return fp_tm_sample(b, len, r, X, simd);
-  if (FP_UNLIKELY(X->bypass)) return simd ? fp_tm_gen1(b, len, r) : fp_tm_gen0(b, len, r); // learns from samples only
-  fp_tm_t *T = 0;
-  int c = fp_tm_loop(b, len, r, X, simd, &T);
-  if (c != -2) {
-    T->whits++;
-    X->whit++;
-    X->hits++;
-    return c;
+  if (FP_UNLIKELY(X->bypass)) {
+    if (X->wreq < 64 || X->stale) return fp_tm_bypass(b, len, r, X, simd); // maybe a probe, or learning
+    return simd ? fp_tm_gen1(b, len, r) : fp_tm_gen0(b, len, r);
   }
-  c = simd ? fp_tm_gen1(b, len, r) : fp_tm_gen0(b, len, r);
-  if (c > 0) {
-    X->misses++;
-    fp_tm_learn(X, b, r->body_off);
-  }
-  return c;
+  return fp_tm_path(b, len, r, X, simd);
 }
 static inline int fast_parse_tmpl(const char *b, int len, req_t *r, fp_tmpl_t *X) {
   return fp_core_tmpl(b, len, r, X, FP_BACKEND != 0);
 }
 static inline int fast_parse_tmpl_scalar(const char *b, int len, req_t *r, fp_tmpl_t *X) {
   return fp_core_tmpl(b, len, r, X, 0);
+}
+// Optional, for traffic the caller knows something about. fp_tmpl_mode: FP_TM_AUTO (the default),
+// FP_TM_ALWAYS or FP_TM_OFF. fp_tmpl_seed: learn from sample requests, back to back in buf[0..len) (the
+// same padding contract as fast_parse), at least two of each request shape; pin = 1 keeps the templates
+// it makes from ever being evicted. Returns the number of templates. The table stays exact either way:
+// a seeded template is learned and checked like any other.
+static inline void fp_tmpl_mode(fp_tmpl_t *X, int mode) {
+  X->mode = mode;
+  X->bypass = mode == FP_TM_OFF;
+  X->stale = 0;
+}
+static inline int fp_tmpl_seed(fp_tmpl_t *X, const char *buf, int len, int pin) {
+  for (int u = 0; u < len;) {
+    req_t r;
+    fp_tm_t *T = 0;
+    int c = fp_core_gen(buf + u, len - u, &r, FP_BACKEND != 0);
+    if (c <= 0) break;
+    if (fp_tm_loop(buf + u, len - u, &r, X, FP_BACKEND != 0, &T) == -2) {
+      X->cool = 0;
+      fp_tm_learn(X, buf + u, r.body_off);
+    }
+    u += c;
+  }
+  if (pin)
+    for (int i = 0; i < X->n; i++) X->t[i].pin = 1;
+  X->cool = 0;
+  X->tries0 = X->tries;
+  X->misses0 = X->misses;
+  return X->n;
 }
 
 // ---------------- pipelined batch ----------------

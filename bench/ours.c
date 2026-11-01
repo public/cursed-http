@@ -12,10 +12,8 @@ __attribute__((noinline)) int CAT(OURS, tmpl)(const char *b, int l, req_t *r) { 
 void CAT(OURS, tmpl_stats)(uint64_t *h, uint64_t *m) { // hits / misses, and what the cost model decided
   *h = X.hits;
   *m = X.misses;
-  int slow = 0;
-  for (int i = 0; i < X.n; i++) slow += X.t[i].slow;
-  printf("   [%d templates, %d off, bypass %d, saving %.1f cycles/request over %d samples]", X.n, slow, X.bypass,
-         X.nsave ? (double)X.save / X.nsave : 0.0, X.nsave);
+  printf("   [%d templates, bypass %d, %.2f failed tries + misses per template-path request]", X.n, X.bypass,
+         X.atp ? (double)X.acost / X.atp : 0.0);
 }
 __attribute__((noinline)) int CAT(OURS, scalar)(const char *b, int l, req_t *r) { return fast_parse_scalar(b, l, r); }
 const char *CAT(OURS, name) = FP_SPEC_NAME " / " FP_BACKEND_NAME;
