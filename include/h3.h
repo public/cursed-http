@@ -123,6 +123,9 @@ struct h3_conn {
   uint8_t got_settings, goaway_sent;
   uint64_t max_sid; /* highest request stream seen + 4 (GOAWAY's id) */
   uint32_t rr;
+  /* slots that may have output (set when a response, body or trailers is queued, cleared by
+   * h3_pending when it finds nothing): h3_pending visits these instead of every slot */
+  uint64_t outq[(H3_MAX_STREAMS + 63) / 64];
   qp_dec qd;
   h3_stream s[H3_MAX_STREAMS];
 };
@@ -477,6 +480,10 @@ static inline size_t h3__enc_frame(uint8_t *dst, size_t cap, int status, const h
   memcpy(dst, hdr, hl), memcpy(dst + hl, blk, bl);
   return hl + bl;
 }
+static inline void h3__want(h3_conn *c, const h3_stream *s) {
+  size_t i = (size_t)(s - c->s);
+  c->outq[i / 64] |= 1ull << (i % 64);
+}
 static inline int h3_respond(h3_conn *c, uint64_t sid, int status, const hp_field *f, int n, const uint8_t *body,
                              size_t len, int end) {
   h3_stream *s = h3__find(c, sid);
@@ -486,6 +493,7 @@ static inline int h3_respond(h3_conn *c, uint64_t sid, int status, const hp_fiel
   s->hdr_len = (uint16_t)fl, s->hdr_off = 0, s->flags |= H3_ST_RESPONDED;
   s->body = body ? body : (const uint8_t *)"", s->body_len = body ? len : 0, s->body_off = 0;
   if (end) s->flags |= H3_ST_BODY_END;
+  h3__want(c, s);
   return 0;
 }
 static inline int h3_data(h3_conn *c, uint64_t sid, const uint8_t *body, size_t len, int end) {
@@ -495,6 +503,7 @@ static inline int h3_data(h3_conn *c, uint64_t sid, const uint8_t *body, size_t 
     return H3_E_STATE;
   s->body = body, s->body_len = len, s->body_off = 0;
   if (end) s->flags |= H3_ST_BODY_END;
+  h3__want(c, s);
   return 0;
 }
 static inline int h3_trailers(h3_conn *c, uint64_t sid, const hp_field *f, int n) {
@@ -504,6 +513,7 @@ static inline int h3_trailers(h3_conn *c, uint64_t sid, const hp_field *f, int n
   if (!fl) return H3_E_TOO_BIG;
   s->trl_len = (uint16_t)fl, s->trl_off = 0, s->flags |= H3_ST_TRAILERS;
   if (!s->body) s->body = (const uint8_t *)"", s->body_len = s->body_off = 0;
+  h3__want(c, s);
   return 0;
 }
 static inline void h3_goaway(h3_conn *c) {
@@ -533,10 +543,19 @@ static inline int h3_pending(h3_conn *c, uint64_t *sids, int max) {
   if (c->ctrl_off < c->ctrl_len && n < max) sids[n++] = c->out_id[0];
   if (!c->type_sent[0] && n < max) sids[n++] = c->out_id[1];
   if ((!c->type_sent[1] || c->qd.fb_len || c->qd.inserted > c->qd.known) && n < max) sids[n++] = c->out_id[2];
-  for (int k = 0; k < H3_MAX_STREAMS && n < max; k++) {
-    int i = (int)((c->rr + (uint32_t)k) % H3_MAX_STREAMS);
-    if (h3__has_out(c, &c->s[i])) sids[n++] = c->s[i].id;
-  }
+  /* the queued slots, round-robin from rr: those at or after it, then those before it */
+  uint32_t start = c->rr % H3_MAX_STREAMS;
+  for (int pass = 0; pass < 2 && n < max; pass++)
+    for (size_t w = 0; w < sizeof c->outq / sizeof c->outq[0] && n < max; w++) {
+      uint64_t m = c->outq[w];
+      while (m && n < max) {
+        uint32_t i = (uint32_t)(w * 64) + (uint32_t)__builtin_ctzll(m);
+        m &= m - 1;
+        if ((i >= start) != (pass == 0)) continue;
+        if (h3__has_out(c, &c->s[i])) sids[n++] = c->s[i].id;
+        else c->outq[w] &= ~(1ull << (i % 64));
+      }
+    }
   c->rr++;
   return n;
 }

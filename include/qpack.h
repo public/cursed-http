@@ -237,12 +237,12 @@ static inline int qp__str(const uint8_t **pp, const uint8_t *end, int nbits, hp_
   const uint8_t *src = *pp;
   *pp += len;
   if (!huff) {
-    *s = src, *sl = len;
+    *s = src, *sl = len, ar->fl = HH_F_VALUE | HH_F_NAME;
     return 0;
   }
   size_t need = (size_t)len * 8 / 5 + 8;
   if (ar->cap - ar->used < need) return QP_E_CALM;
-  ssize_t dl = hh_decode(ar->a + ar->used, src, len);
+  ssize_t dl = hh_decode_f(ar->a + ar->used, src, len, &ar->fl);
   if (dl < 0) return QP_E_DECOMPRESSION;
   *s = ar->a + ar->used, *sl = (uint32_t)dl, ar->used += (size_t)dl;
   return 0;
@@ -266,7 +266,7 @@ static inline int qp__enc_instr(qp_dec *d, const uint8_t *p0, const uint8_t *end
   uint8_t b = *p;
   uint32_t v;
   uint8_t scratch[2 * QP_TABLE_MAX];
-  hp__arena ar = { scratch, 0, sizeof scratch };
+  hp__arena ar = { scratch, 0, sizeof scratch, 0 };
   hp_field f = { 0 };
   int r;
 #define QP_NEED(x)                                                                                                     \
@@ -291,7 +291,7 @@ static inline int qp__enc_instr(qp_dec *d, const uint8_t *p0, const uint8_t *end
     QP_NEED(qp__str(&p, end, 7, &ar, &f.value, &f.vlen));
   } else if (b & 0x40) { /* Insert With Literal Name: 01 H len(5) name, value */
     QP_NEED(qp__str(&p, end, 5, &ar, &f.name, &f.nlen));
-    f.nclass = qp__nclass(f.name, f.nlen), f.sidx = (uint8_t)hp_name_index(f.name, f.nlen);
+    f.nclass = hp__nclass_f(f.name, f.nlen, ar.fl), f.sidx = (uint8_t)hp_name_index(f.name, f.nlen);
     QP_NEED(qp__str(&p, end, 7, &ar, &f.value, &f.vlen));
   } else if (b & 0x20) { /* Set Dynamic Table Capacity: 001 cap(5) */
     QP_NEED(qp__int2(&p, end, 5, &v, QP_E_ENCODER));
@@ -310,7 +310,7 @@ static inline int qp__enc_instr(qp_dec *d, const uint8_t *p0, const uint8_t *end
     if ((r = qp__insert(d, f.name, f.nlen, f.value, f.vlen, f.sidx, f.nclass, f.vok))) return r;
     return (int)(p - p0);
   }
-  f.vok = (uint8_t)hv_check_value_rfc9113(f.value, f.vlen);
+  f.vok = (uint8_t)hp__vok(f.value, f.vlen, ar.fl);
   if ((r = qp__insert(d, f.name, f.nlen, f.value, f.vlen, f.sidx, f.nclass, f.vok))) return r;
   return (int)(p - p0);
 #undef QP_NEED
@@ -340,7 +340,7 @@ static inline int qp__pin(qp_dec *d, hp__arena *ar, hp_field *f) {
 static inline int qp_decode_section(qp_dec *d, uint64_t stream_id, const uint8_t *in, size_t len, hp_field *out,
                                     int maxf, uint8_t *arena, size_t arena_cap, uint32_t max_list, int *flags) {
   const uint8_t *p = in, *end = in + len;
-  hp__arena ar = { arena, 0, arena_cap };
+  hp__arena ar = { arena, 0, arena_cap, 0 };
   uint32_t enc_ric, delta;
   *flags = 0;
   /* prefix (§4.5.1): Required Insert Count (8-bit prefix), then S + Delta Base (7-bit prefix) */
@@ -401,13 +401,13 @@ static inline int qp_decode_section(qp_dec *d, uint64_t stream_id, const uint8_t
         qp__dyn(d, e, &f);
       }
       if ((r = qp__str(&p, end, 7, &ar, &f.value, &f.vlen))) return r == QP_E_CALM ? r : QP_E_DECOMPRESSION;
-      f.vok = (uint8_t)hv_check_value_rfc9113(f.value, f.vlen);
+      f.vok = (uint8_t)hp__vok(f.value, f.vlen, ar.fl);
     } else if (b & 0x20) { /* Literal With Literal Name: 001 N H len(3) */
       f.never = (b & 0x10) != 0;
       if ((r = qp__str(&p, end, 3, &ar, &f.name, &f.nlen))) return r == QP_E_CALM ? r : QP_E_DECOMPRESSION;
-      f.nclass = qp__nclass(f.name, f.nlen), f.sidx = (uint8_t)hp_name_index(f.name, f.nlen);
+      f.nclass = hp__nclass_f(f.name, f.nlen, ar.fl), f.sidx = (uint8_t)hp_name_index(f.name, f.nlen);
       if ((r = qp__str(&p, end, 7, &ar, &f.value, &f.vlen))) return r == QP_E_CALM ? r : QP_E_DECOMPRESSION;
-      f.vok = (uint8_t)hv_check_value_rfc9113(f.value, f.vlen);
+      f.vok = (uint8_t)hp__vok(f.value, f.vlen, ar.fl);
     } else { /* Literal With Post-Base Name Reference: 0000 N idx(3) */
       f.never = (b & 0x08) != 0;
       if (qp__int(&p, end, 3, &v)) return QP_E_DECOMPRESSION;
@@ -415,7 +415,7 @@ static inline int qp_decode_section(qp_dec *d, uint64_t stream_id, const uint8_t
       if (!e) return QP_E_DECOMPRESSION;
       qp__dyn(d, e, &f);
       if ((r = qp__str(&p, end, 7, &ar, &f.value, &f.vlen))) return r == QP_E_CALM ? r : QP_E_DECOMPRESSION;
-      f.vok = (uint8_t)hv_check_value_rfc9113(f.value, f.vlen);
+      f.vok = (uint8_t)hp__vok(f.value, f.vlen, ar.fl);
     }
     if (qp__pin(d, &ar, &f)) return QP_E_CALM;
     list += (uint64_t)f.nlen + f.vlen + 32;

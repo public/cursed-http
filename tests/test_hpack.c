@@ -264,8 +264,44 @@ static void test_encode(void) {
   printf("encoder vs nghttp2 inflate: %s\n", fails == before ? "ok" : "FAILED");
 }
 
+/* hh_decode_f's check bits: each table entry's bits are its symbols' hv__value_ok / hv__name_ok,
+ * and on any string the shortcut checks (hp__vok, hp__nclass_f) equal the full scans */
+static void test_check_bits(void) {
+  long before = fails;
+  for (int i = 0; i < 1 << HH_K; i++) {
+    uint32_t e = HH_TAB[i], want = 0;
+    if ((int32_t)e < 0) continue;
+    for (uint32_t k = 0; k < ((e >> 24) & 3); k++) want |= hh__sym_flags((int)(e >> (8 * k) & 0xff));
+    CHECK((e & (HH_F_VALUE | HH_F_NAME)) == want, "table entry %d: bits %x want %x", i, e & (HH_F_VALUE | HH_F_NAME),
+          want);
+  }
+  uint64_t x = 0x9e3779b97f4a7c15ull;
+  static uint8_t t[300], enc[700], out[700];
+  /* byte pools: header text, plus the bytes the checks reject (controls, DEL, uppercase, SP/HT,
+   * ':' and high bytes, which also take the long-code path) */
+  static const char pool[] = "abcxyz0189-_.~!#%&'*+^`|/?=;,@ ABCXYZ\t:\x01\x7f\x80\xff\x00\r\n";
+  for (int it = 0; it < 200000; it++) {
+    x ^= x << 13, x ^= x >> 7, x ^= x << 17;
+    size_t n = x % 60;
+    int mode = (int)(x >> 60) & 3; /* 0: clean token text, else mixed in */
+    for (size_t j = 0; j < n; j++) {
+      x ^= x << 13, x ^= x >> 7, x ^= x << 17;
+      size_t m = mode ? sizeof pool - 1 : 22;
+      t[j] = (uint8_t)pool[x % m];
+    }
+    size_t m = hh_encode(enc, t, n);
+    uint32_t fl;
+    ssize_t r = hh_decode_f(out, enc, m, &fl);
+    CHECK(r == (ssize_t)n && !memcmp(out, t, n), "round trip");
+    CHECK(hp__vok(out, (uint32_t)n, fl) == hv_check_value_rfc9113(out, n), "vok: shortcut != scan (n %zu)", n);
+    CHECK(hp__nclass_f(out, (uint32_t)n, fl) == hp__nclass(out, (uint32_t)n), "nclass: shortcut != scan (n %zu)", n);
+  }
+  if (fails == before) printf("hh_decode_f check bits: ok\n");
+}
+
 int main(void) {
   printf("hv backend %s\n", hv_backend());
+  test_check_bits();
   test_rfc();
   test_diff();
   test_encode();

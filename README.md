@@ -160,48 +160,49 @@ caller-supplied allocator.
 Xeon Platinum 8260 (Cascade Lake), gcc 13.3 `-O3 -march=native`, ns per request, in memory: no sockets and no TLS.
 Every C rival is built with the same flags (`make MARCH=-march=native`), at least as aggressively as its own release
 build. Before it is timed, every decoder's output is checked field by field against the request it encodes, and every
-server must answer every request. Results are from exp1380 (C) and exp1362 (Go, Rust).
+server must answer every request. Results are from exp1393 (C) and exp1362 (Go, Rust).
 
 **Server CPU per request**, 256 requests on one connection. The same client bytes go into each server, and each
 answers `:status 200` with a 13-byte body:
 
 | server | browser | gRPC | h2load |
 |---|---|---|---|
-| **`h2.h`** | **573** | **771** | **187** |
-| nghttp2 1.70 | 2,326 (4.1×) | 2,433 (3.2×) | 990 (5.3×) |
-| h2 0.4.20 (Rust, hyper's HTTP/2) ¹ | 5,141 (9.0×) | 5,552 (7.2×) | 2,869 (15×) |
-| golang.org/x/net/http2 v0.62 (Go 1.27) ¹ | 29,824 (52×) | 29,211 (38×) | 25,267 (135×) |
-| **`h3.h`** (HTTP/3 above QUIC) ² | **3,038** | **2,168** | **994** |
-| nghttp3 1.18 ² | 4,952 (1.6×) | 3,193 (1.5×) | 1,375 (1.4×) |
+| **`h2.h`** | **540** | **713** | **193** |
+| nghttp2 1.70 | 2,326 (4.3×) | 2,427 (3.4×) | 998 (5.2×) |
+| h2 0.4.20 (Rust, hyper's HTTP/2) ¹ | 5,141 (9.5×) | 5,552 (7.8×) | 2,869 (15×) |
+| golang.org/x/net/http2 v0.62 (Go 1.27) ¹ | 29,824 (55×) | 29,211 (41×) | 25,267 (131×) |
+| **`h3.h`** (HTTP/3 above QUIC) ² | **2,339** | **1,548** | **619** |
+| nghttp3 1.18 ² | 4,890 (2.1×) | 3,213 (2.1×) | 1,400 (2.3×) |
 
 **Header decoding** per request, warm 4 KB table:
 
 | decoder | browser | gRPC | h2load |
 |---|---|---|---|
-| **`hpack.h`** | **348** | **526** | **56** |
-| ls-hpack 2.3.5 (LiteSpeed) | 448 (1.3×) | 772 (1.5×) | 85 (1.5×) |
-| nghttp2 1.70 | 651 (1.9×) | 1,249 (2.4×) | 139 (2.5×) |
-| h2o (2026-11-01) | 732 (2.1×) | 1,389 (2.6×) | 79 (1.4×) |
-| x/net/http2/hpack (Go) | 840 (2.4×) | 1,889 (3.6×) | 112 (2.0×) |
-| **`qpack.h`**, dynamic table | **1,192** | **986** | **89** |
-| ls-qpack 2.7.0 (LiteSpeed), dynamic | 1,214 (1.02×) | 1,080 (1.10×) | 188 (2.1×) |
-| ls-qpack, dynamic, plus `qpack.h`'s field checks ⁴ | 1,526 (1.3×) | 1,282 (1.3×) | 261 (2.9×) |
-| h2o, dynamic ³ | 1,792 (1.5×) | 1,754 (1.8×) | 134 (1.5×) |
-| nghttp3 1.18, dynamic | 1,815 (1.5×) | 1,629 (1.7×) | 211 (2.4×) |
-| **`qpack.h`**, static table only | **2,532** | **1,172** | **145** |
-| ls-qpack, static only | 2,646 (1.04×) | 1,202 (1.03×) | 227 (1.6×) |
-| ls-qpack, static only, plus `qpack.h`'s field checks ⁴ | 2,952 (1.2×) | 1,400 (1.2×) | 309 (2.1×) |
-| nghttp3, static only | 3,994 (1.6×) | 1,929 (1.6×) | 336 (2.3×) |
-| h2o, static only ³ | 5,229 (2.1×) | 2,139 (1.8×) | 304 (2.1×) |
-| quic-go/qpack 0.6 (Go, static only) | 9,062 (3.6×) | 3,626 (3.1×) | 456 (3.1×) |
+| **`hpack.h`** | **329** | **511** | **54** |
+| ls-hpack 2.3.5 (LiteSpeed) | 446 (1.4×) | 785 (1.5×) | 84 (1.6×) |
+| nghttp2 1.70 | 625 (1.9×) | 1,194 (2.3×) | 135 (2.5×) |
+| h2o (2026-11-01) | 734 (2.2×) | 1,387 (2.7×) | 80 (1.5×) |
+| x/net/http2/hpack (Go) | 840 (2.5×) | 1,889 (3.7×) | 112 (2.1×) |
+| **`qpack.h`**, dynamic table | **1,094** | **928** | **85** |
+| ls-qpack 2.7.0 (LiteSpeed), dynamic | 1,206 (1.1×) | 1,069 (1.2×) | 180 (2.1×) |
+| ls-qpack, dynamic, plus `qpack.h`'s field checks ⁴ | 1,474 (1.3×) | 1,247 (1.3×) | 247 (2.9×) |
+| h2o, dynamic ³ | 1,786 (1.6×) | 1,760 (1.9×) | 133 (1.6×) |
+| nghttp3 1.18, dynamic | 1,825 (1.7×) | 1,648 (1.8×) | 221 (2.6×) |
+| **`qpack.h`**, static table only | **2,407** | **1,122** | **132** |
+| ls-qpack, static only | 2,603 (1.08×) | 1,172 (1.04×) | 217 (1.6×) |
+| ls-qpack, static only, plus `qpack.h`'s field checks ⁴ | 2,864 (1.2×) | 1,343 (1.2×) | 286 (2.2×) |
+| nghttp3, static only | 4,050 (1.7×) | 1,962 (1.7×) | 349 (2.6×) |
+| h2o, static only ³ | 5,264 (2.2×) | 2,142 (1.9×) | 303 (2.3×) |
+| quic-go/qpack 0.6 (Go, static only) | 9,062 (3.8×) | 3,626 (3.2×) | 456 (3.4×) |
 
-- **Closest race: LiteSpeed's ls-qpack.** It is within 2–10% of `qpack.h` on the browser and gRPC sets, though
+- **Closest race: LiteSpeed's ls-qpack.** It is 4–15% behind `qpack.h` on the browser and gRPC sets, though
   `qpack.h` checks every field against RFC 9113 and ls-qpack checks nothing. Doing the same checks in its
-  callback (⁴) puts ls-qpack 1.2–1.3× behind. Without a dynamic table, which is when a server advertises none,
-  nothing can be cached, and the value check alone costs `qpack.h` about 7–10% (exp1378). Huffman is not the
-  difference: on its own, our decoder is faster than ls-qpack's on these strings (exp1371).
-- **`h3.h` vs nghttp3** is 1.4–1.6×, much less than HTTP/2's 3–5×. At 1 µs per small request, `h3.h` has
-  per-stream overhead left to remove.
+  callback (⁴) puts ls-qpack 1.2–1.35× behind. With no dynamic table nothing can be cached, so the checks are
+  done on every field; the Huffman decoder carries the checks' byte classes in its table, so a Huffman-coded
+  value that passes is not scanned a second time (exp1390).
+- **`h3.h` vs nghttp3** is 2.1–2.3×. `h3_pending` used to walk all 100 stream slots on every call, and this
+  benchmark's HTTP/3 harness searched its stream buffers linearly, a cost only `h3.h` paid. Both are fixed
+  (exp1390); before, the margin was 1.4–1.6×.
 - **Why `hpack.h` and `h2.h` win.** Each header is validated once, when it enters the dynamic table, and the
   verdict is cached. nghttp2 and nghttp3 re-check every byte of every header on every request. ls-hpack doesn't
   validate at all, and h2o validates like we do.
