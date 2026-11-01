@@ -77,6 +77,11 @@ static void test_rfc(void) {
     int r2 = r1 >= 0 ? qp_dec_encoder(&D, b + r1, n - (size_t)r1) : -1;
     CHECK(r1 >= 0 && r2 >= 0 && (size_t)(r1 + r2) == n && D.size == 106, "B.2 cut at %zu", cut);
   }
+  /* an entry larger than the capacity is an encoder-stream error (§3.2.2) */
+  qp_dec_init(&D, 4096);
+  hex(b, &n, "3f21" "4a637573746f6d2d6b6579" "40" "414141414141414141414141414141414141414141414141414141414141414141414141");
+  b[13] = 36; /* value length 36: 10 + 36 + 32 = 78 > 64 */
+  CHECK(qp_dec_encoder(&D, b, n) == QP_E_ENCODER, "entry larger than the capacity");
   printf("rfc9204 B.1-B.5: %s\n", fails == before ? "ok" : "FAILED");
 }
 

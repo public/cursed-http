@@ -45,17 +45,25 @@ $(H2B)/test_qpack: tests/test_qpack.c $(H2HDRS) $(H2B)/libnghttp3.a
 $(H2B)/test_qpack_asan: tests/test_qpack.c $(H2HDRS) $(H2B)/libnghttp3.a
 	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(N3INC) $< $(H2B)/libnghttp3.a -o $@
 
-H2TESTS := $(H2B)/test_qpack $(H2B)/test_hpack $(H2B)/test_hpack_scalar $(H2B)/test_h2 $(H2B)/test_h2_scalar
+$(H2B)/test_h3: tests/test_h3.c $(H2HDRS) $(H2B)/libnghttp3.a
+	$(H2CC) $(N3INC) $< $(H2B)/libnghttp3.a -o $@
+$(H2B)/test_h3_asan: tests/test_h3.c $(H2HDRS) $(H2B)/libnghttp3.a
+	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(N3INC) $< $(H2B)/libnghttp3.a -o $@
+
+H2TESTS := $(H2B)/test_h3 $(H2B)/test_qpack $(H2B)/test_hpack $(H2B)/test_hpack_scalar $(H2B)/test_h2 $(H2B)/test_h2_scalar
 test-h2h3: $(H2TESTS)
 	@for t in $(H2TESTS); do echo "== $$t"; $$t || exit 1; done
 .PHONY: test-h2h3
 
-mutants-h2: $(H2B)/libnghttp2.a
+mutants-h2: $(H2B)/libnghttp2.a $(H2B)/libnghttp3.a
 	python3 -I scripts/mutants_h2.py include $(H2B)/mutants
 	@for d in $(H2B)/mutants/*/; do \
 	  $(CC) $(SAN) -w $(MARCH) -I$$d -Itests $(N2INC) tests/test_h2.c $(H2B)/libnghttp2.a -o $$d/t2 && \
 	  $(CC) $(SAN) -w $(MARCH) -I$$d -Itests $(N2INC) tests/test_hpack.c $(H2B)/libnghttp2.a -o $$d/thp && \
-	  if timeout 120 $$d/t2 > $$d/out.txt 2>&1 && timeout 120 $$d/thp >> $$d/out.txt 2>&1; then echo "mutant $$d SURVIVED"; \
+	  $(CC) $(SAN) -w $(MARCH) -I$$d -Itests $(N3INC) tests/test_h3.c $(H2B)/libnghttp3.a -o $$d/t3 && \
+	  $(CC) $(SAN) -w $(MARCH) -I$$d -Itests $(N3INC) tests/test_qpack.c $(H2B)/libnghttp3.a -o $$d/tqp && \
+	  if timeout 120 $$d/t2 > $$d/out.txt 2>&1 && timeout 120 $$d/thp >> $$d/out.txt 2>&1 && \
+	     timeout 120 $$d/t3 >> $$d/out.txt 2>&1 && timeout 120 $$d/tqp >> $$d/out.txt 2>&1; then echo "mutant $$d SURVIVED"; \
 	  else echo "mutant $$d killed: $$(grep -m1 FAIL $$d/out.txt | cut -c1-90)"; fi; done
 .PHONY: mutants-h2
 

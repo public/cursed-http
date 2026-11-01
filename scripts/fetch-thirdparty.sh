@@ -14,6 +14,8 @@
 #   nghttp2    nghttp2/nghttp2 v1.70.0              MIT             HTTP/2 + HPACK reference (differential tests, client)
 #   nghttp3    ngtcp2/nghttp3 v1.18.0 (+ sfparse)   MIT             HTTP/3 + QPACK reference (differential tests)
 #   h2spec     summerwind/h2spec v2.6.0             MIT             HTTP/2 conformance suite (needs Go)
+#   picotls    h2o/picotls                          MIT             TLS 1.3 handshake for include/quic.h (+ OpenSSL libcrypto)
+#   ngtcp2     ngtcp2/ngtcp2 v1.25.0                MIT             QUIC reference client (in-memory interop tests)
 # Default: all of them.
 set -e
 cd "$(dirname "$0")/.."
@@ -31,7 +33,7 @@ fetch() { # name owner/repo commit
   echo "$3" >"third_party/$1/.commit"
 }
 ALL="$*"
-for n in uws httparse hparse llhttp-src garden pico-src lightning pico-a64 pico-a64tbl http-parser nghttp2 nghttp3 h2spec; do
+for n in uws httparse hparse llhttp-src garden pico-src lightning pico-a64 pico-a64tbl http-parser nghttp2 nghttp3 h2spec picotls ngtcp2; do
   if [ -n "$ALL" ] && ! echo " $ALL " | grep -q " $n "; then continue; fi
   case $n in
     uws) fetch uws uNetworking/uWebSockets 3ffd6f44c9c3c92c96345d9f96bd01ba9c025ab5 ;;
@@ -50,5 +52,7 @@ for n in uws httparse hparse llhttp-src garden pico-src lightning pico-a64 pico-
                   fetch nghttp3-sfparse ngtcp2/sfparse 4b313cfd2e1b389ae632b36dcd50402307289af2
                   mv third_party/nghttp3-sfparse third_party/nghttp3/lib/sfparse; } ;;
     h2spec)     fetch h2spec summerwind/h2spec 70ac2294010887f48b18e2d64f5cccd48421fad1 ;;
+    picotls)    fetch picotls h2o/picotls 1e034d8418c1f806f2ba86717b34c910934f38f9 ;;
+    ngtcp2)     fetch ngtcp2 ngtcp2/ngtcp2 f9e9ff01ad2c8116bc09de4f644b0028a61486a6 ;;
   esac
 done
