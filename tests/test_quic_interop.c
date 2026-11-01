@@ -37,9 +37,14 @@ typedef struct { dgram q[4096]; int n; } wire;
 static wire TO_SRV, TO_CLI;
 static int LOSS, REORDER;
 static long SENT_DGRAMS, LOST_DGRAMS;
+static uint64_t TO_SRV_BYTES, TO_CLI_BYTES; /* before the server validated the client's address */
 static void put(wire *w, const uint8_t *d, size_t n) {
   SENT_DGRAMS++;
   if ((int)(rnd() % 100) < LOSS) { LOST_DGRAMS++; return; }
+  if (REORDER && rnd() % 100 == 0 && w->n < 4095) { /* a duplicate */
+    dgram *g = &w->q[w->n++];
+    memcpy(g->d, d, n), g->n = n, g->at = NOW_NS + 10000000ull + (rnd() % 8) * 3000000ull;
+  }
   if (w->n == 4096 || n > 1500) return;
   dgram *g = &w->q[w->n++];
   memcpy(g->d, d, n), g->n = n;
@@ -173,7 +178,7 @@ typedef struct {
   ngtcp2_crypto_conn_ref ref;
   ngtcp2_crypto_picotls_ctx cptls;
   nghttp3_conn *h3;
-  int ready, nreq, submitted, done, ok, failed;
+  int ready, nreq, submitted, done, ok, failed, key_updates;
   long body, want_body;
   size_t upload[512];
   ngtcp2_path_storage ps;
@@ -337,7 +342,7 @@ static void client_init(client *cl) {
   la.sin_family = ra.sin_family = AF_INET, la.sin_port = htons(5555), ra.sin_port = htons(443);
   ngtcp2_path path = {{(struct sockaddr *)&la, sizeof la}, {(struct sockaddr *)&ra, sizeof ra}, NULL};
   if (ngtcp2_conn_client_new(&cl->conn, &dcid, &scid, &path, NGTCP2_PROTO_VER_V1, &cb, &st, &tp, NULL, cl)) { printf("client_new\n"); exit(1); }
-  ngtcp2_path_storage_init2(&cl->ps, &path);
+  ngtcp2_path_storage_init(&cl->ps, path.local.addr, path.local.addrlen, path.remote.addr, path.remote.addrlen, NULL);
   cl->ref.get_conn = get_conn, cl->ref.user_data = cl;
   ngtcp2_crypto_picotls_ctx_init(&cl->cptls);
   cl->cptls.ptls = ptls_client_new(&CLI_TLS);
@@ -397,11 +402,15 @@ static int run(int nreq, int loss, int reorder) {
   long before = fails;
   uint8_t out[1500];
   uint64_t start = NOW_NS;
+  TO_SRV_BYTES = TO_CLI_BYTES = 0;
+  int amp_ok = 1;
   for (int guard = 0; guard < 2000000; guard++) {
     if (cl.ready) submit_more(&cl); /* keep up to 50 requests in flight */
+    if (cl.ready && cl.done >= cl.nreq / 3 && cl.key_updates == 0 && !ngtcp2_conn_initiate_key_update(cl.conn, NOW_NS)) cl.key_updates++;
     if (client_write(&cl)) { CHECK(0, "client write failed"); break; }
     dgram g;
     while (take(&TO_SRV, &g)) {
+      if (!accepted || !sv.q.addr_validated) TO_SRV_BYTES += g.n;
       if (!accepted) {
         int r = quic_accept(&sv.q, &QX, g.d, g.n, now_ms(), &QCB, &sv);
         if (r == 0) accepted = 1;
@@ -425,6 +434,10 @@ static int run(int nreq, int loss, int reorder) {
           }
           printf("\n");
         }
+        if (!sv.q.addr_validated) {
+          TO_CLI_BYTES += n;
+          if (TO_CLI_BYTES > 3 * TO_SRV_BYTES) amp_ok = 0; /* RFC 9000 §8.1 */
+        }
         put(&TO_CLI, out, n);
       }
     }
@@ -436,7 +449,7 @@ static int run(int nreq, int loss, int reorder) {
     if (cl.failed || (accepted && (sv.q.closing || sv.q.draining))) break;
     if (cl.done == nreq && cl.submitted == nreq) break;
     /* advance time to the next event if nothing is ready now */
-    if (!TO_SRV.n && !TO_CLI.n || next_arrival() > NOW_NS) {
+    if ((!TO_SRV.n && !TO_CLI.n) || next_arrival() > NOW_NS) {
       uint64_t t = next_arrival();
       ngtcp2_tstamp ce = ngtcp2_conn_get_expiry2(cl.conn);
       if (ce < t) t = ce;
@@ -476,6 +489,9 @@ static int run(int nreq, int loss, int reorder) {
            (unsigned long long)q->max_streams_bidi_local, (unsigned long long)q->opened_bidi, q->send_max_streams_bidi);
   }
   CHECK(accepted && sv.h3_ready, "handshake (loss %d%%)", loss);
+  CHECK(amp_ok, "anti-amplification: %llu bytes sent for %llu received before validation", (unsigned long long)TO_CLI_BYTES,
+        (unsigned long long)TO_SRV_BYTES);
+  CHECK(cl.key_updates == 1 && sv.q.key_phase == 1, "client key update seen by the server (phase %d)", sv.q.key_phase);
   CHECK(!cl.failed && cl.done == nreq && cl.ok == nreq, "loss %d%%: %d/%d done, %d x 200", loss, cl.done, nreq, cl.ok);
   CHECK(cl.body == cl.want_body, "loss %d%%: body %ld want %ld", loss, cl.body, cl.want_body);
   CHECK(!sv.q.closing && !sv.q.draining, "server closed the connection: code 0x%llx frame 0x%llx", (unsigned long long)sv.q.close_code,
@@ -500,6 +516,7 @@ int main(int argc, char **argv) {
   else
     for (long r = 0; r < scale(); r++) {
       run(50, 0, 0);
+      run(150, 0, 0); /* beyond the initial 100 streams: MAX_STREAMS credit */
       run(100, 0, 1);
       run(100, 2, 1);
       run(60, 10, 1);

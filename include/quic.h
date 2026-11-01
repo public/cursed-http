@@ -131,6 +131,22 @@ static inline int quic__key_setup(quic_key *k, ptls_cipher_suite_t *cs, int is_e
   ptls_clear_memory(key, sizeof key), ptls_clear_memory(hp, sizeof hp);
   return 0;
 }
+/* a key update replaces the AEAD key and IV only: the header protection key stays (RFC 9001 §6) */
+static inline int quic__key_update(quic_key *k, const quic_key *hp_from, ptls_cipher_suite_t *cs, int is_enc, const uint8_t *secret) {
+  uint8_t key[PTLS_MAX_SECRET_SIZE], iv[PTLS_MAX_IV_SIZE];
+  ptls_iovec_t sec = ptls_iovec_init(secret, cs->hash->digest_size), none = ptls_iovec_init(NULL, 0);
+  if (ptls_hkdf_expand_label(cs->hash, key, cs->aead->key_size, sec, "quic key", none, NULL) ||
+      ptls_hkdf_expand_label(cs->hash, iv, cs->aead->iv_size, sec, "quic iv", none, NULL))
+    return -1;
+  ptls_aead_context_t *a = ptls_aead_new_direct(cs->aead, is_enc, key, iv);
+  ptls_clear_memory(key, sizeof key);
+  if (!a) return -1;
+  quic_key nk = *hp_from; /* header protection as before */
+  nk.aead = a;
+  if (k->aead) ptls_aead_free(k->aead); /* k's previous AEAD (k may be hp_from itself) */
+  *k = nk;
+  return 0;
+}
 static inline void quic__mask(const quic_key *k, const uint8_t *sample, uint8_t mask[16]) {
   const uint8_t *s[1] = {sample};
   if (k->chacha) qhp_chacha_masks(k->hp_cc, s, mask, 1);
@@ -678,7 +694,8 @@ static inline void quic__crypto_feed(quic_conn *c, int space) {
     c->established = c->confirmed = 1; /* the server's handshake is confirmed when it completes (RFC 9001 §4.1.2) */
     c->handshake_done_pending = 1;
     quic__discard_space(c, QUIC_SP_HANDSHAKE);
-    if (c->cs && !quic__next_secret(c->cs, c->app_secret_rx) && !quic__key_setup(&c->next_rx, c->cs, 0, c->app_secret_rx)) c->have_next_rx = 1;
+    if (c->cs && !quic__next_secret(c->cs, c->app_secret_rx) && !quic__key_update(&c->next_rx, &c->sp[QUIC_SP_APP].rx, c->cs, 0, c->app_secret_rx))
+      c->have_next_rx = 1;
     if (c->cb.on_established) c->cb.on_established(c, c->user);
   } else if (r != 0 && r != PTLS_ERROR_IN_PROGRESS) {
     quic__error(c, 0x100 | (uint64_t)(r & 0xff), 0x06); /* CRYPTO_ERROR + TLS alert */
@@ -765,7 +782,7 @@ static inline int quic__frames(quic_conn *c, int space, const uint8_t *p, const 
   *ack_eliciting = 0;
   if (p == end) { quic__error(c, QUIC_PROTOCOL_VIOLATION, 0); return -1; } /* a packet must carry a frame */
   while (p < end) {
-    uint64_t type;
+    uint64_t type = 0; /* reported as the frame type if the type itself does not parse */
     QUIC__NEED(quic__vi(&p, end, &type));
     if (type != 0x00 && type != 0x02 && type != 0x03 && type != 0x1c && type != 0x1d) *ack_eliciting = 1;
     /* Initial and Handshake carry only PADDING, PING, ACK, CRYPTO, CONNECTION_CLOSE (§12.4) */
@@ -992,11 +1009,11 @@ static inline size_t quic__packet(quic_conn *c, uint8_t *p, uint8_t *end, int64_
   if (ptl == SIZE_MAX) return plen; /* not ours or corrupted: drop the packet only */
   if ((p[0] & 0x80 ? first & 0x0c : first & 0x18)) { quic__error(c, QUIC_PROTOCOL_VIOLATION, 0); return 0; } /* reserved bits */
   if (phase_flip) { /* the peer updated keys: rotate ours (RFC 9001 §6) */
-    quic__key_free(&sp->rx);
-    sp->rx = c->next_rx, memset(&c->next_rx, 0, sizeof c->next_rx), c->have_next_rx = 0;
+    ptls_aead_free(sp->rx.aead);
+    sp->rx = c->next_rx, memset(&c->next_rx, 0, sizeof c->next_rx), c->have_next_rx = 0; /* same hp key */
     c->key_phase ^= 1;
-    if (!quic__next_secret(c->cs, c->app_secret_tx)) quic__key_setup(&sp->tx, c->cs, 1, c->app_secret_tx);
-    if (!quic__next_secret(c->cs, c->app_secret_rx) && !quic__key_setup(&c->next_rx, c->cs, 0, c->app_secret_rx)) c->have_next_rx = 1;
+    if (!quic__next_secret(c->cs, c->app_secret_tx)) quic__key_update(&sp->tx, &sp->tx, c->cs, 1, c->app_secret_tx);
+    if (!quic__next_secret(c->cs, c->app_secret_rx) && !quic__key_update(&c->next_rx, &sp->rx, c->cs, 0, c->app_secret_rx)) c->have_next_rx = 1;
   }
   if (quic__rcv_pn(sp, pn)) return plen; /* duplicate */
   if (space == QUIC_SP_HANDSHAKE && !c->addr_validated) { /* RFC 9001 §4.9.1, RFC 9000 §8.1 */
