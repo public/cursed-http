@@ -87,3 +87,13 @@ static inline int _mm256_testz_si256(__m256i a, __m256i b) {
     if (a.b[i] & b.b[i]) return 0;
   return 1;
 }
+// learned templates (fp_tm_cmp / fp_tm_scan / fp_tm_rl)
+static inline __m256i _mm256_xor_si256(__m256i a, __m256i b) {
+  for (int i = 0; i < 32; i++) a.b[i] ^= b.b[i];
+  return a;
+}
+static inline int _mm256_movemask_epi8(__m256i a) {
+  uint32_t m = 0;
+  for (int i = 0; i < 32; i++) m |= (uint32_t)(a.b[i] >> 7) << i;
+  return (int)m;
+}

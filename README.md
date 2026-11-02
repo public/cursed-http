@@ -14,6 +14,10 @@ This repository holds three single-header HTTP/1.1 parsers plus a learning mode:
   and it hands back the route, the numeric id, the `Bearer` token and the body framing directly.
 - **`fast_parse_learn()`**, the learning mode of fastparse.h. It learns each route's most common header layout at
   runtime and checks later requests against that layout, with results identical to `fast_parse`.
+- **`fast_parse_tmpl()`**, a second learning mode that needs no spec at all. It learns whole-request templates from
+  the traffic (constant bytes plus variable slots for the path and header values) and matches later requests with
+  vector compares, with results identical to `fast_parse`. *In development:* see
+  [Learned request templates](#learned-request-templates).
 - **[`fbparse.h`](include/fbparse.h)**, a general parser with picohttpparser's API and exactly its results.
 - **[`batchparse.h`](include/batchparse.h)**, which parses many connections' requests in one lane-parallel call.
 
@@ -67,6 +71,7 @@ fastparse on every request before it's timed.
 |---|---|---|
 | **fastparse.h** (AVX2) | **46.9** | 1× |
 | fastparse.h, generated from the spec + profile | 45.1 | 0.96× |
+| fbparse.h, our general parser ³ | — | 2.0× slower |
 | lightning (C, AVX2/SSE4.2) | 95.3 | 2.0× slower |
 | picohttpparser (SSE4.2) | 109.2 | 2.3× slower |
 | hparse (Zig) ¹ | 122.9 | 2.6× slower |
@@ -76,7 +81,8 @@ fastparse on every request before it's timed.
 | fasthttp 1.76 (Go) ² | 392.7 | 8.4× slower |
 | http-parser 2.9.4 (Node.js, legacy) | 397.7 | 8.5× slower |
 
-**General traffic** (fbparse.h against the general parsers, +logic):
+**General traffic** (fbparse.h against the general parsers, +logic). fbparse.h is the fastest general parser on every
+corpus here, and on the API mix above (³):
 
 | corpus | **fbparse.h** | lightning | picohttpparser | httparse ¹ | llhttp | hparse ¹ | fasthttp ² | http-parser |
 |---|---|---|---|---|---|---|---|---|
@@ -105,6 +111,10 @@ against 40.5 for the best general parser.
 httparse is from a separate Xeon run with that machine's rustc 1.94.0. It was built like its own bench profile plus
 `target-cpu=native`, so its compile-time AVX2 path is on, and it passed the same correctness gate. Its vs-fbparse
 row uses the same layout-randomised pairs, 8 layouts × 2 rounds.
+³ fbparse.h is from a later run of the same harness (Xeon exp1385, 3 rounds, the gate passed) with buffers twice as
+far apart, which puts every parser's numbers higher, so only same-run ratios are shown. In that run, on the gocli -gzip
+mix +logic: fbparse.h 107.7 ns, lightning 114.2, picohttpparser 132.8, uWebSockets 138.7, llhttp 259.2, fastparse.h
+54.6. On the k6 and gocli corpora too, it is the fastest general parser: 99.6 vs 116.8 (lightning) and 81.7 vs 88.1.
 ² fasthttp is Go. It is measured by its own harness on the same request bytes (`make compare-go`): it parses with
 `RequestHeader.Read`, as its server does, and its "+logic" is the same routing in Go. There is no shared correctness
 gate across languages; it accepted every request.
@@ -417,6 +427,7 @@ make bench
 - **Optional learned layout** (`fast_parse_learn`). Per route, it learns the most common header layout at
   runtime and checks later requests against it with independent compares, with identical results. It helps
   pipelined batches; it doesn't help single calls on real hardware.
+- **Optional learned request templates** (`fast_parse_tmpl`), below.
 
 **fbparse.h**
 - **Same mask approach for pico's grammar.** There are four predicates: not-a-token-char (pico's
@@ -480,9 +491,49 @@ fp_batch_t fast_parse_many(const char *buf, int len, req_t *out, int max);
 fp_learn_t T = {0};                                    // 5.6 KB, one per thread, zero-initialised
 int fast_parse_learn(const char *buf, int len, req_t *r, fp_learn_t *T);   // same results as fast_parse
 fp_batch_t fast_parse_many_learn(const char *buf, int len, req_t *out, int max, fp_learn_t *T);
+
+fp_tmpl_t X = {0};                                     // ~50 KB, one per thread, zero-initialised
+int fast_parse_tmpl(const char *buf, int len, req_t *r, fp_tmpl_t *X);     // same results as fast_parse
+fp_batch_t fast_parse_many_tmpl(const char *buf, int len, req_t *out, int max, fp_tmpl_t *X);
+void fp_tmpl_mode(fp_tmpl_t *X, int mode);   // FP_TM_AUTO (default), FP_TM_ALWAYS or FP_TM_OFF
+int fp_tmpl_seed(fp_tmpl_t *X, const char *buf, int len, int pin);   // learn from sample requests; pin: never evict
+void fp_tmpl_quick(fp_tmpl_t *X, int cap);   // short canonical GETs via fp_quick_get first: 128, 64, -1 = off
 ```
 
 `FP_FALLBACK` is always safe: hand the bytes to a full parser (`fb_parse_req`) or answer 400.
+
+#### Learned request templates
+
+`fast_parse_tmpl` learns the traffic instead of the API. It is meant for places with no spec (a proxy, nginx, Envoy,
+HAProxy), where the request lines and headers are whatever clients send.
+- **A template** is a request seen at runtime, cut into constant segments and variable slots: the method (if it
+  varies), the path, and the tail of each header value that varies. Two requests with the same skeleton (line count
+  and every header name up to its colon) make a template; the values that differ become slots and their common
+  prefix stays constant. Up to 8 templates per table, tried in the order of their recent hits.
+- **A match** is vector compares of the constants and one short scan per slot: no LF classify, no end-of-headers
+  search, no line walk. The spec's router (`fp_route`) runs on the path span; only the Content-Length and first
+  Authorization lines are parsed, by the same functions `fast_parse` uses.
+- **Exactly `fast_parse`'s results.** The argument is in the comment above `fp_tm_try`: slots hold no CR/LF (the
+  path no SP), every line starts in constant bytes, and a slot starts only after its line's colon, so every line's
+  class is fixed by constant bytes. Connection lines are never slotted (the verdict reads the whole value), and
+  routes that ask for the spec's headers decline (the general parser fills `hdr`). This is argued and tested
+  (differential suite, direct tries of every learned template, a slot fuzzer, the libFuzzer/Hypothesis oracle, the
+  conformance suites), not formally verified.
+- **A cost model**, from counters only (no clock), keeps it from losing. The table bypasses itself while failed
+  template tries plus misses exceed ~1 per request (`FP_TM_COST`). That ratio is calibrated on a Xeon: a hit costs
+  ~0.8 of `fast_parse`, a failed try ~0.2. While bypassed, a probe of 64 requests every 1–8 windows keeps the counters
+  and the learning current. `-DFP_TM_NOCOST` turns it off.
+- **Caller hints**, for traffic you know: `fp_tmpl_mode` with `FP_TM_ALWAYS` (a few request shapes, e.g. one
+  API's clients) or `FP_TM_OFF`. `fp_tmpl_seed` takes sample requests back to back, with at least two of each shape,
+  so the table hits from the first live request; with `pin = 1` those templates are never evicted. Seeded templates
+  are learned and checked like any other.
+- **Quick dispatch over the generated parser**: with `fp_tmpl_quick`, a GET whose request line is canonical (a
+  route that reads no header lines) and whose headers end within 128 bytes goes to `fp_quick_get` before the
+  templates. It returns exactly `fast_parse`'s result. A header generated with `--profile` turns it on by default
+  when the profiled GET header blocks are short (median ≤ 64 B). In the lab on the Xeon it cut gocli -gzip to
+  51.7 ns, against 56.5 for the profile-generated parser alone and 59.2 for templates alone; on k6 (85 B GET
+  blocks) it would cost 6.5 ns, so there it stays off.
+- **Status:** in development. Xeon numbers and the verdict are in the pull request that adds it.
 
 ### fbparse.h
 
@@ -911,12 +962,15 @@ Xeon, gocli -gzip corpus, raw / +logic:
 | uWebSockets 20.80.0 (C++) | 107.5 / **125.8** | 85.7 / 99.8 | 88.9 / 110.3 | 139.5 / 177.3 |
 | llhttp 9.4.3 | 225.9 / **254.0** | 195.2 / 211.3 | 205.7 / 233.3 | 373.2 / 416.7 |
 | http-parser 2.9.4 | 375.0 / **397.7** | 284.6 / 295.5 | 333.9 / 356.6 | 957.9 / 1002.5 |
+| fbparse.h ³ | 79.1 / **107.7** | 65.8 / 74.4 | 66.3 / 84.2 | 93.5 / 126.6 |
 | **fastparse, AVX2** | **46.9** | 31.1 | 36.0 | 93.1 |
 | fastparse, generated from the spec | 45.9 | 30.7 | 35.1 | 87.2 |
 | fastparse, generated, spec + profile | **45.1** | 30.8 | 34.3 | 84.2 |
 | fastparse, learned layout | 49.8 | 29.2 | 36.5 | 94.3 |
 | fastparse, scalar backend | 93.4 | 65.5 | 77.4 | 197.3 |
 
+³ fbparse.h's row is from the later run exp1385 (buffers twice as far apart, so every number runs higher); lightning
+there was 90.8 / 114.2 and picohttpparser 108.4 / 132.8 on the mix, so compare it with those, not this table's rows.
 httparse 1.10.1 (Rust, AVX2, rustc 1.94.0, separate run) is at 134.4 / 150.4 on the mix. hparse (Zig) measured
 97.2 / 122.9 on the mix in an earlier run of the same harness. fasthttp (Go) is at 355.1 /
 392.7.

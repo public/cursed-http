@@ -33,6 +33,18 @@ static const edge_t EDGES[] = {
   { "GET /feed HTTP/1.1\r\n\r\n", 1, R_FEED, 0, 0, 0, 0 },               // no headers
   { "GET /feed/ HTTP/1.1\r\nHost: x\r\n\r\n", 1, R_NOTFOUND, 0, 0, 0, 0 },
   { "GET /feed HTTP/1.0\r\nHost: x\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0 },
+  // short request lines (l0 < 16 used to fall back): the homepage, a 1-byte method, no headers
+  { "GET / HTTP/1.1\r\n\r\n", 1, R_NOTFOUND, 0, 0, 0, 0 },
+  { "GET / HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n", 1, R_NOTFOUND, 0, 0, 0, 0 },
+  { "GET /a HTTP/1.1\r\n\r\n", 1, R_NOTFOUND, 0, 0, 0, 0 },
+  { "M / HTTP/1.1\r\n\r\n", 1, R_NOTFOUND, 0, 0, 0, 0 },
+  { "GET  / HTTP/1.1\r\n\r\n", 1, R_NOTFOUND, 0, 0, 0, 0 },
+  { "GET / HTTP/1.1\r\nContent-Length: 2\r\n\r\nab", 1, R_NOTFOUND, 0, 0, 0, 0 },
+  { "GET  HTTP/1.1\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0 },
+  { "X HTTP/1.1\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0 },
+  { "/ HTTP/1.1\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0 },
+  { " / HTTP/1.1\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0 }, // empty method (any length: " /feed HTTP/1.1" too)
+  { " /feed HTTP/1.1\r\nHost: x\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0 },
   { "GET /feed HTTP/1.1\nHost: x\r\n\r\n", FP_FALLBACK, 0, 0, 0, 0, 0 }, // bare LF request line
   { "POST /posts HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\nContent-Length: 12\r\n\r\n{\"body\":\"x\"}",
     1, R_CREATE, 0, 0, 0, 0 },

@@ -2,7 +2,7 @@
 // Hypothesis properties (fuzz/hyp/, through build/libfuzzoracle). The same rules as the unit tests:
 //   fz_check_fb     fbparse.h (SIMD, scalar, both header loops, two paddings) == picohttpparser, exactly;
 //                   the req_t adapter == testlib's ref_parse (pico + the routing logic)
-//   fz_check_fast   fastparse.h: every core/classify/learned path agrees; vs ref_parse it may only fall back
+//   fz_check_fast   fastparse.h: every core/classify/learned path (layouts and templates) agrees; vs ref_parse it may only fall back
 //                   (or meet pico's -2 with a relaxed accept); no prefix of a complete request completes or
 //                   errors; fast_parse_many == repeated fast_parse
 //   fz_check_batch  batchparse.h: every lane of every phase-A variant == fast_parse on that lane
@@ -230,6 +230,34 @@ static int fz_fast_backends(const char *b, int len, int a, const req_t *f, char 
   }
   free(T);
   if (r) return r;
+  // learned templates, fresh tables per input: the first call leaves it pending, the second makes a template
+  // of it, the third goes through that template; every call == fast_parse (SIMD and scalar tables)
+  fp_tmpl_t *X = calloc(2, sizeof *X);
+  for (int i = 0; i < 6 && !r; i++) {
+    req_t s;
+    memset(&s, 0, sizeof s);
+    int c = i & 1 ? fast_parse_tmpl_scalar(b, len, &s, &X[1]) : fast_parse_tmpl(b, len, &s, &X[0]);
+    if (!same(a, f, c, &s) || (a > 0 && f->id != s.id))
+      r = fz_err(err, en, "fast_parse %d, learned template/%s %d (call %d)", a, i & 1 ? "scalar" : "simd", c, i / 2);
+  }
+  free(X);
+  if (r) return r;
+  // a template made of this request alone must reproduce fast_parse's result on it
+  if (a > 0) {
+    fp_tm_t *S = calloc(1, sizeof *S);
+    if (fp_tm_shape(b, f->body_off, S) && fp_tm_compile(S))
+      for (int simd = 0; simd < 2 && !r; simd++) {
+        req_t s;
+        memset(&s, 0, sizeof s);
+        int lim = len < FP_MAXHDR ? len : FP_MAXHDR, me, pe, c = -2;
+        if (simd ? fp_tm_rl(1, b, lim, &me, &pe) : fp_tm_rl(0, b, lim, &me, &pe))
+          c = simd ? fp_tm_try(b, len, &s, S, 1, lim, me, pe) : fp_tm_try(b, len, &s, S, 0, lim, me, pe);
+        if (c != -2 && (!same(a, f, c, &s) || f->id != s.id))
+          r = fz_err(err, en, "fast_parse %d, its own template/%s %d", a, simd ? "simd" : "scalar", c);
+      }
+    free(S);
+    if (r) return r;
+  }
   // a layout built from this request must reproduce fast_parse's result on it
   req_t q;
   int l0 = fp_reqline_canon(b, &q);
