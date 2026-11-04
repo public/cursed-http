@@ -299,7 +299,7 @@ mca-validate: | $(B)
 # planted bugs that the tests must catch (prints one line per mutant; read the output)
 mutants:
 	./scripts/mutants_fbparse.sh
-	EMU=1 ./scripts/mutants_fbparse.sh | grep -i 'avx512\|SELF'
+	EMU=1 ./scripts/mutants_fbparse.sh | grep -i 'avx512\|simd\|SELF'
 	./scripts/mutants_batch.sh
 
 # ---- fuzzing (fuzz/): differential oracles shared by libFuzzer targets and Hypothesis properties ----

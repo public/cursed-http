@@ -174,175 +174,64 @@ FB_INLINE void fb_all64_scalar(const char *p, uint64_t *m) {
   m[3] = fb_lf64_scalar(p);
 }
 
+// The SIMD classify, written once over a small per-backend vector layer. A backend supplies:
+//   fb_v_t (one vector), fb_m_t (one compare result: a vector, or a mask register on AVX-512), FB_EQ(x, c),
+//   FB_LE(x, c) (unsigned <=), FB_OR(a, b), FB_ANDN(a, b) (a and not b), fb_ntv(x) (not a token character),
+//   FB_BLK(p) (load the 64 bytes at p) and FB_BPACK(P) (predicate P on every vector of that block, packed into a
+//   64-bit mask in byte order). FB_PACK(P, p) = both for one predicate, unless the backend loads at each use instead
+//   (AVX2's single predicates, AVX-512 everywhere). Each backend keeps the load placement it was tuned with: the
+//   machine code is the same as with the per-backend copies this replaced. The predicates and block functions follow.
 #if FB_BACKEND == 1
 // NEON: vld4q de-interleaves (v.val[j] lane i = byte 4i+j); a vsri chain + shrn #4 packs four compare
 // vectors into a 64-bit mask in byte order (as fastparse.h's fp_neon_pack4).
+typedef uint8x16_t fb_v_t;
+typedef uint8x16_t fb_m_t;
+#define FB_EQ(x, c)   vceqq_u8(x, vdupq_n_u8(c))
+#define FB_LE(x, c)   vcleq_u8(x, vdupq_n_u8(c))
+#define FB_OR(a, b)   vorrq_u8(a, b)
+#define FB_ANDN(a, b) vbicq_u8(a, b)
+FB_INLINE fb_m_t fb_ntv(fb_v_t x) {
+  const uint8x16_t LO = vld1q_u8(FB_LO), HI = vld1q_u8(FB_HI), F = vdupq_n_u8(0x0f);
+  return vceqq_u8(vandq_u8(vqtbl1q_u8(LO, vandq_u8(x, F)), vqtbl1q_u8(HI, vshrq_n_u8(x, 4))), vdupq_n_u8(0));
+}
 FB_INLINE uint64_t fb_neon_pack4(uint8x16_t c0, uint8x16_t c1, uint8x16_t c2, uint8x16_t c3) {
   uint8x16_t t0 = vsriq_n_u8(c1, c0, 1), t1 = vsriq_n_u8(c3, c2, 1);
   uint8x16_t t2 = vsriq_n_u8(t1, t0, 2), t3 = vsriq_n_u8(t2, t2, 4);
   return vget_lane_u64(vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(t3), 4)), 0);
 }
-#define FB_NEON4(P) fb_neon_pack4(P(v.val[0]), P(v.val[1]), P(v.val[2]), P(v.val[3]))
-FB_INLINE uint64_t fb_nt64_simd(const char *p) {
-  uint8x16x4_t v = vld4q_u8((const uint8_t *)p);
-  const uint8x16_t LO = vld1q_u8(FB_LO), HI = vld1q_u8(FB_HI), F = vdupq_n_u8(0x0f);
-#define FB_P(x) vceqq_u8(vandq_u8(vqtbl1q_u8(LO, vandq_u8(x, F)), vqtbl1q_u8(HI, vshrq_n_u8(x, 4))), vdupq_n_u8(0))
-  return FB_NEON4(FB_P);
-#undef FB_P
-}
-FB_INLINE uint64_t fb_ct64_simd(const char *p) {
-  uint8x16x4_t v = vld4q_u8((const uint8_t *)p);
-#define FB_P(x)                                                                                                        \
-  vorrq_u8(vbicq_u8(vcleq_u8(x, vdupq_n_u8(0x1f)), vceqq_u8(x, vdupq_n_u8('\t'))), vceqq_u8(x, vdupq_n_u8(0x7f)))
-  return FB_NEON4(FB_P);
-#undef FB_P
-}
-FB_INLINE uint64_t fb_pe64_simd(const char *p) {
-  uint8x16x4_t v = vld4q_u8((const uint8_t *)p);
-#define FB_P(x) vorrq_u8(vcleq_u8(x, vdupq_n_u8(0x20)), vceqq_u8(x, vdupq_n_u8(0x7f)))
-  return FB_NEON4(FB_P);
-#undef FB_P
-}
-FB_INLINE uint64_t fb_lf64_simd(const char *p) {
-  uint8x16x4_t v = vld4q_u8((const uint8_t *)p);
-#define FB_P(x) vceqq_u8(x, vdupq_n_u8('\n'))
-  return FB_NEON4(FB_P);
-#undef FB_P
-}
-FB_INLINE void fb_lfct64_simd(const char *p, uint64_t *lf, uint64_t *ct) { // one vld4 for both
-  uint8x16x4_t v = vld4q_u8((const uint8_t *)p);
-#define FB_P(x) vceqq_u8(x, vdupq_n_u8('\n'))
-  *lf = FB_NEON4(FB_P);
-#undef FB_P
-#define FB_P(x)                                                                                                        \
-  vorrq_u8(vbicq_u8(vcleq_u8(x, vdupq_n_u8(0x1f)), vceqq_u8(x, vdupq_n_u8('\t'))), vceqq_u8(x, vdupq_n_u8(0x7f)))
-  *ct = FB_NEON4(FB_P);
-#undef FB_P
-}
-FB_INLINE void fb_all64_simd(const char *p, uint64_t *m) { // block 0: one vld4 for all four
-  uint8x16x4_t v = vld4q_u8((const uint8_t *)p);
-  const uint8x16_t LO = vld1q_u8(FB_LO), HI = vld1q_u8(FB_HI), F = vdupq_n_u8(0x0f);
-#define FB_P(x) vceqq_u8(vandq_u8(vqtbl1q_u8(LO, vandq_u8(x, F)), vqtbl1q_u8(HI, vshrq_n_u8(x, 4))), vdupq_n_u8(0))
-  m[0] = FB_NEON4(FB_P);
-#undef FB_P
-#define FB_P(x)                                                                                                        \
-  vorrq_u8(vbicq_u8(vcleq_u8(x, vdupq_n_u8(0x1f)), vceqq_u8(x, vdupq_n_u8('\t'))), vceqq_u8(x, vdupq_n_u8(0x7f)))
-  m[1] = FB_NEON4(FB_P);
-#undef FB_P
-#define FB_P(x) vorrq_u8(vcleq_u8(x, vdupq_n_u8(0x20)), vceqq_u8(x, vdupq_n_u8(0x7f)))
-  m[2] = FB_NEON4(FB_P);
-#undef FB_P
-#define FB_P(x) vceqq_u8(x, vdupq_n_u8('\n'))
-  m[3] = FB_NEON4(FB_P);
-#undef FB_P
-}
-FB_INLINE void fb_ntct64_simd(const char *p, uint64_t *nt, uint64_t *ct) { // one vld4 for both
-  uint8x16x4_t v = vld4q_u8((const uint8_t *)p);
-  const uint8x16_t LO = vld1q_u8(FB_LO), HI = vld1q_u8(FB_HI), F = vdupq_n_u8(0x0f);
-#define FB_P(x) vceqq_u8(vandq_u8(vqtbl1q_u8(LO, vandq_u8(x, F)), vqtbl1q_u8(HI, vshrq_n_u8(x, 4))), vdupq_n_u8(0))
-  *nt = FB_NEON4(FB_P);
-#undef FB_P
-#define FB_P(x)                                                                                                        \
-  vorrq_u8(vbicq_u8(vcleq_u8(x, vdupq_n_u8(0x1f)), vceqq_u8(x, vdupq_n_u8('\t'))), vceqq_u8(x, vdupq_n_u8(0x7f)))
-  *ct = FB_NEON4(FB_P);
-#undef FB_P
-}
-#undef FB_NEON4
+#define FB_BLK(p)   uint8x16x4_t v_ = vld4q_u8((const uint8_t *)(p))
+#define FB_BPACK(P) fb_neon_pack4(P(v_.val[0]), P(v_.val[1]), P(v_.val[2]), P(v_.val[3]))
 // nt mask of the 16 bytes at p as 4 bits per byte (vshrn nibble mask): the name scan at a line start (fb_core).
 FB_INLINE uint64_t fb_nt16_nib(const char *p) {
-  const uint8x16_t LO = vld1q_u8(FB_LO), HI = vld1q_u8(FB_HI), F = vdupq_n_u8(0x0f);
-  uint8x16_t x = vld1q_u8((const uint8_t *)p);
-  uint8x16_t nt = vceqq_u8(vandq_u8(vqtbl1q_u8(LO, vandq_u8(x, F)), vqtbl1q_u8(HI, vshrq_n_u8(x, 4))), vdupq_n_u8(0));
+  uint8x16_t nt = fb_ntv(vld1q_u8((const uint8_t *)p));
   return vget_lane_u64(vreinterpret_u64_u8(vshrn_n_u16(vreinterpretq_u16_u8(nt), 4)), 0);
 }
-// "maybe a ct byte in the next FB_CTANY_BLOCKS * 64 bytes?" for fb_line()'s long-value loop. It may over-approximate,
-// because a positive only sends the block to the exact masks: (int8)(x + 1) < 0x21 holds for every control byte
-// (HT too), DEL, and every byte >= 0x80 (not allowed in cookies, rare in other headers). Two ops per 16 bytes (add,
-// signed min), like memchr's compare + or; two independent accumulators, one reduction per test; no vld4, no packing.
-// -DFB_CTANY_EXACTISH: the unsigned variant instead (min < 0x20, or DEL): no false positives on bytes >= 0x80.
-#define FB_HAVE_CTANY 1
-#ifndef FB_CTANY_BLOCKS
-#define FB_CTANY_BLOCKS 8
-#endif
-#ifndef FB_CTANY_AFTER
-#define FB_CTANY_AFTER 2 // blocks of a line classified exactly before the skip windows start (after the crossing block)
-#endif
-#ifndef FB_CTANY_PREFETCH
-#define FB_CTANY_PREFETCH 3072 // bytes ahead to prefetch in the skip loop (0 = none); long heads are memory-bound
-#endif
-FB_INLINE int fb_ctany_simd(const char *p, const int nb) { // nb 64-byte blocks (a constant at each call)
-#ifdef FB_CTANY_EXACTISH
-  const uint8x16_t DEL = vdupq_n_u8(0x7f);
-  uint8x16_t mn0 = vdupq_n_u8(0xff), mn1 = mn0, d0 = vdupq_n_u8(0), d1 = d0;
-  for (int i = 0; i < 4 * nb; i += 2) {
-    uint8x16_t x0 = vld1q_u8((const uint8_t *)p + 16 * i), x1 = vld1q_u8((const uint8_t *)p + 16 * i + 16);
-    mn0 = vminq_u8(mn0, x0);
-    mn1 = vminq_u8(mn1, x1);
-    d0 = vorrq_u8(d0, vceqq_u8(x0, DEL));
-    d1 = vorrq_u8(d1, vceqq_u8(x1, DEL));
-  }
-  return (vminvq_u8(vminq_u8(mn0, mn1)) < 0x20) || (vmaxvq_u8(vorrq_u8(d0, d1)) != 0);
-#else
-  const uint8x16_t ONE = vdupq_n_u8(1); // x + 1 wraps on purpose: done unsigned (no signed overflow), compared signed
-  int8x16_t m0 = vdupq_n_s8(127), m1 = m0;
-  for (int i = 0; i < 4 * nb; i += 2) {
-    m0 = vminq_s8(m0, vreinterpretq_s8_u8(vaddq_u8(vld1q_u8((const uint8_t *)p + 16 * i), ONE)));
-    m1 = vminq_s8(m1, vreinterpretq_s8_u8(vaddq_u8(vld1q_u8((const uint8_t *)p + 16 * i + 16), ONE)));
-  }
-  return vminvq_s8(vminq_s8(m0, m1)) < 0x21;
-#endif
-}
 #elif FB_BACKEND == 2
-FB_INLINE uint64_t fb_mm2(__m256i x, __m256i y) {
-  return (uint32_t)_mm256_movemask_epi8(x) | ((uint64_t)(uint32_t)_mm256_movemask_epi8(y) << 32);
-}
-FB_INLINE __m256i fb_nt32(__m256i v) {
+typedef __m256i fb_v_t;
+typedef __m256i fb_m_t;
+#define FB_EQ(x, c)   _mm256_cmpeq_epi8(x, _mm256_set1_epi8(c))
+// x <= c (unsigned) <=> max(x, c) == c
+#define FB_LE(x, c)   _mm256_cmpeq_epi8(_mm256_max_epu8(x, _mm256_set1_epi8(c)), _mm256_set1_epi8(c))
+#define FB_OR(a, b)   _mm256_or_si256(a, b)
+#define FB_ANDN(a, b) _mm256_andnot_si256(b, a)
+FB_INLINE fb_m_t fb_ntv(fb_v_t v) {
   const __m256i LO = _mm256_load_si256((const void *)FB_LO), HI = _mm256_load_si256((const void *)FB_HI),
                 F = _mm256_set1_epi8(0x0f);
   __m256i t = _mm256_and_si256(_mm256_shuffle_epi8(LO, _mm256_and_si256(v, F)),
                                _mm256_shuffle_epi8(HI, _mm256_and_si256(_mm256_srli_epi16(v, 4), F)));
   return _mm256_cmpeq_epi8(t, _mm256_setzero_si256());
 }
-// x <= c (unsigned) <=> max(x, c) == c
-FB_INLINE __m256i fb_le32(__m256i v, char c) {
-  return _mm256_cmpeq_epi8(_mm256_max_epu8(v, _mm256_set1_epi8(c)), _mm256_set1_epi8(c));
+FB_INLINE uint64_t fb_mm2(__m256i x, __m256i y) {
+  return (uint32_t)_mm256_movemask_epi8(x) | ((uint64_t)(uint32_t)_mm256_movemask_epi8(y) << 32);
 }
-FB_INLINE __m256i fb_ct32(__m256i v) {
-  return _mm256_or_si256(_mm256_andnot_si256(_mm256_cmpeq_epi8(v, _mm256_set1_epi8('\t')), fb_le32(v, 0x1f)),
-                         _mm256_cmpeq_epi8(v, _mm256_set1_epi8(0x7f)));
-}
-FB_INLINE __m256i fb_pe32(__m256i v) {
-  return _mm256_or_si256(fb_le32(v, 0x20), _mm256_cmpeq_epi8(v, _mm256_set1_epi8(0x7f)));
-}
-#define FB_AVX2_64(P)                                                                                                  \
-  return fb_mm2(P(_mm256_loadu_si256((const void *)p)), P(_mm256_loadu_si256((const void *)(p + 32))))
-FB_INLINE uint64_t fb_nt64_simd(const char *p) { FB_AVX2_64(fb_nt32); }
-FB_INLINE uint64_t fb_ct64_simd(const char *p) { FB_AVX2_64(fb_ct32); }
-FB_INLINE uint64_t fb_pe64_simd(const char *p) { FB_AVX2_64(fb_pe32); }
-FB_INLINE __m256i fb_lf32(__m256i v) { return _mm256_cmpeq_epi8(v, _mm256_set1_epi8('\n')); }
-FB_INLINE uint64_t fb_lf64_simd(const char *p) { FB_AVX2_64(fb_lf32); }
-FB_INLINE void fb_ntct64_simd(const char *p, uint64_t *nt, uint64_t *ct) {
-  __m256i v0 = _mm256_loadu_si256((const void *)p), v1 = _mm256_loadu_si256((const void *)(p + 32));
-  *nt = fb_mm2(fb_nt32(v0), fb_nt32(v1));
-  *ct = fb_mm2(fb_ct32(v0), fb_ct32(v1));
-}
-FB_INLINE void fb_lfct64_simd(const char *p, uint64_t *lf, uint64_t *ct) {
-  __m256i v0 = _mm256_loadu_si256((const void *)p), v1 = _mm256_loadu_si256((const void *)(p + 32));
-  *lf = fb_mm2(fb_lf32(v0), fb_lf32(v1));
-  *ct = fb_mm2(fb_ct32(v0), fb_ct32(v1));
-}
-FB_INLINE void fb_all64_simd(const char *p, uint64_t *m) {
-  __m256i v0 = _mm256_loadu_si256((const void *)p), v1 = _mm256_loadu_si256((const void *)(p + 32));
-  m[0] = fb_mm2(fb_nt32(v0), fb_nt32(v1));
-  m[1] = fb_mm2(fb_ct32(v0), fb_ct32(v1));
-  m[2] = fb_mm2(fb_pe32(v0), fb_pe32(v1));
-  m[3] = fb_mm2(fb_lf32(v0), fb_lf32(v1));
-}
-#undef FB_AVX2_64
+#define FB_BLK(p)                                                                                                      \
+  __m256i v0_ = _mm256_loadu_si256((const void *)(p)), v1_ = _mm256_loadu_si256((const void *)((p) + 32))
+#define FB_BPACK(P)   fb_mm2(P(v0_), P(v1_))
+#define FB_PACK(P, p) fb_mm2(P(_mm256_loadu_si256((const void *)(p))), P(_mm256_loadu_si256((const void *)((p) + 32))))
 #elif FB_BACKEND == 3
-// Same predicates as AVX2, compares straight into mask registers; vptestnmb gives nt without a compare.
-// Default ymm (AVX-512VL, no zmm frequency licence on Cascade Lake); -DFP_USE_ZMM: one zmm per block.
-// Intrinsic names per width; the test build (-DFP_AVX512_EMU) maps them to fb_avx512_emu.h's C functions.
+// Compares straight into mask registers; vptestnmb gives nt without a compare. Default ymm (AVX-512VL, no zmm
+// frequency licence on Cascade Lake); -DFP_USE_ZMM: one zmm per block. Intrinsic names per width; the test build
+// (-DFP_AVX512_EMU) maps them to fb_avx512_emu.h's C functions.
 #if defined(FP_USE_ZMM) && defined(FP_AVX512_EMU)
 #define FB_A(op) fbemu_mm512_##op
 #define FB_VT    fbemu512
@@ -372,129 +261,151 @@ FB_INLINE void fb_all64_simd(const char *p, uint64_t *m) {
 #define FB_Y_testn_epi8_mask _mm256_testn_epi8_mask
 #define FB_VT                __m256i
 #endif
+typedef FB_VT fb_v_t;
 #if defined(FP_USE_ZMM)
-#define FB_X64(E)                                                                                                      \
-  FB_VT v = FB_A(load)((const void *)p);                                                                               \
-  return (uint64_t)(E)
+typedef uint64_t fb_m_t;
+#define FB_PACK(P, p) ((uint64_t)P(FB_A(load)((const void *)(p))))
 #else
-#define FB_X64(E)                                                                                                      \
-  uint64_t r = 0;                                                                                                      \
-  for (int h = 0; h < 2; h++) {                                                                                        \
-    FB_VT v = FB_A(load)((const void *)(p + 32 * h));                                                                  \
-    r |= (uint64_t)(uint32_t)(E) << (32 * h);                                                                          \
-  }                                                                                                                    \
-  return r
+typedef uint32_t fb_m_t;
+#define FB_PACK(P, p)                                                                                                  \
+  __extension__({                                                                                                      \
+    uint64_t r_ = 0;                                                                                                   \
+    for (int h_ = 0; h_ < 2; h_++) r_ |= (uint64_t)P(FB_A(load)((const void *)((p) + 32 * h_))) << (32 * h_);          \
+    r_;                                                                                                                \
+  })
 #endif
-#define FB_S1(c)    FB_A(set1_epi8)(c)
-#define FB_EQ(v, c) FB_A(cmpeq_epi8_mask)(v, FB_S1(c))
-#define FB_LE(v, c) FB_A(cmple_epu8_mask)(v, FB_S1(c))
-#define FB_NTM(v)                                                                                                      \
-  FB_A(testn_epi8_mask)                                                                                                \
-  (FB_A(shuffle_epi8)(FB_A(load)((const void *)FB_LO), FB_A(and)(v, FB_S1(0x0f))),                                     \
-   FB_A(shuffle_epi8)(FB_A(load)((const void *)FB_HI), FB_A(and)(FB_A(srli_epi16)(v, 4), FB_S1(0x0f))))
-FB_INLINE uint64_t fb_nt64_simd(const char *p) { FB_X64(FB_NTM(v)); }
-FB_INLINE uint64_t fb_ct64_simd(const char *p) { FB_X64((FB_LE(v, 0x1f) & ~FB_EQ(v, '\t')) | FB_EQ(v, 0x7f)); }
-FB_INLINE uint64_t fb_pe64_simd(const char *p) { FB_X64(FB_LE(v, 0x20) | FB_EQ(v, 0x7f)); }
-FB_INLINE uint64_t fb_lf64_simd(const char *p) { FB_X64(FB_EQ(v, '\n')); }
-FB_INLINE void fb_ntct64_simd(const char *p, uint64_t *nt, uint64_t *ct) {
-  *nt = fb_nt64_simd(p);
-  *ct = fb_ct64_simd(p);
-} // loads are cheap here
-FB_INLINE void fb_lfct64_simd(const char *p, uint64_t *lf, uint64_t *ct) {
-  *lf = fb_lf64_simd(p);
-  *ct = fb_ct64_simd(p);
+#define FB_BLK(p)     const char *b_ = (p)
+#define FB_BPACK(P)   FB_PACK(P, b_)
+#define FB_EQ(x, c)   ((fb_m_t)FB_A(cmpeq_epi8_mask)(x, FB_A(set1_epi8)(c)))
+#define FB_LE(x, c)   ((fb_m_t)FB_A(cmple_epu8_mask)(x, FB_A(set1_epi8)(c)))
+#define FB_OR(a, b)   ((a) | (b))
+#define FB_ANDN(a, b) ((a) & ~(b))
+FB_INLINE fb_m_t fb_ntv(fb_v_t v) {
+  return (fb_m_t)FB_A(testn_epi8_mask)(
+      FB_A(shuffle_epi8)(FB_A(load)((const void *)FB_LO), FB_A(and)(v, FB_A(set1_epi8)(0x0f))),
+      FB_A(shuffle_epi8)(FB_A(load)((const void *)FB_HI), FB_A(and)(FB_A(srli_epi16)(v, 4), FB_A(set1_epi8)(0x0f))));
 }
-FB_INLINE void fb_all64_simd(const char *p, uint64_t *m) {
-  m[0] = fb_nt64_simd(p);
-  m[1] = fb_ct64_simd(p);
-  m[2] = fb_pe64_simd(p);
-  m[3] = fb_lf64_simd(p);
-}
-#undef FB_X64
-#undef FB_S1
-#undef FB_EQ
-#undef FB_LE
-#undef FB_NTM
 #elif FB_BACKEND == 4
 // SSE2 (the x86-64 baseline): four 16-byte vectors per 64-byte block, one movemask each. There is no pshufb,
 // so "not a token character" is the complement of pico's token_char_map as its nine ranges: 0x21,
 // 0x23-0x27, 0x2a-0x2b, 0x2d-0x2e, 0x30-0x39, 0x41-0x5a, 0x5e-0x7a, 0x7c, 0x7e.
-FB_INLINE uint64_t fb_mm4(__m128i a, __m128i b, __m128i c, __m128i d) {
-  return (uint64_t)(uint16_t)_mm_movemask_epi8(a) | (uint64_t)(uint16_t)_mm_movemask_epi8(b) << 16 |
-         (uint64_t)(uint16_t)_mm_movemask_epi8(c) << 32 | (uint64_t)(uint16_t)_mm_movemask_epi8(d) << 48;
-}
+typedef __m128i fb_v_t;
+typedef __m128i fb_m_t;
+#define FB_EQ(x, c)   _mm_cmpeq_epi8(x, _mm_set1_epi8(c))
+// x <= c (unsigned) <=> min(x, c) == x
+#define FB_LE(x, c)   _mm_cmpeq_epi8(_mm_min_epu8(x, _mm_set1_epi8(c)), x)
+#define FB_OR(a, b)   _mm_or_si128(a, b)
+#define FB_ANDN(a, b) _mm_andnot_si128(b, a)
 // lo <= x <= hi (unsigned) <=> min(x - lo, hi - lo) == x - lo
 #define FB_IN16(v, lo, hi)                                                                                             \
   _mm_cmpeq_epi8(_mm_min_epu8(_mm_sub_epi8(v, _mm_set1_epi8(lo)), _mm_set1_epi8((hi) - (lo))),                         \
                  _mm_sub_epi8(v, _mm_set1_epi8(lo)))
-#define FB_EQ16(v, c) _mm_cmpeq_epi8(v, _mm_set1_epi8(c))
-FB_INLINE __m128i fb_nt16(__m128i v) {
-  __m128i t = _mm_or_si128(_mm_or_si128(FB_EQ16(v, 0x21), FB_IN16(v, 0x23, 0x27)),
+FB_INLINE fb_m_t fb_ntv(fb_v_t v) {
+  __m128i t = _mm_or_si128(_mm_or_si128(FB_EQ(v, 0x21), FB_IN16(v, 0x23, 0x27)),
                            _mm_or_si128(FB_IN16(v, 0x2a, 0x2b), FB_IN16(v, 0x2d, 0x2e)));
   t = _mm_or_si128(t,
                    _mm_or_si128(_mm_or_si128(FB_IN16(v, 0x30, 0x39), FB_IN16(v, 0x41, 0x5a)), FB_IN16(v, 0x5e, 0x7a)));
-  t = _mm_or_si128(t, _mm_or_si128(FB_EQ16(v, 0x7c), FB_EQ16(v, 0x7e)));
+  t = _mm_or_si128(t, _mm_or_si128(FB_EQ(v, 0x7c), FB_EQ(v, 0x7e)));
   return _mm_cmpeq_epi8(t, _mm_setzero_si128());
 }
-FB_INLINE __m128i fb_le16(__m128i v, char c) { return _mm_cmpeq_epi8(_mm_min_epu8(v, _mm_set1_epi8(c)), v); }
-FB_INLINE __m128i fb_ct16(__m128i v) {
-  return _mm_or_si128(_mm_andnot_si128(FB_EQ16(v, '\t'), fb_le16(v, 0x1f)), FB_EQ16(v, 0x7f));
+#undef FB_IN16
+FB_INLINE uint64_t fb_mm4(__m128i a, __m128i b, __m128i c, __m128i d) {
+  return (uint64_t)(uint16_t)_mm_movemask_epi8(a) | (uint64_t)(uint16_t)_mm_movemask_epi8(b) << 16 |
+         (uint64_t)(uint16_t)_mm_movemask_epi8(c) << 32 | (uint64_t)(uint16_t)_mm_movemask_epi8(d) << 48;
 }
-FB_INLINE __m128i fb_pe16(__m128i v) { return _mm_or_si128(fb_le16(v, 0x20), FB_EQ16(v, 0x7f)); }
-FB_INLINE __m128i fb_lf16(__m128i v) { return FB_EQ16(v, '\n'); }
-#define FB_LD4                                                                                                         \
-  __m128i v0 = _mm_loadu_si128((const __m128i *)p), v1 = _mm_loadu_si128((const __m128i *)(p + 16)),                   \
-          v2 = _mm_loadu_si128((const __m128i *)(p + 32)), v3 = _mm_loadu_si128((const __m128i *)(p + 48))
-#define FB_M4(P) fb_mm4(P(v0), P(v1), P(v2), P(v3))
-FB_INLINE uint64_t fb_nt64_simd(const char *p) {
-  FB_LD4;
-  return FB_M4(fb_nt16);
-}
-FB_INLINE uint64_t fb_ct64_simd(const char *p) {
-  FB_LD4;
-  return FB_M4(fb_ct16);
-}
-FB_INLINE uint64_t fb_pe64_simd(const char *p) {
-  FB_LD4;
-  return FB_M4(fb_pe16);
-}
-FB_INLINE uint64_t fb_lf64_simd(const char *p) {
-  FB_LD4;
-  return FB_M4(fb_lf16);
-}
+#define FB_BLK(p)                                                                                                      \
+  __m128i v0_ = _mm_loadu_si128((const __m128i *)(p)), v1_ = _mm_loadu_si128((const __m128i *)((p) + 16)),             \
+          v2_ = _mm_loadu_si128((const __m128i *)((p) + 32)), v3_ = _mm_loadu_si128((const __m128i *)((p) + 48))
+#define FB_BPACK(P) fb_mm4(P(v0_), P(v1_), P(v2_), P(v3_))
+#endif
+
+#if FB_BACKEND != 0
+// the predicates on one vector (nt is the backend's fb_ntv), then on a block
+FB_INLINE fb_m_t fb_ctv(fb_v_t x) { return FB_OR(FB_ANDN(FB_LE(x, 0x1f), FB_EQ(x, '\t')), FB_EQ(x, 0x7f)); }
+FB_INLINE fb_m_t fb_pev(fb_v_t x) { return FB_OR(FB_LE(x, 0x20), FB_EQ(x, 0x7f)); }
+FB_INLINE fb_m_t fb_lfv(fb_v_t x) { return FB_EQ(x, '\n'); }
+#ifndef FB_PACK
+#define FB_PACK(P, p)                                                                                                  \
+  __extension__({                                                                                                      \
+    FB_BLK(p);                                                                                                         \
+    FB_BPACK(P);                                                                                                       \
+  })
+#endif
+FB_INLINE uint64_t fb_nt64_simd(const char *p) { return FB_PACK(fb_ntv, p); }
+FB_INLINE uint64_t fb_ct64_simd(const char *p) { return FB_PACK(fb_ctv, p); }
+FB_INLINE uint64_t fb_pe64_simd(const char *p) { return FB_PACK(fb_pev, p); }
+FB_INLINE uint64_t fb_lf64_simd(const char *p) { return FB_PACK(fb_lfv, p); }
 FB_INLINE void fb_ntct64_simd(const char *p, uint64_t *nt, uint64_t *ct) {
-  FB_LD4;
-  *nt = FB_M4(fb_nt16);
-  *ct = FB_M4(fb_ct16);
+  FB_BLK(p);
+  *nt = FB_BPACK(fb_ntv);
+  *ct = FB_BPACK(fb_ctv);
 }
 FB_INLINE void fb_lfct64_simd(const char *p, uint64_t *lf, uint64_t *ct) {
-  FB_LD4;
-  *lf = FB_M4(fb_lf16);
-  *ct = FB_M4(fb_ct16);
+  FB_BLK(p);
+  *lf = FB_BPACK(fb_lfv);
+  *ct = FB_BPACK(fb_ctv);
 }
-FB_INLINE void fb_all64_simd(const char *p, uint64_t *m) {
-  FB_LD4;
-  m[0] = FB_M4(fb_nt16);
-  m[1] = FB_M4(fb_ct16);
-  m[2] = FB_M4(fb_pe16);
-  m[3] = FB_M4(fb_lf16);
+FB_INLINE void fb_all64_simd(const char *p, uint64_t *m) { // block 0: all four
+  FB_BLK(p);
+  m[0] = FB_BPACK(fb_ntv);
+  m[1] = FB_BPACK(fb_ctv);
+  m[2] = FB_BPACK(fb_pev);
+  m[3] = FB_BPACK(fb_lfv);
 }
-#undef FB_LD4
-#undef FB_M4
-#undef FB_IN16
-#undef FB_EQ16
-#ifndef FB_NO_CTANY
-// the long-value skip test (see the NEON one above), SSE2 has no signed byte min: OR of (0x21 > (int8)(x + 1))
+#undef FB_EQ
+#undef FB_LE
+#undef FB_OR
+#undef FB_ANDN
+#undef FB_PACK
+#undef FB_BLK
+#undef FB_BPACK
+#endif
+
+// "Maybe a ct byte in the next nb * 64 bytes?" (fb_ctany_simd) for fb_line()'s long-value loop. It may
+// over-approximate, because a positive only sends the block to the exact masks: (int8)(x + 1) < 0x21 holds for every
+// control byte (HT too), DEL, and every byte >= 0x80 (not allowed in cookies, rare in other headers). Two ops per
+// vector (add, signed min), like memchr's compare + or; two independent accumulators, one reduction per test; no vld4,
+// no packing. -DFB_CTANY_EXACTISH (NEON, AVX2): the unsigned variant instead (min < 0x20, or DEL): no false positives
+// on bytes >= 0x80. The AVX-512 backend uses the AVX2 one (no zmm); not on the emulated AVX-512 build.
+#if (FB_BACKEND == 1 || FB_BACKEND == 2 || FB_BACKEND == 4 || (FB_BACKEND == 3 && !defined(FP_AVX512_EMU))) &&         \
+    !defined(FB_NO_CTANY)
 #define FB_HAVE_CTANY 1
 #ifndef FB_CTANY_BLOCKS
-#define FB_CTANY_BLOCKS 8
+#define FB_CTANY_BLOCKS 8 // the largest window (bench/scan_one.c)
 #endif
 #ifndef FB_CTANY_AFTER
-#define FB_CTANY_AFTER 2
+#define FB_CTANY_AFTER 2 // blocks of a line classified exactly before the skip windows start (after the crossing block)
 #endif
 #ifndef FB_CTANY_PREFETCH
-#define FB_CTANY_PREFETCH 3072
+#define FB_CTANY_PREFETCH 3072 // bytes ahead to prefetch in the skip loop (0 = none); long heads are memory-bound
 #endif
+#endif
+#ifdef FB_HAVE_CTANY
+#if FB_BACKEND == 1
+FB_INLINE int fb_ctany_simd(const char *p, const int nb) { // nb 64-byte blocks (a constant at each call)
+#ifdef FB_CTANY_EXACTISH
+  const uint8x16_t DEL = vdupq_n_u8(0x7f);
+  uint8x16_t mn0 = vdupq_n_u8(0xff), mn1 = mn0, d0 = vdupq_n_u8(0), d1 = d0;
+  for (int i = 0; i < 4 * nb; i += 2) {
+    uint8x16_t x0 = vld1q_u8((const uint8_t *)p + 16 * i), x1 = vld1q_u8((const uint8_t *)p + 16 * i + 16);
+    mn0 = vminq_u8(mn0, x0);
+    mn1 = vminq_u8(mn1, x1);
+    d0 = vorrq_u8(d0, vceqq_u8(x0, DEL));
+    d1 = vorrq_u8(d1, vceqq_u8(x1, DEL));
+  }
+  return (vminvq_u8(vminq_u8(mn0, mn1)) < 0x20) || (vmaxvq_u8(vorrq_u8(d0, d1)) != 0);
+#else
+  const uint8x16_t ONE = vdupq_n_u8(1); // x + 1 wraps on purpose: done unsigned (no signed overflow), compared signed
+  int8x16_t m0 = vdupq_n_s8(127), m1 = m0;
+  for (int i = 0; i < 4 * nb; i += 2) {
+    m0 = vminq_s8(m0, vreinterpretq_s8_u8(vaddq_u8(vld1q_u8((const uint8_t *)p + 16 * i), ONE)));
+    m1 = vminq_s8(m1, vreinterpretq_s8_u8(vaddq_u8(vld1q_u8((const uint8_t *)p + 16 * i + 16), ONE)));
+  }
+  return vminvq_s8(vminq_s8(m0, m1)) < 0x21;
+#endif
+}
+#elif FB_BACKEND == 4
+// SSE2 has no signed byte min: OR of (0x21 > (int8)(x + 1)) instead
 FB_INLINE int fb_ctany_simd(const char *p, const int nb) {
   const __m128i ONE = _mm_set1_epi8(1), LIM = _mm_set1_epi8(0x21);
   __m128i h0 = _mm_setzero_si128(), h1 = h0;
@@ -504,33 +415,7 @@ FB_INLINE int fb_ctany_simd(const char *p, const int nb) {
   }
   return _mm_movemask_epi8(_mm_or_si128(h0, h1)) != 0;
 }
-#endif
-#endif
-
-#if (FB_BACKEND == 2 || FB_BACKEND == 3) && !defined(FP_AVX512_EMU) && !defined(FB_NO_CTANY)
-// x86 version of the NEON skip test above (AVX2 ops, also on the AVX-512 backend: no zmm): "maybe a ct byte in the
-// next FB_CTANY_BLOCKS * 64 bytes?". Over-approximates; a positive only sends the block to the exact masks.
-//   default: (int8)(x + 1) < 0x21 (controls, DEL, and every byte >= 0x80, as on NEON): add + signed min per 32 bytes
-//   -DFB_CTANY_EXACTISH: min_epu8 < 0x20 (HT counts) or any DEL: no false positives on bytes >= 0x80
-// nt mask (not a token character) of the 32 bytes at p, bit i = byte i: the name scan at a line start (fb_core).
-FB_INLINE uint32_t fb_nt32_at(const char *p) {
-  const __m256i LO = _mm256_load_si256((const void *)FB_LO), HI = _mm256_load_si256((const void *)FB_HI),
-                F = _mm256_set1_epi8(0x0f);
-  __m256i v = _mm256_loadu_si256((const void *)p);
-  __m256i t = _mm256_and_si256(_mm256_shuffle_epi8(LO, _mm256_and_si256(v, F)),
-                               _mm256_shuffle_epi8(HI, _mm256_and_si256(_mm256_srli_epi16(v, 4), F)));
-  return (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(t, _mm256_setzero_si256()));
-}
-#define FB_HAVE_CTANY 1
-#ifndef FB_CTANY_BLOCKS
-#define FB_CTANY_BLOCKS 8
-#endif
-#ifndef FB_CTANY_AFTER
-#define FB_CTANY_AFTER 2 // blocks of a line classified exactly before the skip windows start (after the crossing block)
-#endif
-#ifndef FB_CTANY_PREFETCH
-#define FB_CTANY_PREFETCH 3072 // bytes ahead to prefetch in the skip loop (0 = none); long heads are memory-bound
-#endif
+#else // AVX2 ops, also on the AVX-512 backend
 FB_INLINE int fb_ctany_simd(const char *p, const int nb) { // nb 64-byte blocks (a constant at each call)
   const int nv = 2 * nb;
 #ifndef FB_CTANY_EXACTISH
@@ -553,6 +438,18 @@ FB_INLINE int fb_ctany_simd(const char *p, const int nb) { // nb 64-byte blocks 
   __m256i lo = _mm256_cmpeq_epi8(_mm256_max_epu8(mn, C20), mn); // mn >= 0x20 per byte
   return !_mm256_testc_si256(lo, _mm256_set1_epi8(-1)) || !_mm256_testz_si256(d, d);
 #endif
+}
+#endif
+#endif
+#if (FB_BACKEND == 2 || FB_BACKEND == 3) && !defined(FP_AVX512_EMU) // AVX2 ops, also on the AVX-512 backend
+// nt mask (not a token character) of the 32 bytes at p, bit i = byte i: the name scan at a line start (fb_core).
+FB_INLINE uint32_t fb_nt32_at(const char *p) {
+  const __m256i LO = _mm256_load_si256((const void *)FB_LO), HI = _mm256_load_si256((const void *)FB_HI),
+                F = _mm256_set1_epi8(0x0f);
+  __m256i v = _mm256_loadu_si256((const void *)p);
+  __m256i t = _mm256_and_si256(_mm256_shuffle_epi8(LO, _mm256_and_si256(v, F)),
+                               _mm256_shuffle_epi8(HI, _mm256_and_si256(_mm256_srli_epi16(v, 4), F)));
+  return (uint32_t)_mm256_movemask_epi8(_mm256_cmpeq_epi8(t, _mm256_setzero_si256()));
 }
 #endif
 
