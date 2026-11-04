@@ -708,7 +708,6 @@ own flags and picks one at load time ([chp.h](#chph-runtime-dispatch)).
 
 Other switches:
 - `-DFP_WALK_ONLY`: SIMD backends use the walk core only (an A/B knob).
-- `-DFB_WALK=0`: fbparse's sequential header loop (an A/B knob).
 - `-DBP_AVX512`: batchparse's zmm variant.
 - `-DBP_CANON_ONLY`: see above.
 

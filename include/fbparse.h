@@ -89,11 +89,7 @@
 #define FB_EMU_TAG ""
 #endif
 
-#define FB_INLINE static inline __attribute__((always_inline))
-#ifndef FB_WALK
-#define FB_WALK                                                                                                        \
-  1 // header loop: 1 = line starts off the LF mask (lines independent), 0 = sequential (A/B switch, same results)
-#endif
+#define FB_INLINE      static inline __attribute__((always_inline))
 #define FB_LIKELY(x)   __builtin_expect(!!(x), 1)
 #define FB_UNLIKELY(x) __builtin_expect(!!(x), 0)
 
@@ -365,8 +361,8 @@ FB_INLINE void fb_all64_simd(const char *p, uint64_t *m) { // block 0: all four
 // over-approximate, because a positive only sends the block to the exact masks: (int8)(x + 1) < 0x21 holds for every
 // control byte (HT too), DEL, and every byte >= 0x80 (not allowed in cookies, rare in other headers). Two ops per
 // vector (add, signed min), like memchr's compare + or; two independent accumulators, one reduction per test; no vld4,
-// no packing. -DFB_CTANY_EXACTISH (NEON, AVX2): the unsigned variant instead (min < 0x20, or DEL): no false positives
-// on bytes >= 0x80. The AVX-512 backend uses the AVX2 one (no zmm); not on the emulated AVX-512 build.
+// no packing (an unsigned variant without false positives on bytes >= 0x80 lost the Xeon A/B, exp82). The AVX-512
+// backend uses the AVX2 one (no zmm); not on the emulated AVX-512 build.
 #if (FB_BACKEND == 1 || FB_BACKEND == 2 || FB_BACKEND == 4 || (FB_BACKEND == 3 && !defined(FP_AVX512_EMU))) &&         \
     !defined(FB_NO_CTANY)
 #define FB_HAVE_CTANY 1
@@ -383,18 +379,6 @@ FB_INLINE void fb_all64_simd(const char *p, uint64_t *m) { // block 0: all four
 #ifdef FB_HAVE_CTANY
 #if FB_BACKEND == 1
 FB_INLINE int fb_ctany_simd(const char *p, const int nb) { // nb 64-byte blocks (a constant at each call)
-#ifdef FB_CTANY_EXACTISH
-  const uint8x16_t DEL = vdupq_n_u8(0x7f);
-  uint8x16_t mn0 = vdupq_n_u8(0xff), mn1 = mn0, d0 = vdupq_n_u8(0), d1 = d0;
-  for (int i = 0; i < 4 * nb; i += 2) {
-    uint8x16_t x0 = vld1q_u8((const uint8_t *)p + 16 * i), x1 = vld1q_u8((const uint8_t *)p + 16 * i + 16);
-    mn0 = vminq_u8(mn0, x0);
-    mn1 = vminq_u8(mn1, x1);
-    d0 = vorrq_u8(d0, vceqq_u8(x0, DEL));
-    d1 = vorrq_u8(d1, vceqq_u8(x1, DEL));
-  }
-  return (vminvq_u8(vminq_u8(mn0, mn1)) < 0x20) || (vmaxvq_u8(vorrq_u8(d0, d1)) != 0);
-#else
   const uint8x16_t ONE = vdupq_n_u8(1); // x + 1 wraps on purpose: done unsigned (no signed overflow), compared signed
   int8x16_t m0 = vdupq_n_s8(127), m1 = m0;
   for (int i = 0; i < 4 * nb; i += 2) {
@@ -402,7 +386,6 @@ FB_INLINE int fb_ctany_simd(const char *p, const int nb) { // nb 64-byte blocks 
     m1 = vminq_s8(m1, vreinterpretq_s8_u8(vaddq_u8(vld1q_u8((const uint8_t *)p + 16 * i + 16), ONE)));
   }
   return vminvq_s8(vminq_s8(m0, m1)) < 0x21;
-#endif
 }
 #elif FB_BACKEND == 4
 // SSE2 has no signed byte min: OR of (0x21 > (int8)(x + 1)) instead
@@ -418,7 +401,6 @@ FB_INLINE int fb_ctany_simd(const char *p, const int nb) {
 #else // AVX2 ops, also on the AVX-512 backend
 FB_INLINE int fb_ctany_simd(const char *p, const int nb) { // nb 64-byte blocks (a constant at each call)
   const int nv = 2 * nb;
-#ifndef FB_CTANY_EXACTISH
   const __m256i ONE = _mm256_set1_epi8(1);
   __m256i m0 = _mm256_set1_epi8(127), m1 = m0;
   for (int i = 0; i < nv; i += 2) {
@@ -427,17 +409,6 @@ FB_INLINE int fb_ctany_simd(const char *p, const int nb) { // nb 64-byte blocks 
   }
   __m256i hit = _mm256_cmpgt_epi8(_mm256_set1_epi8(0x21), _mm256_min_epi8(m0, m1));
   return !_mm256_testz_si256(hit, hit);
-#else
-  const __m256i DEL = _mm256_set1_epi8(0x7f), C20 = _mm256_set1_epi8(0x20);
-  __m256i mn = _mm256_set1_epi8(-1), d = _mm256_setzero_si256();
-  for (int i = 0; i < nv; i++) {
-    __m256i x = _mm256_loadu_si256((const void *)(p + 32 * i));
-    mn = _mm256_min_epu8(mn, x);
-    d = _mm256_or_si256(d, _mm256_cmpeq_epi8(x, DEL));
-  }
-  __m256i lo = _mm256_cmpeq_epi8(_mm256_max_epu8(mn, C20), mn); // mn >= 0x20 per byte
-  return !_mm256_testc_si256(lo, _mm256_set1_epi8(-1)) || !_mm256_testz_si256(d, d);
-#endif
 }
 #endif
 #endif
@@ -752,7 +723,7 @@ FB_INLINE int fb_core(const char *b, int len, const char **method, size_t *metho
           vs = p;
         } else {
           int ne;
-#if (FB_BACKEND == 2 || FB_BACKEND == 3) && !defined(FP_AVX512_EMU) && !defined(FB_NAME_CACHED)
+#if (FB_BACKEND == 2 || FB_BACKEND == 3) && !defined(FP_AVX512_EMU)
           // x86: classify the 32 bytes at the line start directly (one load, one LUT pass, tzcnt) instead of a
           // per-block nt mask whose cache misses depend on where lines cross blocks (unpredictable branches).
           // The bytes are readable: the line's LF is < len and the 64-byte padding follows. Names of 32+ bytes
@@ -761,7 +732,7 @@ FB_INLINE int fb_core(const char *b, int len, const char **method, size_t *metho
             uint32_t ntm = fb_nt32_at(b + p);
             ne = FB_LIKELY(ntm) ? p + __builtin_ctz(ntm) : fb_next(b, len, p, &sc, FB_NT, 0, simd);
           } else
-#elif FB_BACKEND == 1 && !defined(FB_NAME_CACHED)
+#elif FB_BACKEND == 1
           if (simd) { // NEON: the same with 16 bytes and a nibble mask
             uint64_t ntm = fb_nt16_nib(b + p);
             ne = FB_LIKELY(ntm) ? p + (__builtin_ctzll(ntm) >> 2) : fb_next(b, len, p, &sc, FB_NT, 0, simd);
@@ -827,13 +798,13 @@ static inline int fb_parse_request(const char *buf, size_t len, const char **met
                                    const char **path, size_t *path_len, int *minor_version, struct fb_header *headers,
                                    size_t *num_headers, size_t last_len) {
   return fb_core(buf, (int)len, method, method_len, path, path_len, minor_version, headers, num_headers, last_len, 0,
-                 NULL, NULL, FB_WALK, FB_BACKEND != 0);
+                 NULL, NULL, 1, FB_BACKEND != 0);
 }
 static inline int fb_parse_request_scalar(const char *buf, size_t len, const char **method, size_t *method_len,
                                           const char **path, size_t *path_len, int *minor_version,
                                           struct fb_header *headers, size_t *num_headers, size_t last_len) {
   return fb_core(buf, (int)len, method, method_len, path, path_len, minor_version, headers, num_headers, last_len, 0,
-                 NULL, NULL, FB_WALK, 0);
+                 NULL, NULL, 1, 0);
 }
 // test/A-B entry: the other header loop (walk = 0: sequential, 1: LF-mask walk)
 static inline int fb_parse_request_loop(int walk, const char *buf, size_t len, const char **method, size_t *method_len,
@@ -1102,15 +1073,15 @@ FB_INLINE int fb_req_core(const char *b, int len, req_t *r, fb_info_t *info, con
   return ret + a.cl;
 }
 static inline int fb_parse_req_ex(const char *b, int len, req_t *r, fb_info_t *info) {
-  return fb_req_core(b, len, r, info, FB_WALK, FB_BACKEND != 0, 0);
+  return fb_req_core(b, len, r, info, 1, FB_BACKEND != 0, 0);
 }
 static inline int fb_parse_req(const char *b, int len, req_t *r) {
   fb_info_t i;
-  return fb_req_core(b, len, r, &i, FB_WALK, FB_BACKEND != 0, 1);
+  return fb_req_core(b, len, r, &i, 1, FB_BACKEND != 0, 1);
 }
 static inline int fb_parse_req_scalar(const char *b, int len, req_t *r) {
   fb_info_t i;
-  return fb_req_core(b, len, r, &i, FB_WALK, 0, 1);
+  return fb_req_core(b, len, r, &i, 1, 0, 1);
 }
 static inline int fb_parse_req_loop(int walk, const char *b, int len, req_t *r) { // test/A-B: the other header loop
   fb_info_t i;

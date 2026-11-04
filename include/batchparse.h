@@ -319,13 +319,6 @@ FP_INLINE void bp_chunk(int n, const char *const *buf, const int *len, req_t *ou
   bp_stats.canon_post += np;
 #endif
   // C. headers, one route shape per loop
-#ifdef BP_PHASE_A_ONLY
-  for (int i = 0; i < n; i++) {
-    ret[i] = (int)(l0[i] + rt[i] + id[i]);
-    out[i].route = (int)rt[i];
-  }
-  return;
-#endif
   for (int j = 0; j < ng; j++) {
     int i = gl[j];
     req_t *r = &out[i];
