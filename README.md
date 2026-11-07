@@ -1140,7 +1140,7 @@ takes the best of 300 interleaved passes per parser. Vultr 1-vCPU VMs, 2026-11-0
 | | cdn | **357** | 377 (1.05×) | 529 (1.48×) | 980 (2.74×) |
 
 (×) = that parser's time / fbresp.h's. With clang 18, fbresp.h is 1.31–1.36× faster than pico on top-1k and 0.96–1.06×
-on cdn. `fbr_parse` (head plus framing) adds 7–15%.
+on cdn. `fbr_parse` (head plus framing) adds 4–23% (median 12%).
 
 ### batchparse.h vs fast_parse × N (`build/bench_batch`)
 
