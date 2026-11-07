@@ -2,6 +2,7 @@
 
 ![CI](https://github.com/public/cursed-http/actions/workflows/ci.yml/badge.svg)
 ![License: MIT](https://img.shields.io/badge/license-MIT-orange)
+[![CodSpeed](https://img.shields.io/endpoint?url=https://codspeed.io/badge.json)](https://app.codspeed.io/public/cursed-http?utm_source=badge)
 
 *Formerly cursed-http-parser. Links to the old name redirect here.*
 
@@ -923,6 +924,16 @@ The 7 inputs accepted against some reference's rejection don't affect framing or
   kernel 6.8, gcc 13.3 `-O3 -march=native`, steal ≤ 0.01%.
 - **ARM:** Apple M5 Pro, macOS, Apple clang 21, `-O3 -mcpu=native`. Linux arm64 numbers come from Docker on the same
   machine, with gcc 13.3.
+
+### Continuous benchmarks (CodSpeed)
+
+`bench/codspeed/` is a Google Benchmark suite that CI runs on every push and pull request
+(`.github/workflows/codspeed.yml`) under [CodSpeed](https://app.codspeed.io/public/cursed-http)'s CPU simulation, so
+a change's effect on each parser shows up on the pull request without noisy runners. It times one pass over a fixed,
+deterministic corpus per benchmark: `fast_parse` (SIMD and scalar, pipelined, learned layouts and templates), the server
+path with fallback, `fb_parse_request` / `fb_parse_req` on every fallback shape, `fb_decode_chunked`, `bp_parse` at
+several batch sizes, and HPACK / Huffman decoding. `make bench-codspeed` builds and runs it locally as plain Google
+Benchmark (CMake; it fetches CodSpeed's Google Benchmark fork).
 
 ### Build flags of the comparisons
 
