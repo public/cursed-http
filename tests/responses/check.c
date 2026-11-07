@@ -201,6 +201,45 @@ static void walk(const char *rec, int n, const char *server, const char *cas, ch
   free(buf);
 }
 
+// a corpus of heads alone (no index.tsv: tests/top1k's responses.dat): every head and every prefix vs pico, and
+// fbr_parse's verdict on each, tallied
+static int heads_only(FILE *dat) {
+  long n_ok = 0, n_err[8] = { 0 }, empty_reason = 0, maxh = 0, st[6] = { 0 }, kinds[5] = { 0 };
+  unsigned char lb[4];
+  while (fread(lb, 1, 4, dat) == 4) {
+    int n = lb[0] | lb[1] << 8 | lb[2] << 16 | lb[3] << 24;
+    char *rec = malloc(n);
+    if (fread(rec, 1, n, dat) != (size_t)n) return 2;
+    check_head(rec, n, "head");
+    char *b = padded(rec, n, 'Z');
+    struct fb_header H[MAXH];
+    fbr_resp_t r = { .headers = H, .num_headers = MAXH };
+    int x = fbr_parse(b, n, FBR_REQ_OTHER, &r, 0);
+    if (x == n) {
+      n_ok++;
+      kinds[r.body]++;
+      if (!r.reason_len) empty_reason++;
+      if ((long)r.num_headers > maxh) maxh = (long)r.num_headers;
+      st[r.status / 100]++;
+    } else if (x == -1) n_err[r.err]++;
+    else FAIL("head of %d bytes: fbr_parse %d\n", n, x);
+    free(b);
+    free(rec);
+  }
+  printf("%ld heads: %ld parsed (1xx %ld, 2xx %ld, 3xx %ld, 4xx %ld, 5xx %ld; empty reason %ld; up to %ld fields)\n",
+         heads_checked, n_ok, st[1], st[2], st[3], st[4], st[5], empty_reason, maxh);
+  printf("framing: none %ld, length %ld, chunked %ld, close %ld, tunnel %ld; rejected: head %ld, status %ld, "
+         "content-length %ld, TE in 1.0 %ld, folded framing field %ld\n",
+         kinds[0], kinds[1], kinds[2], kinds[3], kinds[4], n_err[FBR_E_HEAD], n_err[FBR_E_STATUS], n_err[FBR_E_CL],
+         n_err[FBR_E_TE10], n_err[FBR_E_FOLD]);
+  if (fails) {
+    printf("FAILED: %d\n", fails);
+    return 1;
+  }
+  printf("RESPONSE HEADS OK (every prefix of each identical to pico)\n");
+  return 0;
+}
+
 int main(int argc, char **argv) {
   const char *dir = argc > 1 ? argv[1] : "tests/responses/corpus";
   char path[512];
@@ -208,6 +247,7 @@ int main(int argc, char **argv) {
   FILE *dat = fopen(path, "rb");
   snprintf(path, sizeof path, "%s/index.tsv", dir);
   FILE *idx = fopen(path, "r");
+  if (dat && !idx) return heads_only(dat);
   if (!dat || !idx) {
     fprintf(stderr, "%s: no responses.dat / index.tsv\n", dir);
     return 2;

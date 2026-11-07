@@ -24,12 +24,13 @@ open('$docs/big.html', 'w').write(''.join('<p>line %d of a static page, compress
 sub() { sed -e "s|@PORT@|$PORT|g" -e "s|@ORIGIN@|$ORIGIN|g" -e "s|@DOCROOT@|$docs|g" -e "s|@RUN@|$run|g" \
   -e "s|@MODS@|$SRV/usr/lib/apache2/modules|g" -e "s|@ETC@|$SRV/etc/nginx|g" "$here/servers/$1" > "$run/$1"; }
 pids=""
-start() { "$@" > "$run/log" 2>&1 & pids="$pids $!"; }
+start() { "$@" >> "$run/log" 2>&1 & pids="$pids $!"; }
 stop() { for p in $pids; do kill "$p" 2>/dev/null || true; done; sleep 0.3; for p in $pids; do kill -9 "$p" 2>/dev/null || true; done; pids=""; }
 trap stop EXIT
 origin() { start python3 "$here/servers/origin.py" $ORIGIN "$docs"; }
-cap() { python3 "$here/capture.py" "$1" $PORT "$out"; stop; }
+cap() { python3 "$here/capture.py" "$1" $PORT "$out" || { echo "$1: capture failed; server log:"; cat "$run/log"; }; stop; }
 for s in ${*:-python node go nginx apache caddy h2o haproxy}; do
+  : > "$run/log"
   case $s in
   python) start python3 "$here/servers/origin.py" $PORT "$docs"; cap python-http.server ;;
   node) start node "$here/servers/origin.js" $PORT "$docs"; cap node-http ;;

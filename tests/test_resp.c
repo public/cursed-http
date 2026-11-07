@@ -439,8 +439,9 @@ int main(int argc, char **argv) {
       memcpy(pc, s, n);
       size_t sz = n;
       ssize_t pr = phr_decode_chunked(&d, pc, &sz);
-      if (pr != 0 || (int)sz != bl || memcmp(pc, o1, bl)) {
-        FAIL("CHUNKED vs pico: pico %zd (body %zu), fbr body %d\n", pr, sz, bl);
+      // pico returns the bytes after the trailer section: the same end as fbr_chunked + fb_parse_headers
+      if (pr != n - end || (int)sz != bl || memcmp(pc, o1, bl)) {
+        FAIL("CHUNKED vs pico: pico leaves %zd (body %zu), fbr ends at %d of %d (body %d)\n", pr, sz, end, n, bl);
         show(s, n);
       }
       npico++;

@@ -115,6 +115,20 @@ int main(int argc, char **argv) {
   if (discover) N = 300;
   buf = malloc((1 << 16) + PAD);
   static char s[1 << 16];
+  if (argc > 1 && strcmp(argv[1], "quick") && strcmp(argv[1], "discover")) { // a responses.dat of heads
+    FILE *f = fopen(argv[1], "rb");
+    unsigned char lb[4];
+    long heads = 0;
+    while (f && fread(lb, 1, 4, f) == 4) {
+      int n = lb[0] | lb[1] << 8 | lb[2] << 16 | lb[3] << 24;
+      if (n > (1 << 16) || fread(s, 1, n, f) != (size_t)n) break;
+      full_fb = full_hx[0] = full_hx[1] = 0;
+      check(s, n);
+      heads++;
+    }
+    printf("%ld heads from %s\n", heads, argv[1]);
+    N = 0;
+  }
   for (int i = 0; i < N; i++) {
     int n = gen(s);
     if (i % 3 == 0) mutate(s, &n);

@@ -1,7 +1,11 @@
 # HTTP/1.x responses for clients (include/fbresp.h)
 #   make test-resp    the differential tests vs picohttpparser: native backend, scalar, SSE2, emulated AVX-512
+RESP_CORPUS := $(B)/resp-corpus/responses.dat
 RESP_HDRS := include/fbresp.h include/fbparse.h tests/fb_avx512_emu.h tests/resp_gen.h
-RESP_BINS := $(B)/test_resp $(B)/test_resp_scalar $(B)/test_resp_emu512
+RESP_BINS := $(B)/test_resp $(B)/test_resp_scalar $(B)/test_resp_emu512 $(B)/test_resp_llhttp
+ifneq ($(HTTPARSE),)
+  RESP_BINS += $(B)/test_resp_httparse
+endif
 ifeq ($(ARCH),x86_64)
   RESP_BINS += $(B)/test_resp_sse2
 endif
@@ -15,15 +19,17 @@ $(B)/test_resp_sse2: tests/test_resp.c $(RESP_HDRS) $(B)/pico_base.o
 	$(CC) $(CFLAGS) $(WARN) $(CHP_BASE) $(INC) $< $(B)/pico_base.o -o $@
 $(B)/asan_resp: tests/test_resp.c $(RESP_HDRS) | $(B)
 	$(CC) $(SAN) $(WARN) $(MARCH) $(INC) $< $(PICO) -o $@
-test-resp: $(RESP_BINS) $(B)/asan_resp
+test-resp: $(RESP_BINS) $(B)/asan_resp $(B)/check_resp_corpus $(RESP_CORPUS) $(B)/replay_resp
 	@set -e; $(RUN) 4 $(B)/test_resp $(FBMODE); \
 	  for t in $(filter-out $(B)/test_resp,$(RESP_BINS)); do $(RUN) 4 $$t quick; done; \
-	  ASAN_OPTIONS=detect_leaks=0 $(RUN) 4 $(B)/asan_resp quick
+	  ASAN_OPTIONS=detect_leaks=0 $(RUN) 4 $(B)/asan_resp quick; \
+	  echo "== $(B)/check_resp_corpus"; ./$(B)/check_resp_corpus $(dir $(RESP_CORPUS)) > $(B)/logs/check_resp_corpus.log \
+	    || { tail -30 $(B)/logs/check_resp_corpus.log; exit 1; }; tail -3 $(B)/logs/check_resp_corpus.log; \
+	  ./$(B)/replay_resp fuzz/regressions-resp
 	@echo "RESPONSE TESTS PASSED"
 # framing vs llhttp (response mode)
 $(B)/test_resp_llhttp: tests/test_resp_llhttp.c $(RESP_HDRS) $(LLHTTP_O)
 	$(CC_T) -Ivendor/llhttp/include $< $(LLHTTP_O) -o $@
-RESP_BINS += $(B)/test_resp_llhttp
 # libFuzzer: fbresp.h vs pico (fuzz/fuzz_resp.c); RESP_FUZZ_TIME seconds, default 30. replay_resp: any compiler
 RESP_FUZZ_TIME ?= 30
 $(B)/fuzz_resp: fuzz/fuzz_resp.c $(RESP_HDRS) $(FZ_DEPS) | $(B)
@@ -37,8 +43,11 @@ fuzz-resp: $(B)/fuzz_resp
 # the captured response corpus (tests/responses/README.md)
 $(B)/check_resp_corpus: tests/responses/check.c $(RESP_HDRS) $(LLHTTP_O) $(B)/pico.o
 	$(CC_T) -Ivendor/llhttp/include $< $(B)/pico.o $(LLHTTP_O) -o $@
-check-resp-corpus: $(B)/check_resp_corpus
-	./$(B)/check_resp_corpus tests/responses/corpus
+$(RESP_CORPUS): tests/responses/corpus/responses.dat.gz tests/responses/corpus/index.tsv
+	@mkdir -p $(dir $@)
+	gzip -dc $< > $@ && cp tests/responses/corpus/index.tsv $(dir $@)
+check-resp-corpus: $(B)/check_resp_corpus $(RESP_CORPUS)
+	./$(B)/check_resp_corpus $(dir $(RESP_CORPUS))
 # httparse's Response (needs rustc and scripts/fetch-thirdparty.sh httparse): the same build as scripts/build-extras.sh
 RUSTC ?= rustc
 ifeq ($(ARCH),x86_64)
@@ -65,5 +74,5 @@ $(B)/bench_resp: bench/bench_resp.c $(RESP_HDRS) $(RESP_BENCH_O)
 	$(CC_T) $< $(RESP_BENCH_O) -o $@
 $(B)/bench_resp_hx: bench/bench_resp.c $(RESP_HDRS) $(RESP_BENCH_O) $(B)/libhx_resp.a
 	$(CC_T) -DHAVE_HTTPARSE $< $(RESP_BENCH_O) $(B)/libhx_resp.a -lpthread -ldl -lm -o $@
-bench-resp: $(if $(HTTPARSE),$(B)/bench_resp_hx,$(B)/bench_resp)
-	./$< 200 tests/responses/corpus
+bench-resp: $(if $(HTTPARSE),$(B)/bench_resp_hx,$(B)/bench_resp) $(RESP_CORPUS)
+	./$< 200 $(dir $(RESP_CORPUS))
