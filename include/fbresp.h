@@ -25,12 +25,12 @@
 //   Connection -> -1, FBR_E_FOLD. Keep-alive (FBR_KEEPALIVE): HTTP/1.1 unless "Connection: close", HTTP/1.0 only with
 //   "keep-alive"; never after FBR_CLOSE, FBR_TUNNEL or FBR_TECL.
 //
-// Layer 3, chunked bodies: fbr_chunked() = fb_decode_chunked (fbparse.h) that stops at the trailer section (parse it
-// with fb_parse_headers) and can stream: on FB_CHUNK_NEED_MORE it says how much input the complete chunks used and
+// Layer 3, chunked bodies: fbr_chunked() = fb_decode_chunked's rules (fbparse.h), stopping at the trailer section
+// (parse it with fb_parse_headers), and it can stream: on FB_CHUNK_NEED_MORE it says how much input the complete chunks used and
 // how much data they decoded, so a client drops those bytes and never re-decodes them.
 //
 // Contract (as fbparse.h): >= 64 readable bytes after buf[len] for layers 1 and 2, any contents. Layer 3 reads
-// b[0..len) only. Nothing here is on the request parser's path: fbparse.h's request code is untouched.
+// b[0..len) only. Nothing here is on the request parser's path: fbparse.h is used as it is, unchanged.
 #pragma once
 #include "fbparse.h"
 
@@ -353,6 +353,81 @@ static inline int fbr_parse_scalar(const char *buf, size_t len, int req, fbr_res
 }
 
 // ---------------- layer 3: chunked bodies ----------------
+// fbparse.h's fb_chunked_pass with two additions, kept here so the request decoder's code stays as it is:
+// tr = 1: stop after the last-chunk line and return the position of the trailer section; prog != NULL: on NEED_MORE,
+// prog[0] = the input bytes of the complete chunks before the incomplete one, prog[1] = their data bytes. The rules
+// are fb_decode_chunked's, byte for byte (tests/test_resp.c checks fbr_chunked against it).
+static inline int fbr_chunked_pass(const char *b, int len, char *out, int max_body, int *body_len, const int write,
+                                   fb_chunk_span_t *sp, int *nsp, const int tr, int *prog) {
+  int p = 0, total = 0, c0 = 0;
+#define FBR_MORE()                                                                                                     \
+  do {                                                                                                                 \
+    if (prog) prog[0] = c0, prog[1] = total;                                                                           \
+    return FB_CHUNK_NEED_MORE;                                                                                         \
+  } while (0)
+  for (;;) {
+    c0 = p; // this chunk's start
+    int64_t size = 0;
+    int nd = 0, h;
+    while (p < len && (h = fb_chunk_hex((unsigned char)b[p])) >= 0) {
+      if (++nd > 16) return FB_CHUNK_INVALID;
+      size = size * 16 + h;
+      if (size > (int64_t)max_body - total) return FB_CHUNK_TOO_LARGE;
+      p++;
+    }
+    if (p >= len) FBR_MORE();
+    if (nd == 0) return FB_CHUNK_INVALID;
+    int q = p;
+    while (q < len && (b[q] == ' ' || b[q] == '\t')) q++;
+    if (q >= len) FBR_MORE();
+    if (b[q] == ';') {
+      for (q++; q + 8 <= len; q += 8) {
+        uint64_t w = fb_ld64(b + q),
+                 m = (fb_swar_le(w, 0x1f) & ~fb_swar_eq(w, '\t' * FB_ONES)) | fb_swar_eq(w, 0x7f * FB_ONES);
+        if (m) {
+          q += __builtin_ctzll(m) >> 3;
+          if (b[q] != '\r') return FB_CHUNK_INVALID;
+          break;
+        }
+      }
+      for (; q < len && b[q] != '\r'; q++) {
+        unsigned char c = (unsigned char)b[q];
+        if ((c < 0x20 && c != '\t') || c == 0x7f) return FB_CHUNK_INVALID;
+      }
+    } else if (q != p) return FB_CHUNK_INVALID;
+    if (q >= len) FBR_MORE();
+    if (b[q] != '\r') return FB_CHUNK_INVALID;
+    if (q + 1 >= len) FBR_MORE();
+    if (b[q + 1] != '\n') return FB_CHUNK_INVALID;
+    p = q + 2;
+    if (size == 0) {
+      if (tr) {
+        *body_len = total;
+        return p;
+      }
+      if (p >= len) FBR_MORE();
+      if (b[p] != '\r') return FB_CHUNK_INVALID;
+      if (p + 1 >= len) FBR_MORE();
+      if (b[p + 1] != '\n') return FB_CHUNK_INVALID;
+      *body_len = total;
+      return p + 2;
+    }
+    if ((int64_t)len - p < size + 2) {
+      if ((int64_t)len - p >= size + 1 && b[p + size] != '\r') return FB_CHUNK_INVALID;
+      FBR_MORE();
+    }
+    if (b[p + size] != '\r' || b[p + size + 1] != '\n') return FB_CHUNK_INVALID;
+    if (write) fb_chunk_copy(out + total, b + p, (int)size);
+    else if (*nsp < FB_CHUNK_SPANS) {
+      sp[*nsp].off = p;
+      sp[*nsp].size = (int)size;
+      ++*nsp;
+    } else *nsp = FB_CHUNK_SPANS + 1;
+    total += (int)size;
+    p += (int)size + 2;
+  }
+#undef FBR_MORE
+}
 // The chunks of b[0..len) into out (out == b: in place), up to max_body data bytes. Returns:
 //   > 0: the last-chunk line ends there; *body_len = the data. The trailer section starts there: fb_parse_headers
 //        (b + r, len - r, ...) ends it (> 0: the response ends at r + that; an empty section is just CRLF).
@@ -361,5 +436,24 @@ static inline int fbr_parse_scalar(const char *buf, size_t len, int req, fbr_res
 //        again on the rest with more bytes; nothing is decoded twice. In place, b[prog[0]..len) is untouched.
 //   FB_CHUNK_INVALID (-2), FB_CHUNK_TOO_LARGE (-3): as fb_decode_chunked.
 static inline int fbr_chunked(const char *b, int len, char *out, int max_body, int *body_len, int *prog) {
-  return fb_decode_chunked_ex(b, len, out, max_body, body_len, 1, prog);
+  int n = 0, ns = 0, r;
+  fb_chunk_span_t sp[FB_CHUNK_SPANS];
+  if (max_body < 0) max_body = 0;
+  if (out != b) {
+    r = fbr_chunked_pass(b, len, out, max_body, &n, 1, sp, &ns, 1, prog);
+    if (r > 0) *body_len = n;
+    return r;
+  }
+  // in place: validate first (a NEED_MORE retry must see the original bytes), then compact the complete chunks
+  r = fbr_chunked_pass(b, len, out, max_body, &n, 0, sp, &ns, 1, prog);
+  if (r < 0 || (r == 0 && !prog)) return r;
+  if (ns <= FB_CHUNK_SPANS) {
+    int t = 0;
+    for (int i = 0; i < ns; i++) {
+      fb_chunk_copy(out + t, b + sp[i].off, sp[i].size);
+      t += sp[i].size;
+    }
+  } else fbr_chunked_pass(b, len, out, max_body, &n, 1, sp, &ns, 1, prog);
+  if (r > 0) *body_len = n;
+  return r;
 }

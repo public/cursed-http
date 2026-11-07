@@ -424,6 +424,17 @@ int main(int argc, char **argv) {
     }
     // the streamed decode equals the one-shot decode (data only: the trailer section is the caller's)
     int r1 = fbr_chunked(s, n, o1, 1 << 20, &bl, NULL);
+    // fbr_chunked is fb_decode_chunked up to the trailer section: the same verdicts and data, exactly
+    {
+      int bl2 = -1, r2 = fb_decode_chunked(s, n, pc, 1 << 20, &bl2), want;
+      if (r1 <= 0) want = r1;
+      else if (n - r1 >= 2) want = s[r1] == '\r' && s[r1 + 1] == '\n' ? r1 + 2 : FB_CHUNK_INVALID;
+      else want = n == r1 || s[r1] == '\r' ? FB_CHUNK_NEED_MORE : FB_CHUNK_INVALID;
+      if (r2 != want || (r2 > 0 && (bl2 != bl || memcmp(pc, o1, bl)))) {
+        FAIL("CHUNKED vs fb_decode_chunked: fbr %d (data %d), fb_decode_chunked %d, want %d\n", r1, bl, r2, want);
+        show(s, n);
+      }
+    }
     for (int inplace = 0; inplace < 2; inplace++) {
       int sl = streamed(s, n, o2, inplace);
       int ok = r1 > 0 ? sl == bl && !memcmp(o1, o2, bl) : r1 == 0 ? sl == -101 : sl == r1;
