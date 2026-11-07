@@ -193,6 +193,7 @@ test: all gencheck example-check fuzz-replay
 	@set -e; for t in $(BP_BINS); do $(RUN) 1 $$t; done
 	@set -e; for t in $(PR_BINS); do $(RUN) 1 $$t $(FBMODE); done
 	@set -e; $(RUN) 1 $(B)/test_chp $(FBMODE)
+	@$(MAKE) --no-print-directory test-resp FBMODE=$(FBMODE)
 	@echo "ALL TESTS PASSED"
 test-quick:
 	$(MAKE) test FBMODE=quick GENVECTORS=50000
