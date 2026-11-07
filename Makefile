@@ -3,6 +3,7 @@
 #   make test-quick   the same with smaller fuzz counts (CI)
 #   make asan         ASan + UBSan builds of the tests (quick mode)
 #   make bench        benchmarks: fastparse, fbparse, batchparse, and the comparison vs pico / llhttp
+#   make bench-codspeed  the CodSpeed benchmark suite (bench/codspeed; CMake, fetches Google Benchmark)
 #   make avx512       real AVX-512 builds (need an AVX-512 CPU to run: make avx512-run)
 #   make mutants      planted bugs: every mutant must make a test fail
 #   make compare-all  + uWebSockets, httparse, hparse (fetched at pinned commits; rustc / zig optional)
@@ -245,6 +246,12 @@ bench: $(B)/test_fastparse $(B)/compare $(B)/bench_fbparse $(B)/bench_batch $(B)
 	./$(B)/bench_batch
 	./$(B)/bench_chp
 	./$(B)/bench_chunked
+# the CodSpeed benchmarks (bench/codspeed: Google Benchmark through CodSpeed's fork, fetched by CMake; network)
+# as plain Google Benchmark timings; CI builds them with -DCODSPEED_MODE=simulation (.github/workflows/codspeed.yml)
+bench-codspeed: | $(B)
+	cmake -S bench/codspeed -B $(B)/codspeed
+	cmake --build $(B)/codspeed -j
+	./$(B)/codspeed/cursed_http_bench
 
 # ---- real AVX-512 (compile anywhere with gcc/clang; run only on AVX-512BW/VL hardware) ----
 AVX512 := -march=cascadelake
@@ -347,5 +354,5 @@ hooks:
 	git config core.hooksPath .githooks
 clean:
 	rm -rf $(B)
-.PHONY: all lib mca mca-validate gen gencheck test test-quick asan bench avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check fuzz fuzz-replay hypothesis mutants-fuzz format lint hooks clean
+.PHONY: all lib mca mca-validate gen gencheck test test-quick asan bench bench-codspeed avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check fuzz fuzz-replay hypothesis mutants-fuzz format lint hooks clean
 include mk/h2h3.mk
