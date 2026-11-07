@@ -42,7 +42,7 @@ typedef struct {
 } lh_t;
 static int lh_headers(llhttp_t *p) {
   lh_t *s = (lh_t *)p;
-  if (s->req == FBR_REQ_HEAD) return 1;                                    // no body
+  if (s->req == FBR_REQ_HEAD) return 1;                         // no body
   if (s->req == FBR_REQ_CONNECT && p->status_code / 100 == 2) { // a tunnel: llhttp ends the message at the head
     s->tunnel = 1;
     return 2;
@@ -92,11 +92,11 @@ static int fb_end(const char *b, int len, int req, int *ka, int *tunnel, fbr_res
   if (n < 0) return n == -2 ? R_INCOMPLETE : R_INVALID;
   *ka = !!(r->flags & FBR_KEEPALIVE);
   switch (r->body) {
-  case FBR_NONE: return n;
-  case FBR_TUNNEL: *tunnel = 1; return n;
-  case FBR_LENGTH: return len - n >= r->length ? n + (int)r->length : R_INCOMPLETE;
-  case FBR_CLOSE: return len; // the input ends here: the connection closed
-  default: break;
+    case FBR_NONE: return n;
+    case FBR_TUNNEL: *tunnel = 1; return n;
+    case FBR_LENGTH: return len - n >= r->length ? n + (int)r->length : R_INCOMPLETE;
+    case FBR_CLOSE: return len; // the input ends here: the connection closed
+    default: break;
   }
   int bl, c = fbr_chunked(b + n, len - n, tb, 1 << 30, &bl, NULL);
   if (c == FB_CHUNK_NEED_MORE) return R_INCOMPLETE;
@@ -111,9 +111,10 @@ static int fb_end(const char *b, int len, int req, int *ka, int *tunnel, fbr_res
 
 // ---------------- generated responses ----------------
 static int gen(char *s, int *req) {
-  static const char *ST[] = { "200 OK", "200 OK", "200 OK", "404 Not Found", "204 No Content", "304 Not Modified",
-                              "100 Continue", "101 Switching Protocols", "103 Early Hints", "301 Moved", "500 Oops",
-                              "206 Partial Content", "407 Proxy Auth" };
+  static const char *ST[] = { "200 OK",          "200 OK",           "200 OK",       "404 Not Found",
+                              "204 No Content",  "304 Not Modified", "100 Continue", "101 Switching Protocols",
+                              "103 Early Hints", "301 Moved",        "500 Oops",     "206 Partial Content",
+                              "407 Proxy Auth" };
   int n = 0;
   *req = rnd() % 8 == 0 ? FBR_REQ_HEAD : rnd() % 12 == 0 ? FBR_REQ_CONNECT : FBR_REQ_OTHER;
   int minor = rnd() % 6 == 0 ? 0 : 1;
@@ -158,11 +159,12 @@ static int gen(char *s, int *req) {
 
 // the classes of known differences (see the README of each in main)
 enum { D_TECL, D_TE10, D_101, D_CLTE_HEAD, D_EARLY, D_N };
-static const char *DN[] = { "TE + CL: llhttp rejects, fbr uses chunked and closes",
-                            "TE in HTTP/1.0: fbr rejects (RFC 9112 6.1), llhttp uses it",
-                            "101 without Upgrade fields: llhttp parses on as HTTP, fbr tunnels",
-                            "framing fields of a no-body response: llhttp validates them, fbr ignores them (6.3 rule 1)",
-                            "a prefix of an input llhttp rejects: llhttp rejects at the field, fbr waits for the head" };
+static const char *DN[] = {
+  "TE + CL: llhttp rejects, fbr uses chunked and closes", "TE in HTTP/1.0: fbr rejects (RFC 9112 6.1), llhttp uses it",
+  "101 without Upgrade fields: llhttp parses on as HTTP, fbr tunnels",
+  "framing fields of a no-body response: llhttp validates them, fbr ignores them (6.3 rule 1)",
+  "a prefix of an input llhttp rejects: llhttp rejects at the field, fbr waits for the head"
+};
 static long dc[D_N];
 
 static char *buf;
@@ -204,8 +206,8 @@ int main(int argc, char **argv) {
         continue;
       }
       if (fails++ < 20) {
-        printf("MISMATCH req %d: llhttp end %d tunnel %d ka %d; fbr end %d tunnel %d ka %d (body %d err %d)\n", req,
-               le, lt, lka, fe, ft, fka, r.body, r.err);
+        printf("MISMATCH req %d: llhttp end %d tunnel %d ka %d; fbr end %d tunnel %d ka %d (body %d err %d)\n", req, le,
+               lt, lka, fe, ft, fka, r.body, r.err);
         show(buf, len);
       }
     }

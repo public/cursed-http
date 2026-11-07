@@ -14,7 +14,7 @@
 #include "fbresp.h"
 #include "resp_shapes.h"
 
-#define PAD 64
+#define PAD  64
 #define MAXH 100
 static double now(void) {
   struct timespec t;
@@ -50,10 +50,14 @@ __attribute__((noinline)) static int fbr_r(const char *b, size_t l, int *mv, int
 static const struct {
   const char *name;
   rfn f;
-} P[] = { { "fbresp", fb_r },     { "fbresp-scalar", fbs_r }, { "fbr_parse", fbr_r },
-          { "pico", phr_parse_response }, { "llhttp", lx_parse_response },
+} P[] = {
+  { "fbresp", fb_r },
+  { "fbresp-scalar", fbs_r },
+  { "fbr_parse", fbr_r },
+  { "pico", phr_parse_response },
+  { "llhttp", lx_parse_response },
 #ifdef HAVE_HTTPARSE
-          { "httparse", hx_parse_response },
+  { "httparse", hx_parse_response },
 #endif
 };
 enum { NP = sizeof P / sizeof *P };

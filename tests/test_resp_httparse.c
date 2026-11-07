@@ -10,7 +10,8 @@
 #include "resp_gen.h"
 
 typedef int (*hxfn)(const char *, size_t, int *, int *, const char **, size_t *, struct fb_header *, size_t *, size_t);
-int hx_parse_response(const char *, size_t, int *, int *, const char **, size_t *, struct fb_header *, size_t *, size_t);
+int hx_parse_response(const char *, size_t, int *, int *, const char **, size_t *, struct fb_header *, size_t *,
+                      size_t);
 int hx_parse_response_lenient(const char *, size_t, int *, int *, const char **, size_t *, struct fb_header *, size_t *,
                               size_t);
 #define MAXH 64
@@ -29,7 +30,18 @@ static void show(const char *b, int len) {
   printf("%s\" (len %d)\n", len > 220 ? "..." : "", len);
 }
 // features of a head where httparse's rules are not pico's (found by this test's discover mode)
-enum { F_VERSION = 1, F_MULTISP = 2, F_FOLD = 4, F_SPCOLON = 8, F_REASONWS = 16, F_STATUS = 32, F_OBSREASON = 64, F_SHORT = 128, F_EARLY = 256, F_N = 9 };
+enum {
+  F_VERSION = 1,
+  F_MULTISP = 2,
+  F_FOLD = 4,
+  F_SPCOLON = 8,
+  F_REASONWS = 16,
+  F_STATUS = 32,
+  F_OBSREASON = 64,
+  F_SHORT = 128,
+  F_EARLY = 256,
+  F_N = 9
+};
 static const char *FN[] = { "version other than 1.0 / 1.1: httparse rejects",
                             "more than one SP/HT in the status line: httparse rejects (default)",
                             "obs-fold: httparse rejects (default) or joins it to the previous field (lenient)",
@@ -49,8 +61,10 @@ static unsigned features(const char *b, int len) {
   while (e < len && b[e] != '\n') e++; // the status line
   if (len > 9 && (b[9] == ' ' || b[9] == '\t' || b[8] == '\t')) f |= F_MULTISP;
   for (int i = 9; i + 1 < e; i++)
-    if ((b[i] == ' ' || b[i] == '\t') && i > 12 && (b[i + 1] == ' ' || b[i + 1] == '\t' || b[i + 1] == '\r')) f |= F_REASONWS;
-  if (len > 12 && (b[12] == ' ' || b[12] == '\t') && 13 < len && (b[13] == ' ' || b[13] == '\t')) f |= F_MULTISP | F_REASONWS;
+    if ((b[i] == ' ' || b[i] == '\t') && i > 12 && (b[i + 1] == ' ' || b[i + 1] == '\t' || b[i + 1] == '\r'))
+      f |= F_REASONWS;
+  if (len > 12 && (b[12] == ' ' || b[12] == '\t') && 13 < len && (b[13] == ' ' || b[13] == '\t'))
+    f |= F_MULTISP | F_REASONWS;
   if (len > 9 && (b[9] == '0' || (len > 12 && b[12] != ' ' && b[12] != '\r' && b[12] != '\n'))) f |= F_STATUS;
   for (int i = 9; i < e; i++)
     if ((unsigned char)b[i] >= 0x80) f |= F_OBSREASON;

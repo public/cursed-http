@@ -205,9 +205,14 @@ static inline int fb_parse_headers_scalar(const char *buf, size_t len, struct fb
 }
 
 // ---------------- layer 2: the client's view (RFC 9112 section 6.3) ----------------
-enum { FBR_REQ_OTHER = 0, FBR_REQ_HEAD = 1, FBR_REQ_CONNECT = 2 }; // the request this response answers
+enum { FBR_REQ_OTHER = 0, FBR_REQ_HEAD = 1, FBR_REQ_CONNECT = 2 };     // the request this response answers
 enum { FBR_NONE = 0, FBR_LENGTH, FBR_CHUNKED, FBR_CLOSE, FBR_TUNNEL }; // fbr_resp_t.body
-enum { FBR_KEEPALIVE = 1, FBR_INTERIM = 2, FBR_TECL = 4, FBR_UPGRADE = 8 }; // fbr_resp_t.flags (UPGRADE: Connection has it)
+enum {
+  FBR_KEEPALIVE = 1,
+  FBR_INTERIM = 2,
+  FBR_TECL = 4,
+  FBR_UPGRADE = 8
+}; // fbr_resp_t.flags (UPGRADE: Connection has it)
 enum { FBR_E_HEAD = 1, FBR_E_STATUS, FBR_E_CL, FBR_E_TE10, FBR_E_FOLD }; // fbr_resp_t.err, when fbr_parse says -1
 typedef struct {
   int minor, status;
@@ -299,15 +304,17 @@ FB_INLINE int fbr_core2(const char *b, size_t len, int req, fbr_resp_t *r, size_
       last = 3;
       if (f->value_len == 10 && fbr_name_is(f->value, "keep-alive", 10)) conn_ka = 1; // the usual values alone first
       else if (f->value_len == 5 && fbr_lc_eq(f->value, 5, "close", 5)) conn_close = 1;
-      else FBR_EACH(f->value, f->value_len, el, eln, {
-        if (fbr_lc_eq(el, eln, "close", 5)) conn_close = 1;
-        else if (fbr_lc_eq(el, eln, "keep-alive", 10)) conn_ka = 1;
-        else if (fbr_lc_eq(el, eln, "upgrade", 7)) r->flags |= FBR_UPGRADE;
-      })
+      else
+        FBR_EACH(f->value, f->value_len, el, eln, {
+          if (fbr_lc_eq(el, eln, "close", 5)) conn_close = 1;
+          else if (fbr_lc_eq(el, eln, "keep-alive", 10)) conn_ka = 1;
+          else if (fbr_lc_eq(el, eln, "upgrade", 7)) r->flags |= FBR_UPGRADE;
+        })
     }
   }
   int ka = r->minor >= 1 ? !conn_close : conn_ka && !conn_close;
-  if (req == FBR_REQ_CONNECT && st >= 200 && st < 300) { // 2. (before 1: a 204 to CONNECT is a tunnel too, RFC 9110 9.3.6)
+  if (req == FBR_REQ_CONNECT && st >= 200 &&
+      st < 300) { // 2. (before 1: a 204 to CONNECT is a tunnel too, RFC 9110 9.3.6)
     r->body = FBR_TUNNEL;
     ka = 0;
   } else if (req == FBR_REQ_HEAD || st < 200 || st == 204 || st == 304) { // 1.

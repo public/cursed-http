@@ -34,11 +34,25 @@ CASES = [
     ("http10", [("GET", req("GET", "/small.txt", version="1.0"))], "seq"),
     ("http10-ka", [("GET", req("GET", "/small.txt", "Connection: keep-alive\r\n", version="1.0"))], "seq"),
     ("close", [("GET", req("GET", "/small.txt", "Connection: close\r\n"))], "seq"),
-    ("keepalive-seq", [("GET", req("GET", "/small.txt")), ("HEAD", req("HEAD", "/big.html")),
-                       ("GET", req("GET", "/big.html", "Accept-Encoding: gzip\r\n"))], "seq"),
-    ("pipeline", [("GET", req("GET", "/small.txt")), ("HEAD", req("HEAD", "/small.txt")),
-                  ("GET", req("GET", "/does-not-exist")), ("GET", req("GET", "/big.html", "Accept-Encoding: gzip\r\n"))],
-     "pipe"),
+    (
+        "keepalive-seq",
+        [
+            ("GET", req("GET", "/small.txt")),
+            ("HEAD", req("HEAD", "/big.html")),
+            ("GET", req("GET", "/big.html", "Accept-Encoding: gzip\r\n")),
+        ],
+        "seq",
+    ),
+    (
+        "pipeline",
+        [
+            ("GET", req("GET", "/small.txt")),
+            ("HEAD", req("HEAD", "/small.txt")),
+            ("GET", req("GET", "/does-not-exist")),
+            ("GET", req("GET", "/big.html", "Accept-Encoding: gzip\r\n")),
+        ],
+        "pipe",
+    ),
     ("expect-100", [("POST", req("POST", "/echo", "Expect: 100-continue\r\nContent-Length: 5\r\n"))], "expect"),
     ("post", [("POST", req("POST", "/echo", "Content-Length: 5\r\n", body=b"hello"))], "seq"),
     ("options", [("OPTIONS", req("OPTIONS", "*"))], "seq"),
@@ -50,9 +64,22 @@ CASES = [
     ("304", [("GET", req("GET", "/304"))], "seq"),
     ("close-delimited", [("GET", req("GET", "/close"))], "seq"),
     ("early-hints", [("GET", req("GET", "/early"))], "seq"),
-    ("upgrade", [("GET", req("GET", "/upgrade", "Connection: Upgrade\r\nUpgrade: websocket\r\n"
-                                                "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
-                                                "Sec-WebSocket-Version: 13\r\n"))], "seq"),
+    (
+        "upgrade",
+        [
+            (
+                "GET",
+                req(
+                    "GET",
+                    "/upgrade",
+                    "Connection: Upgrade\r\nUpgrade: websocket\r\n"
+                    "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+                    "Sec-WebSocket-Version: 13\r\n",
+                ),
+            )
+        ],
+        "seq",
+    ),
 ]
 
 

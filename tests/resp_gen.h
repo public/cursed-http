@@ -14,20 +14,63 @@ static uint32_t rnd(void) {
   rs ^= rs << 17;
   return (uint32_t)rs;
 }
-static const char *REASONS[] = { "OK", "Not Found", "", "Moved Permanently", "No Content", "Not Modified",
-                                 "Switching Protocols", "Continue", "Internal Server Error", "I'm a teapot",
-                                 "Gateway Time-out", "OK\tTAB", "R\xc3\xa9ponse", "  spaced  ", "Partial Content" };
-static const char *STATUSES[] = { "200", "404", "301", "204", "304", "101", "100", "500", "418", "504",
-                                  "103", "206", "000", "999", "600", "099" };
-static const char *HNAMES[] = { "Date", "Server", "Content-Type", "Content-Length", "Transfer-Encoding",
-                                "Connection", "Cache-Control", "Set-Cookie", "ETag", "Last-Modified", "Vary",
-                                "X-Frame-Options", "Strict-Transport-Security", "Content-Encoding", "Location",
-                                "Accept-Ranges", "Keep-Alive", "Alt-Svc", "x-amz-cf-id", "Content-Security-Policy" };
-static const char *HVALS[] = { "Sat, 07 Nov 2026 12:00:00 GMT", "nginx/1.26.0", "text/html; charset=utf-8", "1234", "chunked",
-                               "keep-alive", "max-age=0, private, must-revalidate", "sid=abc123; Path=/; HttpOnly; Secure",
-                               "\"5f3e-1a2b\"", "", "Accept-Encoding", "SAMEORIGIN", "max-age=31536000; includeSubDomains",
-                               "gzip", "https://example.com/a/b?c=d", "bytes", "timeout=5, max=100", "h3=\":443\"; ma=86400",
-                               "Zx9fK2_abc-QWERTY==", "default-src 'self'; script-src 'self' https://cdn.example.com" };
+static const char *REASONS[] = { "OK",
+                                 "Not Found",
+                                 "",
+                                 "Moved Permanently",
+                                 "No Content",
+                                 "Not Modified",
+                                 "Switching Protocols",
+                                 "Continue",
+                                 "Internal Server Error",
+                                 "I'm a teapot",
+                                 "Gateway Time-out",
+                                 "OK\tTAB",
+                                 "R\xc3\xa9ponse",
+                                 "  spaced  ",
+                                 "Partial Content" };
+static const char *STATUSES[] = { "200", "404", "301", "204", "304", "101", "100", "500",
+                                  "418", "504", "103", "206", "000", "999", "600", "099" };
+static const char *HNAMES[] = { "Date",
+                                "Server",
+                                "Content-Type",
+                                "Content-Length",
+                                "Transfer-Encoding",
+                                "Connection",
+                                "Cache-Control",
+                                "Set-Cookie",
+                                "ETag",
+                                "Last-Modified",
+                                "Vary",
+                                "X-Frame-Options",
+                                "Strict-Transport-Security",
+                                "Content-Encoding",
+                                "Location",
+                                "Accept-Ranges",
+                                "Keep-Alive",
+                                "Alt-Svc",
+                                "x-amz-cf-id",
+                                "Content-Security-Policy" };
+static const char *HVALS[] = { "Sat, 07 Nov 2026 12:00:00 GMT",
+                               "nginx/1.26.0",
+                               "text/html; charset=utf-8",
+                               "1234",
+                               "chunked",
+                               "keep-alive",
+                               "max-age=0, private, must-revalidate",
+                               "sid=abc123; Path=/; HttpOnly; Secure",
+                               "\"5f3e-1a2b\"",
+                               "",
+                               "Accept-Encoding",
+                               "SAMEORIGIN",
+                               "max-age=31536000; includeSubDomains",
+                               "gzip",
+                               "https://example.com/a/b?c=d",
+                               "bytes",
+                               "timeout=5, max=100",
+                               "h3=\":443\"; ma=86400",
+                               "Zx9fK2_abc-QWERTY==",
+                               "default-src 'self'; script-src 'self' https://cdn.example.com" };
 static int gen(char *s) {
   int n = 0;
   uint32_t k = rnd() % 100;
@@ -38,7 +81,8 @@ static int gen(char *s) {
   uint32_t rm = rnd() % 20;
   if (rm == 0) {
   } // no reason, no space
-  else if (rm == 1) n += sprintf(s + n, " ");
+  else if (rm == 1)
+    n += sprintf(s + n, " ");
   else if (rm == 2) n += sprintf(s + n, "X"); // garbage after the code
   else n += sprintf(s + n, "%s%s", rnd() % 10 ? " " : "   ", REASONS[rnd() % 15]);
   const char *eol = rnd() % 15 ? "\r\n" : "\n";
@@ -58,7 +102,10 @@ static int gen(char *s) {
       for (int j = 0; j < l; j++) s[n++] = "abcdefghij-XYZ_!#$%&'*+.^`|~0123456789"[rnd() % 38];
       n += sprintf(s + n, ":v%s", eol);
     } else
-      n += sprintf(s + n, "%s:%s%s%s%s", HNAMES[rnd() % 20], rnd() % 10 ? " " : rnd() % 2 ? "" : " \t ",
+      n += sprintf(s + n, "%s:%s%s%s%s", HNAMES[rnd() % 20],
+                   rnd() % 10  ? " "
+                   : rnd() % 2 ? ""
+                               : " \t ",
                    HVALS[rnd() % 20], rnd() % 15 ? "" : " \t", rnd() % 30 ? eol : "\r\n");
   }
   n += sprintf(s + n, "%s", eol);
@@ -124,4 +171,3 @@ static const char *EDGES[] = {
   "HTTP/1.1 200 OK\r\nA: b\x80\xff\r\n\r\n",
   "HTTP/1.1 100 Continue\r\n\r\nHTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n",
 };
-

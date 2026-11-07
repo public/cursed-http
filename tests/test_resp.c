@@ -120,7 +120,8 @@ static void check_hdrs(int len, size_t max, size_t last_len, const char *what) {
   int rf = fb_parse_headers(bufB, len, G, &nh2, last_len), rs2 = fb_parse_headers_scalar(bufA, len, S, &nh3, last_len);
   if (rp > 0) st_hdr_ok++;
   int bad = rf != rp || rs2 != rp;
-  if (!bad && rp > 0) bad = nh2 != nh || nh3 != nh || !same_hdrs(H, bufA, G, bufB, nh) || !same_hdrs(H, bufA, S, bufA, nh);
+  if (!bad && rp > 0)
+    bad = nh2 != nh || nh3 != nh || !same_hdrs(H, bufA, G, bufB, nh) || !same_hdrs(H, bufA, S, bufA, nh);
   if (bad) {
     FAIL("HEADERS MISMATCH (%s) max=%zu: pico=%d fb=%d scalar=%d\n", what, max, rp, rf, rs2);
     show(bufA, len);
@@ -206,7 +207,8 @@ static const fcase_t FC[] = {
     FBR_UPGRADE },
   { "HTTP/1.1 200 Connection established\r\n\r\n", FBR_REQ_CONNECT, 1, FBR_TUNNEL, 0, -1, 0 },
   { "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", FBR_REQ_CONNECT, 1, FBR_TUNNEL, 0, -1, 0 },
-  { "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 3\r\n\r\n", FBR_REQ_CONNECT, 1, FBR_LENGTH, 0, 3, K },
+  { "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 3\r\n\r\n", FBR_REQ_CONNECT, 1, FBR_LENGTH, 0, 3,
+    K },
   { "HTTP/1.1 204 No Content\r\n\r\n", FBR_REQ_CONNECT, 1, FBR_TUNNEL, 0, -1, 0 },
   { "HTTP/1.1 304 Not Modified\r\n\r\n", FBR_REQ_CONNECT, 1, FBR_NONE, 0, -1, K },
   { "HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n", FBR_REQ_HEAD | 0, 1, FBR_NONE, 0, -1, K },
@@ -231,7 +233,7 @@ static const fcase_t FC[] = {
 // ---------------- 3. chunked bodies ----------------
 typedef struct {
   const char *in;
-  int want; // 1 ok, else the FB_CHUNK_* code
+  int want;                   // 1 ok, else the FB_CHUNK_* code
   const char *body, *trailer; // trailer: the first trailer field's name, or NULL
 } tcase_t;
 static const tcase_t TC[] = {
@@ -240,10 +242,10 @@ static const tcase_t TC[] = {
   { "5\r\nhello\r\n0\r\nA: 1\r\nB: 2\r\n\r\n", 1, "hello", "A" },
   { "0\r\nServer-Timing: total;dur=12\r\n\r\n", 1, "", "Server-Timing" },
   { "5\r\nhello\r\n0;ext=1\r\nA: 1\r\n\r\n", 1, "hello", "A" },
-  { "5\r\nhello\r\n0\r\nA: 1\n\n", 1, "hello", "A" },     // trailers: bare LF as headers allow
-  { "5\r\nhello\r\n0\r\n\n", 1, "hello", NULL },          // the empty trailer section: LF, as fb_parse_headers
+  { "5\r\nhello\r\n0\r\nA: 1\n\n", 1, "hello", "A" },      // trailers: bare LF as headers allow
+  { "5\r\nhello\r\n0\r\n\n", 1, "hello", NULL },           // the empty trailer section: LF, as fb_parse_headers
   { "5\r\nhello\r\n0\r\nA 1\r\n\r\n", -1, "hello", NULL }, // a bad trailer field: fb_parse_headers says -1
-  { "5\r\nhello\r\n0\r\n", 0, NULL, NULL },               // incomplete trailer section (fb_parse_headers: -2)
+  { "5\r\nhello\r\n0\r\n", 0, NULL, NULL },                // incomplete trailer section (fb_parse_headers: -2)
   { "5\r\nhelloX\r\n0\r\n\r\n", FB_CHUNK_INVALID, NULL, NULL },
 };
 static char tbuf[1 << 16], tout[1 << 16];
@@ -352,7 +354,7 @@ int main(int argc, char **argv) {
       struct fb_header G[MAXH];
       fbr_resp_t r = { .headers = G, .num_headers = MAXH };
       int x = simd ? fbr_parse(bufA, l, c->req, &r, 0) : fbr_parse_scalar(bufB, l, c->req, &r, 0);
-      int ok = c->want == 1 ? x == l && r.body == c->body && r.length == c->length && r.flags == c->flags
+      int ok = c->want == 1    ? x == l && r.body == c->body && r.length == c->length && r.flags == c->flags
                : c->want == -1 ? x == -1 && r.err == c->err
                                : x == c->want;
       if (!ok) {

@@ -11,7 +11,7 @@
 #include "fuzz.h"
 #include "fbresp.h"
 
-#define FPAD 64
+#define FPAD  64
 #define FMAXH 32
 static char *dup_pad(const uint8_t *d, size_t n, char fill) {
   char *b = malloc(n + FPAD);
@@ -38,8 +38,8 @@ static void head(const uint8_t *d, size_t n, size_t max, const char *what) {
     nh2 = max;
     int rf = v ? fb_parse_response_scalar(B, n, &mv2, &st2, &m2, &ml2, G, &nh2, 0)
                : fb_parse_response(B, n, &mv2, &st2, &m2, &ml2, G, &nh2, 0);
-    if (rf != rp || (rp > 0 && (mv2 != mv || st2 != st || m2 - B != m - A || ml2 != ml || nh2 != nh ||
-                                !same_h(H, A, G, B, nh)))) {
+    if (rf != rp ||
+        (rp > 0 && (mv2 != mv || st2 != st || m2 - B != m - A || ml2 != ml || nh2 != nh || !same_h(H, A, G, B, nh)))) {
       snprintf(err, sizeof err, "%s (%s, max %zu): pico %d, fb %d", what, v ? "scalar" : "simd", max, rp, rf);
       fz_report("resp", err, d, n);
     }
@@ -91,8 +91,9 @@ static void framing(const uint8_t *d, size_t n, int req) {
     int tunnel = (req == FBR_REQ_CONNECT && st / 100 == 2) || st == 101;
     if (tunnel) bad = r.body != FBR_TUNNEL || (r.flags & FBR_KEEPALIVE);
     else if (nobody) bad = r.body != FBR_NONE;
-    else bad = r.body == FBR_NONE || r.body == FBR_TUNNEL || (r.body == FBR_LENGTH) != (r.length >= 0) ||
-               (r.body == FBR_CLOSE && (r.flags & FBR_KEEPALIVE));
+    else
+      bad = r.body == FBR_NONE || r.body == FBR_TUNNEL || (r.body == FBR_LENGTH) != (r.length >= 0) ||
+            (r.body == FBR_CLOSE && (r.flags & FBR_KEEPALIVE));
   }
   if (bad) {
     snprintf(err, sizeof err, "fbr_parse req %d: %d (err %d body %d flags %u), fb_parse_response %d status %d", req, x,

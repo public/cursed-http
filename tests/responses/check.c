@@ -17,7 +17,7 @@
 #include "llhttp.h"
 #include "fbresp.h"
 
-#define PAD 64
+#define PAD  64
 #define MAXH 100
 static int fails;
 #define FAIL(...)                                                                                                      \
@@ -55,7 +55,8 @@ static void check_head(const char *s, int n, const char *where) {
                 G[i].name_len != H[i].name_len || G[i].value - base != H[i].value - A ||
                 G[i].value_len != H[i].value_len;
       }
-      if (bad) FAIL("HEAD MISMATCH %s, prefix %d of %d (%s): pico %d fb %d\n", where, t, n, v ? "scalar" : "simd", rp, rf);
+      if (bad)
+        FAIL("HEAD MISMATCH %s, prefix %d of %d (%s): pico %d fb %d\n", where, t, n, v ? "scalar" : "simd", rp, rf);
     }
     free(A);
     free(B);
