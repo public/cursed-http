@@ -737,6 +737,7 @@ make compare-all  # + uWebSockets, lightning, http-parser, pico Armv8-A forks, h
 make compare-go   # + fasthttp (Go >= 1.26) on the same corpora
 make extras-check # both, as quick correctness gates (CI / Docker)
 make real-browsers # headless Chromium, Firefox and WebKit (Playwright, pinned) against the HTTP/1.1 parsers
+make top1k-full    # the Tranco top-1k sites' real requests (tests/top1k/) at every length, every backend
 
 # HTTP/2, HTTP/3, QUIC (after scripts/fetch-thirdparty.sh nghttp2 nghttp3 h2spec picotls ngtcp2; see H2H3.md)
 make test-h2h3    # HPACK, h2, QPACK, h3 and QUIC tests, differential against nghttp2 / nghttp3 / ngtcp2
@@ -892,6 +893,8 @@ The 7 inputs accepted against some reference's rejection don't affect framing or
     48, and with `last_len`), and the `req_t` adapters must equal the reference or fall back.
   - The saved requests (156 from Chromium 156, Firefox 157 and WebKit 27.2) are in `tests/browser/captures/`.
     `make test` replays them under every backend (`make browser-replay`), so no browser is needed for that.
+
+- **The real web** (`make top1k-full`, [tests/top1k/](tests/top1k/)): 3,533 requests that headless Chromium sent while loading the Tranco top 1,000 sites (to the sites and to every third party they pulled in), plus 2,054 response heads. Cookie, token and body values are scrubbed shape-preservingly. Every request is checked at every length on every backend; `make test` checks the lengths next to line ends.
 
 **Platforms run:**
 
