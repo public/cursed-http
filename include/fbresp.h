@@ -100,11 +100,13 @@ FB_INLINE int fbr_headers(const char *b, int len, int p, fbr_scan_t *sc, struct 
       name = b + p;
       nl = ne - p;
       vs = ne + 1;
-      while (vs < len && (b[vs] == ' ' || b[vs] == '\t')) vs++;
-      if (vs >= len) return -2;
     }
+    // the value's end first: SP and HT are not ct, so the first ct after the colon is pico's (it skips the
+    // whitespace, then looks for the first ct); whitespace running into len is -2 there as here
     e = fbr_next(b, len, vs, sc, FB_CT, simd);
     if (e >= len) return -2;
+    if (name) // the whitespace after the colon: before e, a byte <= ' ' can only be SP or HT (the rest are ct)
+      while (vs < e && (unsigned char)b[vs] <= ' ') vs++;
     if (FB_LIKELY(b[e] == '\r')) {
       if (e + 1 >= len) return -2;
       if (b[e + 1] != '\n') return -1;
@@ -112,7 +114,7 @@ FB_INLINE int fbr_headers(const char *b, int len, int p, fbr_scan_t *sc, struct 
     } else if (b[e] == '\n') p = e + 1;
     else return -1;
     int ve = e;
-    while (FB_UNLIKELY(ve > vs && (b[ve - 1] == ' ' || b[ve - 1] == '\t'))) ve--;
+    while (FB_UNLIKELY(ve > vs && (unsigned char)b[ve - 1] <= ' ')) ve--; // SP or HT (as above)
     h[n].name = name;
     h[n].name_len = (size_t)nl;
     h[n].value = b + vs;
@@ -225,6 +227,15 @@ FB_INLINE int fbr_lc_eq(const char *s, size_t n, const char *lc, size_t k) { // 
     if (((unsigned char)s[i] | ((unsigned)(s[i] - 'A') < 26u ? 0x20 : 0)) != (unsigned char)lc[i]) return 0;
   return 1;
 }
+// a field name (k >= 8 bytes, validated as tchars) vs a lowercase name of letters and '-': two overlapping 8-byte loads
+// (with one more 8-byte load for k > 16). x | 0x20 maps exactly the two cases of a letter onto it, and '-' only from
+// '-' or CR (not a tchar), so the compare is exact for these names.
+FB_INLINE int fbr_name_is(const char *n, const char *lc, size_t k) {
+  uint64_t a = fb_ld64(n) | 0x2020202020202020ull, z = fb_ld64(n + k - 8) | 0x2020202020202020ull;
+  int ok = a == fb_ld64(lc) && z == fb_ld64(lc + k - 8);
+  if (k > 16) ok &= (fb_ld64(n + 8) | 0x2020202020202020ull) == fb_ld64(lc + 8);
+  return ok;
+}
 // the elements of a comma list (RFC 9110 5.6.1): calls back with each non-empty element, OWS trimmed
 #define FBR_EACH(v, vl, EL, ELN, BODY)                                                                                 \
   for (size_t i_ = 0; i_ <= (vl);) {                                                                                   \
@@ -270,19 +281,25 @@ FB_INLINE int fbr_core2(const char *b, size_t len, int req, fbr_resp_t *r, size_
     }
     last = 0;
     size_t nl = f->name_len;
-    if (nl == 14 && fbr_lc_eq(f->name, nl, "content-length", 14)) {
+    if (nl == 14 && fbr_name_is(f->name, "content-length", 14)) {
       ncl++;
       clv = f->value;
       cll = f->value_len;
       last = 1;
-    } else if (nl == 17 && fbr_lc_eq(f->name, nl, "transfer-encoding", 17)) {
+    } else if (nl == 17 && fbr_name_is(f->name, "transfer-encoding", 17)) {
       te = 1;
       last = 2;
-      te_chunked = 0; // the final coding of the last field decides
-      FBR_EACH(f->value, f->value_len, el, eln, { te_chunked = fbr_lc_eq(el, eln, "chunked", 7); })
-    } else if (nl == 10 && fbr_lc_eq(f->name, nl, "connection", 10)) {
+      // the final coding of the last field decides; "chunked" alone first (nearly every response)
+      if (f->value_len == 7 && fbr_lc_eq(f->value, 7, "chunked", 7)) te_chunked = 1;
+      else {
+        te_chunked = 0;
+        FBR_EACH(f->value, f->value_len, el, eln, { te_chunked = fbr_lc_eq(el, eln, "chunked", 7); })
+      }
+    } else if (nl == 10 && fbr_name_is(f->name, "connection", 10)) {
       last = 3;
-      FBR_EACH(f->value, f->value_len, el, eln, {
+      if (f->value_len == 10 && fbr_name_is(f->value, "keep-alive", 10)) conn_ka = 1; // the usual values alone first
+      else if (f->value_len == 5 && fbr_lc_eq(f->value, 5, "close", 5)) conn_close = 1;
+      else FBR_EACH(f->value, f->value_len, el, eln, {
         if (fbr_lc_eq(el, eln, "close", 5)) conn_close = 1;
         else if (fbr_lc_eq(el, eln, "keep-alive", 10)) conn_ka = 1;
         else if (fbr_lc_eq(el, eln, "upgrade", 7)) r->flags |= FBR_UPGRADE;
