@@ -873,11 +873,22 @@ typedef struct {
   int off, size;
 } fb_chunk_span_t;
 // one pass. write = 1: copy each chunk to out as it is validated (out != b, or a second in-place pass after a
-// validating one); write = 0: validate only, remembering up to FB_CHUNK_SPANS chunk positions in sp
+// validating one); write = 0: validate only, remembering up to FB_CHUNK_SPANS chunk positions in sp.
+// tr = 1 (responses, include/fbresp.h): stop after the last-chunk line and return the position of the trailer section
+// (the caller parses it: fields, then the empty line). prog != NULL: on NEED_MORE, prog[0] = the input bytes of the
+// complete chunks before the incomplete one, prog[1] = their data bytes (a streaming caller drops them and goes on).
+// The request decoder passes tr = 0, prog = NULL (constants: the same code as before).
 static inline int fb_chunked_pass(const char *b, int len, char *out, int max_body, int *body_len, const int write,
-                                  fb_chunk_span_t *sp, int *nsp) {
+                                  fb_chunk_span_t *sp, int *nsp, const int tr, int *prog) {
   int p = 0, total = 0;
+#define FB_CHUNK_MORE()                                                                                                \
+  do {                                                                                                                 \
+    if (prog) prog[0] = c0, prog[1] = total;                                                                           \
+    return FB_CHUNK_NEED_MORE;                                                                                         \
+  } while (0)
   for (;;) {
+    const int c0 = p; // this chunk's start
+    (void)c0;
     // chunk-size
     int64_t size = 0;
     int nd = 0, h;
@@ -887,12 +898,12 @@ static inline int fb_chunked_pass(const char *b, int len, char *out, int max_bod
       if (size > (int64_t)max_body - total) return FB_CHUNK_TOO_LARGE;
       p++;
     }
-    if (p >= len) return FB_CHUNK_NEED_MORE;
+    if (p >= len) FB_CHUNK_MORE();
     if (nd == 0) return FB_CHUNK_INVALID;
     // [BWS ";" chunk-ext] CRLF
     int q = p;
     while (q < len && (b[q] == ' ' || b[q] == '\t')) q++;
-    if (q >= len) return FB_CHUNK_NEED_MORE;
+    if (q >= len) FB_CHUNK_MORE();
     if (b[q] == ';') { // the extension: 8 bytes at a time, the first control byte must be the CR that ends it
       for (q++; q + 8 <= len; q += 8) {
         uint64_t w = fb_ld64(b + q),
@@ -908,15 +919,19 @@ static inline int fb_chunked_pass(const char *b, int len, char *out, int max_bod
         if ((c < 0x20 && c != '\t') || c == 0x7f) return FB_CHUNK_INVALID;
       }
     } else if (q != p) return FB_CHUNK_INVALID; // whitespace after the size only before a ";"
-    if (q >= len) return FB_CHUNK_NEED_MORE;
+    if (q >= len) FB_CHUNK_MORE();
     if (b[q] != '\r') return FB_CHUNK_INVALID;
-    if (q + 1 >= len) return FB_CHUNK_NEED_MORE;
+    if (q + 1 >= len) FB_CHUNK_MORE();
     if (b[q + 1] != '\n') return FB_CHUNK_INVALID;
     p = q + 2;
     if (size == 0) { // last-chunk: then the empty line that ends the (empty) trailer section
-      if (p >= len) return FB_CHUNK_NEED_MORE;
+      if (tr) {
+        *body_len = total;
+        return p;
+      }
+      if (p >= len) FB_CHUNK_MORE();
       if (b[p] != '\r') return FB_CHUNK_INVALID; // a trailer field, or a bare LF
-      if (p + 1 >= len) return FB_CHUNK_NEED_MORE;
+      if (p + 1 >= len) FB_CHUNK_MORE();
       if (b[p + 1] != '\n') return FB_CHUNK_INVALID;
       *body_len = total;
       return p + 2;
@@ -925,7 +940,7 @@ static inline int fb_chunked_pass(const char *b, int len, char *out, int max_bod
     if ((int64_t)len - p < size + 2) {
       // incomplete, but a wrong byte already in place is invalid now
       if ((int64_t)len - p >= size + 1 && b[p + size] != '\r') return FB_CHUNK_INVALID;
-      return FB_CHUNK_NEED_MORE;
+      FB_CHUNK_MORE();
     }
     if (b[p + size] != '\r' || b[p + size + 1] != '\n') return FB_CHUNK_INVALID;
     if (write) fb_chunk_copy(out + total, b + p, (int)size); // out + total <= b + p: in place works
@@ -937,28 +952,35 @@ static inline int fb_chunked_pass(const char *b, int len, char *out, int max_bod
     total += (int)size;
     p += (int)size + 2;
   }
+#undef FB_CHUNK_MORE
 }
-static inline int fb_decode_chunked(const char *b, int len, char *out, int max_body, int *body_len) {
+// fb_decode_chunked plus fbresp.h's tr / prog (see fb_chunked_pass). With prog, in place too: on NEED_MORE the complete
+// chunks are already compacted to out[0..prog[1]).
+static inline int fb_decode_chunked_ex(const char *b, int len, char *out, int max_body, int *body_len, const int tr,
+                                       int *prog) {
   int n = 0, ns = 0, r;
   fb_chunk_span_t sp[FB_CHUNK_SPANS];
   if (max_body < 0) max_body = 0;
   if (out != b) { // a separate buffer: one pass, copying as it goes
-    r = fb_chunked_pass(b, len, out, max_body, &n, 1, sp, &ns);
+    r = fb_chunked_pass(b, len, out, max_body, &n, 1, sp, &ns, tr, prog);
     if (r > 0) *body_len = n;
     return r;
   }
   // in place: validate first (a NEED_MORE retry must see the original bytes), then compact the chunks
-  r = fb_chunked_pass(b, len, out, max_body, &n, 0, sp, &ns);
-  if (r <= 0) return r;
+  r = fb_chunked_pass(b, len, out, max_body, &n, 0, sp, &ns, tr, prog);
+  if (r < 0 || (r == 0 && !prog)) return r;
   if (ns <= FB_CHUNK_SPANS) {
     int t = 0;
     for (int i = 0; i < ns; i++) {
       fb_chunk_copy(out + t, b + sp[i].off, sp[i].size);
       t += sp[i].size;
     }
-  } else fb_chunked_pass(b, len, out, max_body, &n, 1, sp, &ns);
-  *body_len = n;
+  } else fb_chunked_pass(b, len, out, max_body, &n, 1, sp, &ns, tr, prog);
+  if (r > 0) *body_len = n;
   return r;
+}
+static inline int fb_decode_chunked(const char *b, int len, char *out, int max_body, int *body_len) {
+  return fb_decode_chunked_ex(b, len, out, max_body, body_len, 0, NULL);
 }
 
 // ---------------- req_t adapter (needs fastparse.h included first) ----------------

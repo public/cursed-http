@@ -356,3 +356,4 @@ clean:
 	rm -rf $(B)
 .PHONY: all lib mca mca-validate gen gencheck test test-quick asan bench bench-codspeed avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check fuzz fuzz-replay hypothesis mutants-fuzz format lint hooks clean
 include mk/h2h3.mk
+include mk/resp.mk
