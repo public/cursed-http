@@ -44,9 +44,13 @@ static int gen_chunked_body(char *b, int chunks, int size, int ext) {
   return n + sprintf(b + n, "0\r\n\r\n");
 }
 
+static cb_corpus *build_seeded(int n, gen_fn g, int shape, int chunks, int size, int ext);
 static cb_corpus *build(int n, gen_fn g, int shape, int chunks, int size, int ext) {
-  enum { MAXREQ = 1 << 16 };
   seed();
+  return build_seeded(n, g, shape, chunks, size, ext);
+}
+static cb_corpus *build_seeded(int n, gen_fn g, int shape, int chunks, int size, int ext) {
+  enum { MAXREQ = 1 << 16 };
   cb_corpus *c = calloc(1, sizeof *c);
   char *tmp = malloc(MAXREQ);
   c->n = n;
@@ -85,6 +89,11 @@ static cb_corpus *build(int n, gen_fn g, int shape, int chunks, int size, int ex
 
 cb_corpus *cb_corpus_fast(int shape, int n) { return build(n, gen, shape, 0, 0, 0); }
 cb_corpus *cb_corpus_fb(int shape, int n) { return build(n, gen_fb, shape, 0, 0, 0); }
+cb_corpus *cb_corpus_perf(int shape, int n) {
+  rs = 0x9E3779B97F4A7C15ull; // as dump_corpus: the PRNG fresh, then the tokens, then the requests (the tokens come
+  mk_tokens(), seeded = 1;    // out the same as seed()'s, which also draws them from the fresh PRNG)
+  return build_seeded(n, gen, shape, 0, 0, 0);
+}
 cb_corpus *cb_corpus_chunked(int chunks, int size, int ext, int n) { return build(n, NULL, 0, chunks, size, ext); }
 int cb_corpus_len(const cb_corpus *c) { return c->n; }
 long cb_corpus_bytes(const cb_corpus *c) { return c->bytes; }
@@ -176,6 +185,48 @@ long cb_fb_parse_req(const cb_corpus *c) {
   req_t out;
   for (int i = 0; i < c->n; i++) {
     int r = fb_parse_req(c->ptr[i], c->len[i], &out);
+    s += SUM(r, out);
+  }
+  return s;
+}
+__attribute__((noinline)) static int fb_call(const char *b, int l, const char **m, size_t *ml, const char **p,
+                                             size_t *pl, int *minor, struct fb_header *h, size_t *nh) {
+  return fb_parse_request(b, l, m, ml, p, pl, minor, h, nh, 0);
+}
+__attribute__((noinline)) static int fb_call_scalar(const char *b, int l, const char **m, size_t *ml, const char **p,
+                                                    size_t *pl, int *minor, struct fb_header *h, size_t *nh) {
+  return fb_parse_request_scalar(b, l, m, ml, p, pl, minor, h, nh, 0);
+}
+__attribute__((noinline)) static int fb_req_call(const char *b, int l, req_t *out) { return fb_parse_req(b, l, out); }
+long cb_fb_parse_request_call(const cb_corpus *c) {
+  long s = 0;
+  for (int i = 0; i < c->n; i++) {
+    const char *m, *p;
+    size_t ml, pl, nh = 64;
+    int minor;
+    struct fb_header h[64];
+    int r = fb_call(c->ptr[i], c->len[i], &m, &ml, &p, &pl, &minor, h, &nh);
+    s += r + (long)nh + (long)pl + (nh ? (long)h[nh - 1].value_len : 0);
+  }
+  return s;
+}
+long cb_fb_parse_request_scalar_call(const cb_corpus *c) {
+  long s = 0;
+  for (int i = 0; i < c->n; i++) {
+    const char *m, *p;
+    size_t ml, pl, nh = 64;
+    int minor;
+    struct fb_header h[64];
+    int r = fb_call_scalar(c->ptr[i], c->len[i], &m, &ml, &p, &pl, &minor, h, &nh);
+    s += r + (long)nh + (long)pl + (nh ? (long)h[nh - 1].value_len : 0);
+  }
+  return s;
+}
+long cb_fb_parse_req_call(const cb_corpus *c) {
+  long s = 0;
+  req_t out;
+  for (int i = 0; i < c->n; i++) {
+    int r = fb_req_call(c->ptr[i], c->len[i], &out);
     s += SUM(r, out);
   }
   return s;
