@@ -410,8 +410,7 @@ FB_INLINE uint32_t fb_nt32_at(const char *p) {
 enum { FB_NT, FB_CT, FB_PE };
 FB_INLINE uint64_t fb_cls64(int simd, const int which, const char *p) {
 #if FB_BACKEND != 0
-  if (simd)
-    return which == FB_NT ? fb_nt64_simd(p) : which == FB_CT ? fb_ct64_simd(p) : fb_pe64_simd(p);
+  if (simd) return which == FB_NT ? fb_nt64_simd(p) : which == FB_CT ? fb_ct64_simd(p) : fb_pe64_simd(p);
 #endif
   (void)simd;
   return which == FB_NT ? fb_nt64_scalar(p) : which == FB_CT ? fb_ct64_scalar(p) : fb_pe64_scalar(p);
