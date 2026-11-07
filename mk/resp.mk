@@ -24,3 +24,13 @@ test-resp: $(RESP_BINS) $(B)/asan_resp
 $(B)/test_resp_llhttp: tests/test_resp_llhttp.c $(RESP_HDRS) $(LLHTTP_O)
 	$(CC_T) -Ivendor/llhttp/include $< $(LLHTTP_O) -o $@
 RESP_BINS += $(B)/test_resp_llhttp
+# libFuzzer: fbresp.h vs pico (fuzz/fuzz_resp.c); RESP_FUZZ_TIME seconds, default 30. replay_resp: any compiler
+RESP_FUZZ_TIME ?= 30
+$(B)/fuzz_resp: fuzz/fuzz_resp.c $(RESP_HDRS) $(FZ_DEPS) | $(B)
+	$(FUZZ_CC) $(FUZZ_SAN) $(WARN) $(MARCH) $(FZ_INC) $< $(PICO) -o $@
+$(B)/replay_resp: fuzz/fuzz_resp.c fuzz/replay.c $(RESP_HDRS) $(FZ_DEPS) | $(B)
+	$(CC) $(CFLAGS) $(WARN) $(MARCH) $(FZ_INC) $< fuzz/replay.c $(PICO) -o $@
+fuzz-resp: $(B)/fuzz_resp
+	mkdir -p $(B)/fuzz-corpus/resp
+	./$(B)/fuzz_resp -max_total_time=$(RESP_FUZZ_TIME) -max_len=8192 -dict=fuzz/http.dict -print_final_stats=1 \
+	  -artifact_prefix=$(B)/fuzz-resp- $(B)/fuzz-corpus/resp $(wildcard tests/responses/corpus)
