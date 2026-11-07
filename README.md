@@ -21,6 +21,8 @@ This repository holds three single-header HTTP/1.1 parsers plus a learning mode:
   [Learned request templates](#learned-request-templates).
 - **[`fbparse.h`](include/fbparse.h)**, a general parser with picohttpparser's API and exactly its results.
 - **[`batchparse.h`](include/batchparse.h)**, which parses many connections' requests in one lane-parallel call.
+- **[`fbresp.h`](include/fbresp.h)**, the client side: HTTP/1.x responses with picohttpparser's
+  `phr_parse_response` results, the body framing of RFC 9112 section 6.3, and streaming chunked bodies with trailers.
 
 **Why it exists.** A server that knows its own routes doesn't need a general parser on the hot path. fastparse.h
 matches the API's request lines directly, pulls out the few things the handler needs, and passes anything unusual
@@ -559,6 +561,45 @@ int fb_parse_req_ex(const char *buf, int len, req_t *r, fb_info_t *info);
 
 There is no head-size limit. The header count is bounded by the caller's array.
 
+### fbresp.h
+
+```c
+#include "fbresp.h"   // standalone (includes fbparse.h); the same 64-byte padding contract
+
+// picohttpparser's phr_parse_response and phr_parse_headers: same arguments, same results
+int fb_parse_response(const char *buf, size_t len, int *minor_version, int *status, const char **msg,
+                      size_t *msg_len, struct fb_header *headers, size_t *num_headers, size_t last_len);
+int fb_parse_headers(const char *buf, size_t len, struct fb_header *headers, size_t *num_headers, size_t last_len);
+
+// the head, then the body's framing (RFC 9112 6.3) for the request it answers (FBR_REQ_OTHER / _HEAD / _CONNECT)
+int fbr_parse(const char *buf, size_t len, int req, fbr_resp_t *r, size_t last_len);
+//   > 0 head bytes, -1 invalid (r->err: FBR_E_HEAD, _STATUS, _CL, _TE10, _FOLD), -2 incomplete
+//   r->body: FBR_NONE (HEAD, 1xx, 204, 304), FBR_LENGTH (r->length), FBR_CHUNKED, FBR_CLOSE (until the server
+//   closes), FBR_TUNNEL (101, 2xx to CONNECT); r->flags: FBR_KEEPALIVE, FBR_INTERIM (a 1xx: the final response
+//   follows at buf + the result), FBR_TECL (Transfer-Encoding beat Content-Length: don't reuse the connection)
+
+// chunked bodies: stops at the trailer section (parse it with fb_parse_headers); streams with prog
+int fbr_chunked(const char *b, int len, char *out, int max_body, int *body_len, int *prog);
+//   > 0 the trailer section starts there | FB_CHUNK_NEED_MORE (prog[0] input bytes done, prog[1] data bytes in out)
+//   | FB_CHUNK_INVALID | FB_CHUNK_TOO_LARGE
+```
+
+The framing follows RFC 9112 6.3 in its order. Transfer-Encoding with `chunked` last beats Content-Length, and the
+connection must then not be reused. Any other final coding reads until close. Transfer-Encoding in an HTTP/1.0
+response is an error (6.1). A repeated or listed Content-Length is an error even when the values agree. A status
+outside 100–599 is an error. The head parser accepts any three digits, as pico does.
+
+Tested (`make test-resp`; `HTTPARSE=1` adds httparse; the details are in each test's header):
+
+- **Against picohttpparser:** every generated and mutated response, at every prefix length, SIMD and scalar, two
+  paddings, header capacities and `last_len`.
+- **Framing against llhttp** in response mode.
+- **Heads against Rust httparse.**
+- **Real responses:** 216 connections captured from nginx, Apache httpd, Caddy, h2o, HAProxy, Go `net/http`, Node
+  `http` and Python `http.server` (`tests/responses/`). They cover chunked, gzip, HEAD, 204, 304, 100-continue, 103,
+  101, trailers, pipelining and close-delimited bodies.
+- **libFuzzer:** `fuzz/fuzz_resp.c`.
+
 ### batchparse.h
 
 ```c
@@ -1077,6 +1118,29 @@ Variants on the Xeon:
 - zmm is 10–15% slower on small requests;
 - the sequential loop is about 1.7× slower on long heads (it keeps the block-cached name scan);
 - the scalar backend is 4–6× slower.
+
+### fbresp.h vs general parsers, responses (`make bench-resp`; `HTTPARSE=1` adds httparse)
+
+ns per response head (head only, no body), gcc 13 `-O3 -march=haswell`. Each figure is the median of 3 runs; each run
+takes the best of 300 interleaved passes per parser. Vultr 1-vCPU VMs, 2026-11-07 (experiment c001). The corpora:
+- **top-1k:** 2,054 heads from the Tranco top 1,000 sites, about 2 KB each (`tests/top1k`);
+- **servers:** the 248 heads of the local-server captures;
+- **nginx / cdn / api / 304:** generated shapes (`bench/resp_shapes.h`).
+
+| CPU | corpus | **fbresp.h** | picohttpparser (SSE4.2) | httparse | llhttp |
+|---|---|---|---|---|---|
+| AMD EPYC Turin | top-1k | **322** | 410 (1.27×) | 534 (1.66×) | 887 (2.75×) |
+| | servers | **51** | 51 (1.00×) | 71 (1.38×) | 120 (2.34×) |
+| | cdn | 239 | **215** (0.90×) | 295 (1.24×) | 456 (1.91×) |
+| AMD EPYC Genoa | top-1k | **336** | 423 (1.26×) | 566 (1.68×) | 951 (2.83×) |
+| | servers | **55** | 56 (1.02×) | 99 (1.79×) | 137 (2.48×) |
+| | cdn | 248 | **234** (0.95×) | 347 (1.40×) | 518 (2.09×) |
+| Intel Xeon Cascade Lake | top-1k | **503** | 660 (1.31×) | 933 (1.86×) | 1535 (3.05×) |
+| | servers | **98** | 107 (1.10×) | 176 (1.80×) | 287 (2.93×) |
+| | cdn | **357** | 377 (1.05×) | 529 (1.48×) | 980 (2.74×) |
+
+(×) = that parser's time / fbresp.h's. With clang 18, fbresp.h is 1.31–1.36× faster than pico on top-1k and 0.96–1.06×
+on cdn. `fbr_parse` (head plus framing) adds 7–15%.
 
 ### batchparse.h vs fast_parse × N (`build/bench_batch`)
 
