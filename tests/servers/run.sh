@@ -4,7 +4,7 @@
 # 404, a 100 kB POST echoed back, 204, and a response with trailers. Prints one line per case and server, and
 # exits nonzero if any case failed.
 #   SRV=~/opt/httpsrv/root tests/servers/run.sh [server...]
-# servers: nginx apache h2o haproxy caddy node (h2c, prior knowledge), caddy-h3 aioquic (HTTP/3).
+# servers: nginx apache h2o haproxy caddy node (h2c, prior knowledge, and h2 over TLS), caddy-h3 aioquic (HTTP/3).
 # SRV: a directory holding the servers' files (usr/sbin/nginx, usr/sbin/apache2, usr/bin/caddy, usr/bin/h2o,
 # usr/sbin/haproxy), e.g. Ubuntu 24.04's packages unpacked with dpkg -x; node and openssl from PATH; aioquic
 # from AIOQUIC_PY (a python3 that can import aioquic). Build first: make build/h2h3/h2_client build/h2h3/h3_client
@@ -13,7 +13,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 B=$(cd "$here/../.." && pwd)/build/h2h3
 SRV=${SRV:?set SRV}
 export LD_LIBRARY_PATH="$SRV/usr/lib/x86_64-linux-gnu"
-PORT=${PORT:-18601} ORIGIN=$((PORT + 1)) PORT3=$((PORT + 2))
+PORT=${PORT:-18601} ORIGIN=$((PORT + 1)) PORT3=$((PORT + 2)) PORTS=$((PORT + 3))
 run=$(mktemp -d)
 docs="$run/docs"
 mkdir -p "$docs" "$run/nginx/logs"
@@ -24,7 +24,8 @@ open('$docs/big.bin', 'wb').write(os.urandom(1 << 20))
 "
 openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -keyout "$run/key.pem" -out "$run/cert.pem" \
   -days 2 -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 2>/dev/null
-sub() { sed -e "s|@PORT@|$PORT|g" -e "s|@PORT3@|$PORT3|g" -e "s|@ORIGIN@|$ORIGIN|g" -e "s|@DOCROOT@|$docs|g" \
+cat "$run/cert.pem" "$run/key.pem" >"$run/both.pem"
+sub() { sed -e "s|@PORT@|$PORT|g" -e "s|@PORT3@|$PORT3|g" -e "s|@PORTS@|$PORTS|g" -e "s|@ORIGIN@|$ORIGIN|g" -e "s|@DOCROOT@|$docs|g" \
   -e "s|@RUN@|$run|g" -e "s|@MODS@|$SRV/usr/lib/apache2/modules|g" "$here/$1" >"$run/$1"; }
 pids=""
 start() {
@@ -67,10 +68,10 @@ cases() { # $@: the client and its address
   check 204 "204 0" "$@" /204
   check trailers "200 19" "$@" /trailers
 }
-wait_port() { # $1: tcp or udp
+wait_port() { # $1: tcp or udp, $2: the port
   for _ in $(seq 50); do
-    if [ "$1" = udp ]; then ss -lun | grep -q "127.0.0.1:$PORT3 " && return; else
-      ss -ltn | grep -q "127.0.0.1:$PORT " && return
+    if [ "$1" = udp ]; then ss -lun | grep -q "127.0.0.1:$2 " && return; else
+      ss -ltn | grep -q "127.0.0.1:$2 " && return
     fi
     sleep 0.1
   done
@@ -78,12 +79,17 @@ wait_port() { # $1: tcp or udp
 }
 h2() {
   echo "$1 (h2c)"
-  wait_port tcp
+  wait_port tcp $PORT
   cases "$B/h2_client" 127.0.0.1 $PORT
+}
+h2s() { # HTTP/2 over TLS, ALPN h2, on $2
+  echo "$1 (h2 over TLS)"
+  wait_port tcp "$2"
+  cases "$B/h2_client" 127.0.0.1 "$2" -s -k
 }
 h3() {
   echo "$1 (h3)"
-  wait_port udp
+  wait_port udp $PORT3
   sleep 0.3
   cases "$B/h3_client" 127.0.0.1 $PORT3 -k
 }
@@ -97,35 +103,40 @@ for s in "$@"; do
       sub nginx.conf
       start "$SRV/usr/sbin/nginx" -p "$run/nginx" -c "$run/nginx.conf" -g "daemon off; pid $run/nginx.pid; error_log stderr;"
       h2 "nginx $("$SRV/usr/sbin/nginx" -v 2>&1 | sed 's|.*/||')"
+      h2s "nginx $("$SRV/usr/sbin/nginx" -v 2>&1 | sed 's|.*/||')" $PORTS
       ;;
     apache)
       origin
       sub httpd.conf
       start "$SRV/usr/sbin/apache2" -d "$run" -f "$run/httpd.conf" -DFOREGROUND
       h2 "Apache httpd $("$SRV/usr/sbin/apache2" -v | sed -n 's|.*Apache/\([^ ]*\).*|\1|p')"
+      h2s "Apache httpd $("$SRV/usr/sbin/apache2" -v | sed -n 's|.*Apache/\([^ ]*\).*|\1|p')" $PORTS
       ;;
     h2o)
       origin
       sub h2o.conf
       start "$SRV/usr/bin/h2o" -c "$run/h2o.conf"
       h2 "h2o $("$SRV/usr/bin/h2o" --version | sed -n 's/h2o version //p')"
+      h2s "h2o $("$SRV/usr/bin/h2o" --version | sed -n 's/h2o version //p')" $PORTS
       ;;
     haproxy)
       origin
       sub haproxy.cfg
       start "$SRV/usr/sbin/haproxy" -db -f "$run/haproxy.cfg"
       h2 "HAProxy $("$SRV/usr/sbin/haproxy" -v | sed -n 's/HAProxy version \([^ ]*\).*/\1/p')"
+      h2s "HAProxy $("$SRV/usr/sbin/haproxy" -v | sed -n 's/HAProxy version \([^ ]*\).*/\1/p')" $PORTS
       ;;
     caddy | caddy-h3)
       origin
       sub Caddyfile
       HOME="$run" XDG_DATA_HOME="$run" XDG_CONFIG_HOME="$run" start "$SRV/usr/bin/caddy" run --config "$run/Caddyfile" --adapter caddyfile
       v=$("$SRV/usr/bin/caddy" version | cut -d' ' -f1)
-      if [ $s = caddy ]; then h2 "Caddy $v"; else h3 "Caddy $v (quic-go)"; fi
+      if [ $s = caddy ]; then h2 "Caddy $v" && h2s "Caddy $v" $PORT3; else h3 "Caddy $v (quic-go)"; fi
       ;;
     node)
-      start node "$here/node.js" $PORT "$docs"
+      start node "$here/node.js" $PORT "$docs" $PORTS "$run/cert.pem" "$run/key.pem"
       h2 "Node $(node --version) http2"
+      h2s "Node $(node --version) http2" $PORTS
       ;;
     aioquic)
       py=${AIOQUIC_PY:-python3}
