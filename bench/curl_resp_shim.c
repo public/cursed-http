@@ -56,6 +56,8 @@ int cu_parse_response(const char *buf, size_t len, int *minor, int *status, cons
   data->state.maybe_folded = FALSE;
   data->state.leading_unfold = FALSE;
   data->req.header = TRUE;
+  data->req.allheadercount = 0; // libcurl caps a transfer's header bytes (300 KB): one response here is one transfer
+  data->info.header_size = 0;
   data->req.size = -1;
   data->req.maxdownload = -1;
   cu_fields = 0;
