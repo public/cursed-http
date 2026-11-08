@@ -1122,27 +1122,49 @@ Variants on the Xeon:
 ### fbresp.h vs general parsers, responses (`make bench-resp`; `HTTPARSE=1` adds httparse)
 
 ns per response head (head only, no body), gcc 13 `-O3 -march=haswell`. Each figure is the median of 3 runs; each run
-takes the best of 300 interleaved passes per parser. Vultr 1-vCPU VMs, 2026-11-07 (experiment c001). The corpora:
+takes the best of 300 interleaved passes per parser. Vultr 1-vCPU VMs, 2026-11-08 (experiment c005). The corpora:
 - **top-1k:** 2,054 heads from the Tranco top 1,000 sites, about 2 KB each (`tests/top1k`);
-- **servers:** the 248 heads of the local-server captures;
-- **nginx / cdn / api / 304:** generated shapes (`bench/resp_shapes.h`).
+- **servers:** the 248 heads of the local-server captures (`tests/responses`);
+- **cdn / nginx / api / 304:** generated shapes (`bench/resp_shapes.h`).
 
 | CPU | corpus | **fbresp.h** | picohttpparser (SSE4.2) | httparse | llhttp |
 |---|---|---|---|---|---|
-| AMD EPYC Turin | top-1k | **322** | 410 (1.27×) | 534 (1.66×) | 887 (2.75×) |
-| | servers | **51** | 51 (1.00×) | 71 (1.38×) | 120 (2.34×) |
-| | cdn | 239 | **215** (0.90×) | 295 (1.24×) | 456 (1.91×) |
-| AMD EPYC Genoa | top-1k | **336** | 423 (1.26×) | 566 (1.68×) | 951 (2.83×) |
-| | servers | **55** | 56 (1.02×) | 99 (1.79×) | 137 (2.48×) |
-| | cdn | 248 | **234** (0.95×) | 347 (1.40×) | 518 (2.09×) |
-| Intel Xeon Cascade Lake | top-1k | **503** | 660 (1.31×) | 933 (1.86×) | 1535 (3.05×) |
-| | servers | **98** | 107 (1.10×) | 176 (1.80×) | 287 (2.93×) |
-| | cdn | **357** | 377 (1.05×) | 529 (1.48×) | 980 (2.74×) |
+| AMD EPYC Turin | top-1k | **201** | 415 (2.07×) | 539 (2.68×) | 892 (4.44×) |
+| | servers | **33** | 51 (1.55×) | 74 (2.24×) | 119 (3.59×) |
+| | cdn | **128** | 214 (1.67×) | 302 (2.36×) | 457 (3.58×) |
+| | 304 | **24** | 33 (1.40×) | 62 (2.60×) | 65 (2.74×) |
+| AMD EPYC Genoa | top-1k | **219** | 422 (1.93×) | 567 (2.60×) | 966 (4.42×) |
+| | servers | **40** | 58 (1.44×) | 101 (2.53×) | 143 (3.57×) |
+| | cdn | **146** | 235 (1.61×) | 348 (2.38×) | 531 (3.62×) |
+| | 304 | **29** | 37 (1.27×) | 82 (2.80×) | 80 (2.76×) |
+| Intel Xeon Cascade Lake | top-1k | **367** | 664 (1.81×) | 925 (2.52×) | 1537 (4.19×) |
+| | servers | **70** | 108 (1.54×) | 173 (2.46×) | 292 (4.16×) |
+| | cdn | **245** | 377 (1.54×) | 521 (2.12×) | 993 (4.05×) |
+| | 304 | **47** | 57 (1.22×) | 126 (2.69×) | 165 (3.51×) |
 
-(×) = that parser's time / fbresp.h's. With clang 18, fbresp.h is 1.31–1.36× faster than pico on top-1k and 0.96–1.06×
-on cdn. `fbr_parse` (head plus framing) adds 4–23% (median 12%).
+(×) = that parser's time / fbresp.h's. With clang 18, fbresp.h is 1.32–2.16× faster than pico on the same corpora.
+`fbr_parse` (the head plus the RFC 9112 framing) adds 15–48% to fbresp.h's time. With the framing, it is 1.00–1.77×
+pico's time for the head alone (1.00× on Cascade Lake's api and 304 heads).
 
-### batchparse.h vs fast_parse × N (`build/bench_batch`)
+Chunked bodies (`fbr_chunked`, the same run). The table is pico's `phr_decode_chunked` (in place) time / fbr_chunked's,
+gcc:
+
+| CPU | 1 × 17 B | 1 × 500 B | 4 × 128 B | 16 × 32 B | 64 × 8 B | 1 × 4 KB | 8 × 500 B, extensions | 4 × 128 B, trailer |
+|---|---|---|---|---|---|---|---|---|
+| Turin, to a buffer / in place | 1.65 / 1.80 | 1.47 / 1.31 | 1.09 / 1.09 | 1.34 / 1.35 | 1.27 / 1.27 | 1.34 / 0.94 | 1.31 / 1.40 | 1.44 / 1.49 |
+| Genoa | 1.65 / 1.65 | 1.50 / 1.47 | 1.07 / 1.00 | 1.26 / 1.23 | 1.51 / 1.50 | 1.01 / 1.10 | 1.24 / 1.23 | 1.41 / 1.41 |
+| Cascade Lake | 1.48 / 1.50 | 1.23 / 1.17 | 1.42 / 1.41 | 1.53 / 1.53 | 1.57 / 1.57 | 0.99 / 1.06 | 1.39 / 1.41 | 1.89 / 1.89 |
+
+A single 4 KB chunk is one memmove for both decoders, so they tie there.
+
+**Why it's fast.** Three changes made the difference: c002 for the batched masks, c004 for searching from the line start.
+- **Masks classified ahead in batches:** the mask of bytes that end a value is classified in batches of 4 × 64 bytes.
+- **No branch at block boundaries:** a line's end is read from two mask words, so finding it doesn't branch where a line
+  crosses a 64-byte block (that branch mispredicted ~20 times per 1.3 KB head).
+- **Lines overlap:** each line's end is searched for from the line's start, not after its name. The line-to-line
+  dependency then goes only through the masks, so consecutive lines overlap in the CPU.
+
+### batchparse.h vs fast_parse × N (`build/bench_batch`)### batchparse.h vs fast_parse × N (`build/bench_batch`)
 
 Xeon, gocli -gzip mix, each request in its own buffer:
 
