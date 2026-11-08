@@ -112,10 +112,21 @@ FB_INLINE int fbr_ct(const char *b, int len, int p, fbr_scan_t *s, const int sim
   }
 }
 
+// fbr_parse's view of the fields, noted during the parse (fx != NULL): the fields whose name has a framing-field
+// length (10 Connection, 14 Content-Length, 17 Transfer-Encoding), and which of them an obs-fold line continues.
+// More than FBR_FX candidates: fbr_parse looks at every field instead.
+#define FBR_FX 8
+typedef struct {
+  int n, last;      // candidates noted; the field index of the last one (or of a fold line continuing it)
+  unsigned fold;    // bit j: candidate j is continued by an obs-fold line
+  unsigned idx[FBR_FX + 1]; // + a spare slot for the branch-free store
+} fbr_fx_t;
+#define FBR_FRAMING_LEN(nl) ((nl) <= 17 && ((1u << 10 | 1u << 14 | 1u << 17) >> (nl) & 1))
+
 // the header section from p (pico's parse_headers): returns the end of the head, -1 or -2
 // (*num_headers: out only, the count so far even on an error, as pico)
 FB_INLINE int fbr_headers(const char *b, int len, int p, fbr_scan_t *sc, struct fb_header *h, size_t max,
-                          size_t *num_headers, const int simd) {
+                          size_t *num_headers, const int simd, fbr_fx_t *fx) {
   size_t n = 0;
 #define FBR_RET(x)                                                                                                     \
   do {                                                                                                                 \
@@ -150,6 +161,10 @@ FB_INLINE int fbr_headers(const char *b, int len, int p, fbr_scan_t *sc, struct 
       name = NULL;
       nl = 0;
       vs = p;
+      if (fx && fx->last == (int)n - 1) { // continues a candidate (or a fold line that did)
+        if (fx->n <= FBR_FX) fx->fold |= 1u << (fx->n - 1);
+        fx->last = (int)n;
+      }
     } else {
       if (n == max) FBR_RET(-1);
       int ne;
@@ -172,6 +187,13 @@ FB_INLINE int fbr_headers(const char *b, int len, int p, fbr_scan_t *sc, struct 
       name = b + p;
       nl = ne - p;
       vs = ne + 1;
+      if (fx) { // without a branch: name lengths are data (a branch here mispredicted ~10 times per top-1k head)
+        unsigned un = (unsigned)nl, cand = ((1u << 10 | 1u << 14 | 1u << 17) >> (un & 31) & 1) & (un <= 17);
+        unsigned slot = (unsigned)fx->n < FBR_FX ? (unsigned)fx->n : FBR_FX; // idx[FBR_FX]: a spare slot
+        fx->idx[slot] = (unsigned)n;
+        fx->n += (int)cand;
+        fx->last ^= (fx->last ^ (int)n) & -(int)cand;
+      }
     }
     // the value's end first: SP and HT are not ct, so the first ct after the colon is pico's (it skips the
     // whitespace, then looks for the first ct); whitespace running into len is -2 there as here
@@ -203,7 +225,7 @@ FB_INLINE int fbr_headers(const char *b, int len, int p, fbr_scan_t *sc, struct 
 }
 
 FB_INLINE int fbr_core(const char *b, int len, int *minor, int *status, const char **msg, size_t *msg_len,
-                       struct fb_header *h, size_t *num_headers, size_t last_len, const int simd) {
+                       struct fb_header *h, size_t *num_headers, size_t last_len, const int simd, fbr_fx_t *fx) {
   size_t max = *num_headers;
   *minor = -1;
   *status = 0;
@@ -248,17 +270,17 @@ FB_INLINE int fbr_core(const char *b, int len, int *minor, int *status, const ch
   }
   *msg = b + rs;
   *msg_len = (size_t)(e - rs);
-  return fbr_headers(b, len, q, &sc, h, max, num_headers, simd);
+  return fbr_headers(b, len, q, &sc, h, max, num_headers, simd, fx);
 }
 
 static inline int fb_parse_response(const char *buf, size_t len, int *minor_version, int *status, const char **msg,
                                     size_t *msg_len, struct fb_header *headers, size_t *num_headers, size_t last_len) {
-  return fbr_core(buf, (int)len, minor_version, status, msg, msg_len, headers, num_headers, last_len, 1);
+  return fbr_core(buf, (int)len, minor_version, status, msg, msg_len, headers, num_headers, last_len, 1, NULL);
 }
 static inline int fb_parse_response_scalar(const char *buf, size_t len, int *minor_version, int *status,
                                            const char **msg, size_t *msg_len, struct fb_header *headers,
                                            size_t *num_headers, size_t last_len) {
-  return fbr_core(buf, (int)len, minor_version, status, msg, msg_len, headers, num_headers, last_len, 0);
+  return fbr_core(buf, (int)len, minor_version, status, msg, msg_len, headers, num_headers, last_len, 0, NULL);
 }
 
 FB_INLINE int fbr_headers_core(const char *b, int len, struct fb_header *h, size_t *num_headers, size_t last_len,
@@ -272,7 +294,7 @@ FB_INLINE int fbr_headers_core(const char *b, int len, struct fb_header *h, size
   fbr_scan_t sc;
   sc.k[0] = sc.k[1] = -1;
   sc.done = 0;
-  return fbr_headers(b, len, 0, &sc, h, max, num_headers, simd);
+  return fbr_headers(b, len, 0, &sc, h, max, num_headers, simd, NULL);
 }
 // phr_parse_headers: a header section on its own (chunked trailers)
 static inline int fb_parse_headers(const char *buf, size_t len, struct fb_header *headers, size_t *num_headers,
@@ -335,13 +357,54 @@ FB_INLINE int fbr_name_is(const char *n, const char *lc, size_t k) {
     BODY                                                                                                               \
   }
 
+// one candidate field: a framing field updates fs; an obs-fold continuation of one is an error (1)
+typedef struct {
+  int ncl, te, te_chunked, conn_close, conn_ka;
+  const char *clv;
+  size_t cll;
+} fbr_fs_t;
+FB_INLINE int fbr_field(const struct fb_header *f, int fold, fbr_fs_t *fs, fbr_resp_t *r) {
+  size_t nl = f->name_len;
+  if (nl == 14 && fbr_name_is(f->name, "content-length", 14)) {
+    fs->ncl++;
+    fs->clv = f->value;
+    fs->cll = f->value_len;
+  } else if (nl == 17 && fbr_name_is(f->name, "transfer-encoding", 17)) {
+    fs->te = 1;
+    // the final coding of the last field decides; "chunked" alone first (nearly every response)
+    if (f->value_len == 7 && fbr_lc_eq(f->value, 7, "chunked", 7)) fs->te_chunked = 1;
+    else {
+      fs->te_chunked = 0;
+      FBR_EACH(f->value, f->value_len, el, eln, { fs->te_chunked = fbr_lc_eq(el, eln, "chunked", 7); })
+    }
+  } else if (nl == 10 && fbr_name_is(f->name, "connection", 10)) {
+    if (f->value_len == 10 && fbr_name_is(f->value, "keep-alive", 10)) fs->conn_ka = 1; // the usual values first
+    else if (f->value_len == 5 && fbr_lc_eq(f->value, 5, "close", 5)) fs->conn_close = 1;
+    else
+      FBR_EACH(f->value, f->value_len, el, eln, {
+        if (fbr_lc_eq(el, eln, "close", 5)) fs->conn_close = 1;
+        else if (fbr_lc_eq(el, eln, "keep-alive", 10)) fs->conn_ka = 1;
+        else if (fbr_lc_eq(el, eln, "upgrade", 7)) r->flags |= FBR_UPGRADE;
+      })
+  } else return 0; // a name of the same length
+  if (FB_UNLIKELY(fold)) {
+    r->err = FBR_E_FOLD;
+    return 1;
+  }
+  return 0;
+}
+
 FB_INLINE int fbr_core2(const char *b, size_t len, int req, fbr_resp_t *r, size_t last_len, const int simd) {
   r->body = FBR_NONE;
   r->length = -1;
   r->flags = 0;
   r->err = 0;
+  fbr_fx_t fx;
+  fx.n = 0;
+  fx.last = -2;
+  fx.fold = 0;
   int n = fbr_core(b, (int)len, &r->minor, &r->status, &r->reason, &r->reason_len, r->headers, &r->num_headers,
-                   last_len, simd);
+                   last_len, simd, &fx);
   if (n < 0) {
     if (n == -1) r->err = FBR_E_HEAD;
     return n;
@@ -351,47 +414,22 @@ FB_INLINE int fbr_core2(const char *b, size_t len, int req, fbr_resp_t *r, size_
     r->err = FBR_E_STATUS;
     return -1;
   }
-  // the framing fields: names by length first (cheap), then the case-insensitive compare
-  int ncl = 0, te = 0, te_chunked = 0, conn_close = 0, conn_ka = 0, last = 0; // last: 1 CL, 2 TE, 3 Connection
-  const char *clv = NULL;
-  size_t cll = 0;
-  for (size_t i = 0; i < r->num_headers; i++) {
-    const struct fb_header *f = &r->headers[i];
-    if (!f->name) { // obs-fold: a continuation of the field before it
-      if (last) {
-        r->err = FBR_E_FOLD;
-        return -1;
-      }
-      continue;
-    }
-    last = 0;
-    size_t nl = f->name_len;
-    if (nl == 14 && fbr_name_is(f->name, "content-length", 14)) {
-      ncl++;
-      clv = f->value;
-      cll = f->value_len;
-      last = 1;
-    } else if (nl == 17 && fbr_name_is(f->name, "transfer-encoding", 17)) {
-      te = 1;
-      last = 2;
-      // the final coding of the last field decides; "chunked" alone first (nearly every response)
-      if (f->value_len == 7 && fbr_lc_eq(f->value, 7, "chunked", 7)) te_chunked = 1;
-      else {
-        te_chunked = 0;
-        FBR_EACH(f->value, f->value_len, el, eln, { te_chunked = fbr_lc_eq(el, eln, "chunked", 7); })
-      }
-    } else if (nl == 10 && fbr_name_is(f->name, "connection", 10)) {
-      last = 3;
-      if (f->value_len == 10 && fbr_name_is(f->value, "keep-alive", 10)) conn_ka = 1; // the usual values alone first
-      else if (f->value_len == 5 && fbr_lc_eq(f->value, 5, "close", 5)) conn_close = 1;
-      else
-        FBR_EACH(f->value, f->value_len, el, eln, {
-          if (fbr_lc_eq(el, eln, "close", 5)) conn_close = 1;
-          else if (fbr_lc_eq(el, eln, "keep-alive", 10)) conn_ka = 1;
-          else if (fbr_lc_eq(el, eln, "upgrade", 7)) r->flags |= FBR_UPGRADE;
-        })
+  // the framing fields: the candidates noted during the parse (a framing-field name length), else every field
+  fbr_fs_t fs = { 0, 0, 0, 0, 0, NULL, 0 };
+  if (FB_LIKELY(fx.n <= FBR_FX)) {
+    for (int j = 0; j < fx.n; j++)
+      if (FB_UNLIKELY(fbr_field(&r->headers[fx.idx[j]], fx.fold >> j & 1, &fs, r))) return -1;
+  } else {
+    for (size_t i = 0; i < r->num_headers; i++) {
+      const struct fb_header *f = &r->headers[i];
+      if (!f->name || !FBR_FRAMING_LEN(f->name_len)) continue;
+      int fold = i + 1 < r->num_headers && !r->headers[i + 1].name;
+      if (FB_UNLIKELY(fbr_field(f, fold, &fs, r))) return -1;
     }
   }
+  int ncl = fs.ncl, te = fs.te, te_chunked = fs.te_chunked, conn_close = fs.conn_close, conn_ka = fs.conn_ka;
+  const char *clv = fs.clv;
+  size_t cll = fs.cll;
   int ka = r->minor >= 1 ? !conn_close : conn_ka && !conn_close;
   if (req == FBR_REQ_CONNECT && st >= 200 &&
       st < 300) { // 2. (before 1: a 204 to CONNECT is a tunnel too, RFC 9110 9.3.6)
@@ -414,14 +452,29 @@ FB_INLINE int fbr_core2(const char *b, size_t len, int req, fbr_resp_t *r, size_
       r->err = FBR_E_CL;
       return -1;
     }
-    for (size_t i = 0; i < cll; i++) {
-      unsigned d = (unsigned char)clv[i] - '0';
-      if (d > 9) {
+    if (FB_LIKELY(cll <= 8)) {
+      // up to 8 digits at once (the value is inside the head, which the 64-byte padding follows): left-pad with
+      // '0' to 8 bytes, check every byte is a digit, then the usual SWAR conversion of 8 ASCII digits
+      uint64_t x = fb_ld64(clv) << (8 * (8 - cll)), t;
+      if (cll < 8) x |= 0x3030303030303030ull >> (8 * cll);
+      t = x - 0x3030303030303030ull;
+      if ((t | (t + 0x7676767676767676ull)) & 0x8080808080808080ull) {
         r->err = FBR_E_CL;
         return -1;
       }
-      v = v * 10 + d; // 18 digits < 2^63
-    }
+      t = t * 10 + (t >> 8); // pairs
+      v = (int64_t)(((t & 0x000000FF000000FFull) * (100 + (1000000ull << 32)) +
+                     ((t >> 16) & 0x000000FF000000FFull) * (1 + (10000ull << 32))) >>
+                    32);
+    } else
+      for (size_t i = 0; i < cll; i++) {
+        unsigned d = (unsigned char)clv[i] - '0';
+        if (d > 9) {
+          r->err = FBR_E_CL;
+          return -1;
+        }
+        v = v * 10 + d; // 18 digits < 2^63
+      }
     r->body = FBR_LENGTH;
     r->length = v;
   } else { // 5.
