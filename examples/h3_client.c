@@ -96,6 +96,9 @@ static int64_t q_on_stream(quic_conn *q, uint64_t sid, uint64_t off, const uint8
   (void)q, (void)u;
   if (!ready) return 0;
   int r = h3_recv(&H, &SC, sid, off, d, len, fin);
+  uint64_t ub[H3_QPACK_BLOCKED]; /* streams whose QPACK inserts just arrived: their bytes again */
+  for (int n; r >= 0 && (n = h3_unblocked(&H, ub, H3_QPACK_BLOCKED)) > 0;)
+    for (int i = 0; i < n; i++) quic_stream_redeliver(q, ub[i]);
   return r < 0 ? -(int64_t)h3_error(&H) : r;
 }
 static size_t q_send(quic_conn *q, uint64_t sid, uint8_t *out, size_t cap, int *fin, void *u) {

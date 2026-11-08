@@ -1989,6 +1989,12 @@ static inline void quic_free(quic_conn *c) {
 }
 
 /* server-initiated unidirectional stream (HTTP/3 control and QPACK streams) */
+/* offer a stream's buffered bytes to on_stream again (e.g. after HTTP/3's h3_unblocked); 0, or -1 if the
+ * connection closed meanwhile */
+static inline int quic_stream_redeliver(quic_conn *c, uint64_t sid) {
+  quic_stream *s = quic__stream(c, sid);
+  return s ? quic__stream_deliver(c, s) : 0;
+}
 static inline int64_t quic_open_uni(quic_conn *c) {
   uint64_t idx = c->next_uni_id >> 2;
   if (idx >= c->peer_max_streams_uni) return -1;

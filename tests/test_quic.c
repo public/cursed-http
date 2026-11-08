@@ -201,7 +201,7 @@ static int64_t eat_all(quic_conn *c, uint64_t sid, uint64_t off, const uint8_t *
   (void)c, (void)sid, (void)off, (void)d, (void)fin, (void)u;
   return (int64_t)len;
 }
-static quic_ctx FX = { NULL, quic__default_alloc, { 0 }, { 0 } };
+static quic_ctx FX = { NULL, quic__default_alloc, { { NULL }, { 0 } }, { 0 }, { 0 } };
 static void fresh(quic_conn *c) {
   for (int i = 0; i < QUIC_MAX_STREAMS; i++)
     if (c->s[i].used) quic__stream_free(c, &c->s[i]);

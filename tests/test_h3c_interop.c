@@ -520,6 +520,9 @@ static int64_t cq_on_stream(quic_conn *q, uint64_t sid, uint64_t off, const uint
   client *cl = u;
   if (!cl->ready) return 0;
   int r = h3_recv(&cl->h, &H3C, sid, off, d, len, fin);
+  uint64_t ub[H3_QPACK_BLOCKED]; /* streams whose QPACK inserts just arrived: their bytes again */
+  for (int n; r >= 0 && (n = h3_unblocked(&cl->h, ub, H3_QPACK_BLOCKED)) > 0;)
+    for (int i = 0; i < n; i++) quic_stream_redeliver(q, ub[i]);
   if (r < 0) return -(int64_t)h3_error(&cl->h);
   return r;
 }

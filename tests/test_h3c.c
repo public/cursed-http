@@ -57,9 +57,10 @@ typedef struct {
 static wire TO_SRV, TO_CLI;
 static int RETRY; /* the server validates the client's address with a Retry first */
 static long EARLY_REQS;
-static int EXPECT_EARLY;              /* resuming: 1 the server takes the 0-RTT requests, 0 it refuses them */
-static quic_resume RES, *RESUME_FROM; /* what a run saves for the next; the run that resumes from it */
-static int LOSE_STATE;                /* halfway, the server forgets the connection and answers with stateless resets */
+static unsigned long long BLOCKED_SUM; /* QPACK sections our server held for inserts, over all runs */
+static int EXPECT_EARLY;               /* resuming: 1 the server takes the 0-RTT requests, 0 it refuses them */
+static quic_resume RES, *RESUME_FROM;  /* what a run saves for the next; the run that resumes from it */
+static int LOSE_STATE; /* halfway, the server forgets the connection and answers with stateless resets */
 static int BULK; /* every request is GET /big/1000000: slow start overfills the wire (4096 datagrams, tail drop) */
 static int LOSS, REORDER, BLACKHOLE; /* BLACKHOLE: drop client->server after its first datagram, for 8 s */
 static uint64_t BLACKHOLE_UNTIL;
@@ -167,6 +168,9 @@ static int64_t q_on_stream(quic_conn *q, uint64_t sid, uint64_t off, const uint8
   server *s = u;
   if (!s->h3_ready) return 0;
   int r = h3_recv(&s->h, &H3S, sid, off, d, len, fin);
+  uint64_t ub[H3_QPACK_BLOCKED]; /* streams whose QPACK inserts just arrived: their bytes again */
+  for (int n; r >= 0 && (n = h3_unblocked(&s->h, ub, H3_QPACK_BLOCKED)) > 0;)
+    for (int i = 0; i < n; i++) quic_stream_redeliver(q, ub[i]);
   if (r < 0) return -(int64_t)h3_error(&s->h);
   return r;
 }
@@ -333,6 +337,9 @@ static int64_t cq_on_stream(quic_conn *q, uint64_t sid, uint64_t off, const uint
   client *cl = u;
   if (!cl->ready) return 0;
   int r = h3_recv(&cl->h, &H3C, sid, off, d, len, fin);
+  uint64_t ub[H3_QPACK_BLOCKED]; /* streams whose QPACK inserts just arrived: their bytes again */
+  for (int n; r >= 0 && (n = h3_unblocked(&cl->h, ub, H3_QPACK_BLOCKED)) > 0;)
+    for (int i = 0; i < n; i++) quic_stream_redeliver(q, ub[i]);
   if (r < 0) return -(int64_t)h3_error(&cl->h);
   return r;
 }
@@ -498,14 +505,16 @@ static int run(int nreq, int loss, int reorder) {
         (unsigned long long)cl.q.undecryptable);
   printf(
       "  loss %2d%% reorder %d%s%s: %d requests, %.1f simulated s, %ld datagrams (%ld lost), client cwnd %llu srtt %lld ms, "
-      "request headers %.1f%% of their fields (%.1f%% at the end), max burst %d\n",
+      "request headers %.1f%% of their fields (%.1f%% at the end), max burst %d, %llu blocked sections\n",
       loss, reorder, BULK ? " bulk 1 MB, late 0.5%" : "",
       RETRY         ? " after a Retry"
       : RESUME_FROM ? (EXPECT_EARLY ? " 0-RTT" : " 0-RTT refused")
                     : "",
       nreq, (NOW_NS - start) / 1e9, SENT_DGRAMS, LOST_DGRAMS, (unsigned long long)cl.q.cwnd,
       (long long)cl.q.smoothed_rtt, cl.hdr_raw ? 100.0 * (double)cl.hdr_bytes / (double)cl.hdr_raw : 0.0,
-      cl.tail_raw ? 100.0 * (double)cl.tail_bytes / (double)cl.tail_raw : 0.0, max_burst);
+      cl.tail_raw ? 100.0 * (double)cl.tail_bytes / (double)cl.tail_raw : 0.0, max_burst,
+      (unsigned long long)sv.h.blocked_total);
+  BLOCKED_SUM += sv.h.blocked_total;
   SENT_DGRAMS = LOST_DGRAMS = 0;
   quic_free(&cl.q);
   if (accepted) quic_free(&sv.q);
@@ -567,6 +576,8 @@ int main(int argc, char **argv) {
       CLI_TLS.random_bytes(QX.tickets.key, sizeof QX.tickets.key), EXPECT_EARLY = 0, run(50, 0, 0);
       RESUME_FROM = NULL;
     }
+  if (argc <= 1) /* reordering makes request streams overtake the encoder stream: sections wait for inserts */
+    CHECK(BLOCKED_SUM > 0, "no QPACK section was ever blocked: the blocked-streams path went untested");
   printf("%s: %ld failures / %ld checks\n", fails ? "FAIL" : "PASS", fails, checks);
   return fails != 0;
 }

@@ -52,8 +52,11 @@
 #ifndef H3_MAX_SECTION
 #define H3_MAX_SECTION 65536 /* largest HEADERS frame payload accepted */
 #endif
-#define H3_MAX_LIST   16384 /* SETTINGS_MAX_FIELD_SECTION_SIZE we advertise */
-#define H3_QPACK_CAP  4096  /* SETTINGS_QPACK_MAX_TABLE_CAPACITY we advertise */
+#define H3_MAX_LIST  16384 /* SETTINGS_MAX_FIELD_SECTION_SIZE we advertise */
+#define H3_QPACK_CAP 4096  /* SETTINGS_QPACK_MAX_TABLE_CAPACITY we advertise */
+#ifndef H3_QPACK_BLOCKED
+#define H3_QPACK_BLOCKED 16 /* SETTINGS_QPACK_BLOCKED_STREAMS we advertise */
+#endif
 #define H3_MAX_FIELDS 256
 
 enum { H3_E_CLOSED = -1, H3_E_AGAIN = -2, H3_E_STATE = -3, H3_E_TOO_BIG = -4 };
@@ -122,7 +125,8 @@ typedef struct {
   uint64_t data_left, skip_left; /* rest of the DATA / unknown frame being received */
   int64_t content_length, data_seen;
   uint16_t hdr_len, hdr_off, trl_len, trl_off;
-  uint8_t spill; /* the header frame is in the connection's spill area, at spill_at */
+  uint8_t spill;        /* the header frame is in the connection's spill area, at spill_at */
+  uint64_t blocked_ric; /* its header section waits for this many QPACK inserts (0: not blocked) */
   uint32_t spill_at;
   const uint8_t *body;
   size_t body_len, body_off;
@@ -147,6 +151,9 @@ struct h3_conn {
    * h3_pending when it finds nothing): h3_pending visits these instead of every slot */
   uint64_t outq[(H3_MAX_STREAMS + 63) / 64];
   uint32_t spill_used, spill_users; /* bytes allocated in spill (reset once no stream holds any), holders */
+  uint32_t nblocked, nunblocked;    /* streams blocked on QPACK inserts; unblocked, for h3_unblocked */
+  uint64_t blocked_total;           /* header sections that had to wait for inserts (a statistic) */
+  uint64_t unblocked[H3_QPACK_BLOCKED];
   qp_dec qd;
   h3_stream s[H3_MAX_STREAMS];
   qp_enc qe; /* a client's request encoder (a server's has no table: responses use the static table) */
@@ -156,6 +163,13 @@ struct h3_conn {
 };
 
 static inline uint64_t h3_error(const h3_conn *c) { return c->error; }
+/* request streams whose header section was waiting for QPACK inserts that have now arrived: the transport must
+ * offer their bytes again (quic_stream_redeliver). Returns how many it wrote to sids (at most max) */
+static inline int h3_unblocked(h3_conn *c, uint64_t *sids, int max) {
+  int n = 0;
+  while (c->nunblocked && n < max) sids[n++] = c->unblocked[--c->nunblocked];
+  return n;
+}
 
 /* QUIC varint encode */
 static inline uint8_t *h3__put_vi(uint8_t *p, uint64_t v) {
@@ -194,6 +208,7 @@ static inline void h3__unspill(h3_conn *c, h3_stream *s) {
 static inline void h3__close(h3_conn *c, h3_stream *s, uint64_t err) {
   uint64_t id = s->id;
   h3__unspill(c, s);
+  if (s->blocked_ric) s->blocked_ric = 0, c->nblocked--, qp_dec_cancel(&c->qd, id); /* Stream Cancellation */
   s->active = 0, s->body = NULL;
   if (c->cb.on_close) c->cb.on_close(c, id, err, c->user);
 }
@@ -218,9 +233,9 @@ static inline void h3_init(h3_conn *c, const h3_callbacks *cb, void *user, uint6
   for (int i = 0; i < H3_MAX_STREAMS; i++) c->s[i].active = 0;
   /* control stream: type 0x00, then SETTINGS */
   uint8_t st[32], *q = st;
-  q = h3__put_vi(q, 0x01), q = h3__put_vi(q, H3_QPACK_CAP); /* QPACK_MAX_TABLE_CAPACITY */
-  q = h3__put_vi(q, 0x07), q = h3__put_vi(q, 0);            /* QPACK_BLOCKED_STREAMS */
-  q = h3__put_vi(q, 0x06), q = h3__put_vi(q, H3_MAX_LIST);  /* MAX_FIELD_SECTION_SIZE */
+  q = h3__put_vi(q, 0x01), q = h3__put_vi(q, H3_QPACK_CAP);     /* QPACK_MAX_TABLE_CAPACITY */
+  q = h3__put_vi(q, 0x07), q = h3__put_vi(q, H3_QPACK_BLOCKED); /* QPACK_BLOCKED_STREAMS */
+  q = h3__put_vi(q, 0x06), q = h3__put_vi(q, H3_MAX_LIST);      /* MAX_FIELD_SECTION_SIZE */
   uint8_t *p = c->ctrl;
   *p++ = 0x00;
   p = h3__put_vi(p, H3F_SETTINGS), p = h3__put_vi(p, (uint64_t)(q - st));
@@ -277,11 +292,21 @@ static inline int h3__response(h3_conn *c, h3_scratch *sc, h3_stream *s, uint64_
   return 0;
 }
 
+#define H3__BLOCKED 1 /* h3__headers: the section is blocked */
 static inline int h3__headers(h3_conn *c, h3_scratch *sc, h3_stream *s, uint64_t sid, const uint8_t *pl, size_t n,
                               int end) {
   int hfl;
   int k =
       qp_decode_section(&c->qd, sid, pl, n, sc->f, H3_MAX_FIELDS / 2, sc->arena, sizeof sc->arena, H3_MAX_LIST, &hfl);
+  if (k == QP_E_BLOCKED) { /* held (its bytes stay with the transport) until the encoder stream catches up */
+    if (!s->blocked_ric) {
+      if (c->nblocked >= H3_QPACK_BLOCKED) return h3__fail(c, QPACK_DECOMPRESSION_FAILED); /* over our limit */
+      c->nblocked++, c->blocked_total++;
+    }
+    s->blocked_ric = c->qd.blocked_ric;
+    return H3__BLOCKED;
+  }
+  if (s->blocked_ric) s->blocked_ric = 0, c->nblocked--;
   if (k == QP_E_DECOMPRESSION) return h3__fail(c, QPACK_DECOMPRESSION_FAILED);
   if (k < 0) return h3__fail(c, H3_EXCESSIVE_LOAD);
   if (c->client) return h3__response(c, sc, s, sid, k, hfl, end);
@@ -404,6 +429,7 @@ static inline int h3__request_stream(h3_conn *c, h3_scratch *sc, uint64_t sid, u
       if (len - pos - hl < flen) break; /* wait for the whole frame */
       int end = fin && pos + hl + flen == len;
       int r = h3__headers(c, sc, s, sid, buf + pos + hl, (size_t)flen, end && !(s->flags & H3_ST_GOT_HEADERS));
+      if (r == H3__BLOCKED) return (int)pos; /* the frame and what follows: offered again (h3_unblocked) */
       if (r < 0) return r;
       pos += hl + (size_t)flen;
       if (!(s = h3__find(c, sid))) return (int)len; /* reset, or (a client's) ended */
@@ -529,6 +555,14 @@ static inline int h3_recv(h3_conn *c, h3_scratch *sc, uint64_t sid, uint64_t off
   else if (which == 1) {
     r = qp_dec_encoder(&c->qd, buf + pos, len - pos);
     if (r < 0) return h3__fail(c, QPACK_ENCODER_STREAM_ERROR);
+    if (c->nblocked) /* the streams whose sections can now be decoded: for h3_unblocked */
+      for (int i = 0; i < H3_MAX_STREAMS; i++) {
+        h3_stream *s = &c->s[i];
+        if (!s->active || !s->blocked_ric || s->blocked_ric > c->qd.inserted) continue;
+        int dup = 0;
+        for (uint32_t k = 0; k < c->nunblocked; k++) dup |= c->unblocked[k] == s->id;
+        if (!dup && c->nunblocked < H3_QPACK_BLOCKED) c->unblocked[c->nunblocked++] = s->id;
+      }
   } else r = h3__decoder_stream(c, buf + pos, len - pos);
   if (r < 0) return r;
   if (fin) return h3__fail(c, H3_CLOSED_CRITICAL_STREAM); /* critical streams never end */
