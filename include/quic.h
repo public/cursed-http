@@ -12,7 +12,7 @@
  * its own handshake state.
  *
  * Scope: QUIC v1 only (other versions get Version Negotiation), no 0-RTT, no Retry, no connection
- * migration (PATH_CHALLENGE is answered on the current path), one connection ID per side, no ECN, no pacing.
+ * migration (PATH_CHALLENGE is answered on the current path), one connection ID per side, no ECN. Sends are paced.
  *
  *   quic_ctx_init(&ctx, tls_ctx)                      tls_ctx: a ptls_context_t (a server's with certificates,
  *                                                     a client's with its certificate verifier)
@@ -21,7 +21,8 @@
  *                                                     quic_send the first datagram, then as above
  *   quic_open_bidi(&c)                                client: a new request stream (or -1 at the peer's limit)
  *   quic_recv(&c, dgram, len, now_ms)                 every later datagram for this connection
- *   n = quic_send(&c, out, cap, now_ms)               one datagram to send, 0 when idle
+ *   n = quic_send(&c, out, cap, now_ms)               one datagram to send, 0 when idle (or paced: then
+ *                                                     quic_timeout says when to call it again)
  *   quic_timeout(&c) / quic_on_timeout(&c, now_ms)    the next deadline and its handler
  *   quic_open_uni(&c) / quic_reset_stream / quic_close / quic_is_closed / quic_free
  * The application sees streams through callbacks: on_stream (contiguous bytes from the first
@@ -452,12 +453,13 @@ struct quic_conn {
   double undo_wmax, undo_k;
   uint32_t episode_lost, episode_spurious;
   uint64_t spurious_losses, cc_undos;
-  /* pacing (RFC 9002 §7.7): a token bucket refilled at 1.25 cwnd / srtt */
+  /* pacing (RFC 9002 §7.7): a token bucket refilled at 1.25 cwnd / srtt, its bytes and last refill */
   double pace_tokens;
   int64_t pace_at;
   int64_t recovery_start;
   uint64_t bytes_recv, bytes_sent; /* before address validation: 3x limit */
   int64_t last_send_at;            /* a client's anti-deadlock probe before the handshake is confirmed */
+  uint8_t pace_blocked;            /* quic_send last held data back for pacing */
   uint64_t undecryptable;          /* packets dropped because they failed to decrypt */
   quic_stream s[QUIC_MAX_STREAMS];
   uint32_t rr;
@@ -1907,6 +1909,26 @@ static inline uint8_t *quic__app_frames(quic_conn *c, uint8_t *p, uint8_t *e, qu
   return p;
 }
 
+/* pacing: a bucket of bytes refilled at 1.25 (2 in slow start) cwnd / smoothed RTT, holding at most QUIC_PACE_BURST or 2 ms at the rate; new data
+ * waits while it is short of a packet (ACKs and probes never do) */
+#ifndef QUIC_PACE_BURST
+#define QUIC_PACE_BURST (10 * QUIC_SEND_MAX)
+#endif
+static inline double quic__pace_rate(const quic_conn *c) { /* bytes per ms: 2x cwnd per RTT in slow start, which
+                                                             * doubles cwnd every RTT (as Linux paces), else 1.25x */
+  int64_t rtt = c->rtt_sampled ? c->smoothed_rtt : 333;
+  return (c->cwnd < c->ssthresh ? 2.0 : 1.25) * (double)c->cwnd / (double)(rtt > 1 ? rtt : 1);
+}
+static inline void quic__pace_refill(quic_conn *c, int64_t now) {
+  if (!c->pace_at) c->pace_tokens = QUIC_PACE_BURST, c->pace_at = now;
+  else if (now > c->pace_at) {
+    double rate = quic__pace_rate(c), cap = 2 * rate > QUIC_PACE_BURST ? 2 * rate : QUIC_PACE_BURST;
+    c->pace_tokens += (double)(now - c->pace_at) * rate; /* clocks tick in ms: hold 2 ms at the rate, at least */
+    if (c->pace_tokens > cap) c->pace_tokens = cap;
+    c->pace_at = now;
+  }
+}
+
 /* build and protect one datagram */
 static inline size_t quic_send(quic_conn *c, uint8_t *out, size_t cap, int64_t now) {
   if (c->draining) return 0;
@@ -1970,7 +1992,10 @@ static inline size_t quic_send(quic_conn *c, uint8_t *out, size_t cap, int64_t n
   uint8_t plain[QUIC_SEND_MAX];
   size_t w = 0, poff = 0; /* datagram bytes used / plaintext bytes used */
   int has_initial_ae = 0;
-  int cc_ok = c->bytes_in_flight + QUIC_SEND_MAX <= c->cwnd || c->probes_due;
+  quic__pace_refill(c, now);
+  int cwnd_ok = c->bytes_in_flight + QUIC_SEND_MAX <= c->cwnd, paced = c->pace_tokens >= QUIC_SEND_MAX;
+  int cc_ok = (cwnd_ok && paced) || c->probes_due;
+  c->pace_blocked = cwnd_ok && !paced && !c->probes_due;
   for (int space = 0; space < QUIC_NSP; space++) {
     if (!quic__space_wants(c, space, now)) continue;
     quic_space *sp = &c->sp[space];
@@ -2052,6 +2077,7 @@ static inline size_t quic_send(quic_conn *c, uint8_t *out, size_t cap, int64_t n
     if (sp->nsent < QUIC_SENT_MAX) {
       *quic__sent_at(sp, sp->nsent) = k->rec, sp->nsent++;
       if (k->ack_eliciting) c->bytes_in_flight += k->rec.size, sp->last_ack_eliciting_at = now;
+      if (k->ack_eliciting) c->pace_tokens -= k->rec.size;
     }
   }
   c->bytes_sent += (uint64_t)(o - out), c->last_send_at = now;
@@ -2086,6 +2112,11 @@ static inline int64_t quic_timeout(const quic_conn *c) {
   if (c->client && !c->confirmed && !c->bytes_in_flight && c->last_send_at) {
     int64_t pto = c->last_send_at + quic__pto(c, QUIC_SP_HANDSHAKE);
     if (pto < t) t = pto;
+  }
+  if (c->pace_blocked) { /* the time the bucket holds a packet again: then quic_send */
+    double need = QUIC_SEND_MAX - c->pace_tokens, rate = quic__pace_rate(c);
+    int64_t pt = c->pace_at + (int64_t)(need / rate) + 1;
+    if (pt < t) t = pt;
   }
   return t;
 }

@@ -371,7 +371,7 @@ static int run(int nreq, int loss, int reorder) {
   cl.nreq = nreq, cl.pending_sid = -1;
   int r0 = quic_connect(&cl.q, &CQX, "localhost", now_ms(), &CQCB, &cl);
   CHECK(r0 == 0, "quic_connect %d", r0);
-  int accepted = 0, retries = 0;
+  int accepted = 0, retries = 0, max_burst = 0, over_burst = 0, over_allowed = 0;
   long before = fails;
   uint8_t out[1500];
   uint64_t start = NOW_NS;
@@ -404,9 +404,22 @@ static int run(int nreq, int loss, int reorder) {
       }
       quic_recv(&sv.q, g.d, g.n, now_ms());
     }
-    if (accepted)
-      while ((n = quic_send(&sv.q, out, sizeof out, now_ms())) > 0) put(&TO_CLI, out, n);
-    while (take(&TO_CLI, &g)) quic_recv(&cl.q, g.d, g.n, now_ms());
+    if (accepted) { /* pacing: the most the server sends at one instant */
+      int burst = 0;
+      /* what the pacer may send now: its bucket's cap (10 packets, or 2 ms at up to 2 cwnd / srtt) */
+      double rtt = sv.q.rtt_sampled && sv.q.smoothed_rtt > 1 ? (double)sv.q.smoothed_rtt : 1;
+      double cap = 4.0 * (double)sv.q.cwnd / rtt > QUIC_PACE_BURST ? 4.0 * (double)sv.q.cwnd / rtt : QUIC_PACE_BURST;
+      int allowed = (int)(cap / QUIC_SEND_MAX) + 3; /* + ACK-only packets and a probe */
+      while ((n = quic_send(&sv.q, out, sizeof out, now_ms())) > 0) put(&TO_CLI, out, n), burst++;
+      if (burst > max_burst) max_burst = burst;
+      if (burst > allowed && !over_burst) over_burst = burst, over_allowed = allowed;
+    }
+    int got = 0;
+    while (take(&TO_CLI, &g)) quic_recv(&cl.q, g.d, g.n, now_ms()), got = 1;
+    if (got) { /* what that lets the client send (ACKs open its window) goes before time moves on, as a real loop does */
+      if (cl.ready) submit_more(&cl);
+      while ((n = quic_send(&cl.q, out, sizeof out, now_ms())) > 0) put(&TO_SRV, out, n);
+    }
     if (cl.failed || cl.q.closing || cl.q.draining || (accepted && (sv.q.closing || sv.q.draining))) break;
     if (cl.done == nreq && cl.submitted == nreq) break;
     if ((!TO_SRV.n && !TO_CLI.n) || next_arrival() > NOW_NS) {
@@ -429,6 +442,8 @@ static int run(int nreq, int loss, int reorder) {
   }
   CHECK(accepted && sv.h3_ready && cl.ready, "handshake (loss %d%%): accepted %d server h3 %d client h3 %d", loss,
         accepted, sv.h3_ready, cl.ready);
+  /* paced: no instant's sending beyond the bucket's cap at that moment */
+  CHECK(!over_burst, "the server sent %d datagrams at one instant, %d allowed", over_burst, over_allowed);
   CHECK(!RETRY || (cl.q.retried && sv.q.retried && retries >= 1), "Retry: client %d server %d (%d sent)", cl.q.retried,
         sv.q.retried, retries);
   CHECK(cl.q.confirmed && cl.q.sp[QUIC_SP_INITIAL].discarded && cl.q.sp[QUIC_SP_HANDSHAKE].discarded,
@@ -450,11 +465,11 @@ static int run(int nreq, int loss, int reorder) {
         (unsigned long long)cl.q.undecryptable);
   printf(
       "  loss %2d%% reorder %d%s%s: %d requests, %.1f simulated s, %ld datagrams (%ld lost), client cwnd %llu srtt %lld ms, "
-      "request headers %.1f%% of their fields (%.1f%% at the end)\n",
+      "request headers %.1f%% of their fields (%.1f%% at the end), max burst %d\n",
       loss, reorder, BULK ? " bulk 1 MB, late 0.5%" : "", RETRY ? " after a Retry" : "", nreq, (NOW_NS - start) / 1e9,
       SENT_DGRAMS, LOST_DGRAMS, (unsigned long long)cl.q.cwnd, (long long)cl.q.smoothed_rtt,
       cl.hdr_raw ? 100.0 * (double)cl.hdr_bytes / (double)cl.hdr_raw : 0.0,
-      cl.tail_raw ? 100.0 * (double)cl.tail_bytes / (double)cl.tail_raw : 0.0);
+      cl.tail_raw ? 100.0 * (double)cl.tail_bytes / (double)cl.tail_raw : 0.0, max_burst);
   SENT_DGRAMS = LOST_DGRAMS = 0;
   quic_free(&cl.q);
   if (accepted) quic_free(&sv.q);
