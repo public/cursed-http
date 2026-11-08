@@ -1812,11 +1812,14 @@ static inline size_t quic_send(quic_conn *c, uint8_t *out, size_t cap, int64_t n
     if (ack_due) p = quic__ack_frame(c, sp, space, p, e, now, &largest);
     if (p != before_ack) quic__rec(&k->rec, QF_ACK, largest, 0, 0, 0), k->rec.largest_ack = largest;
     uint8_t *after_ack = p;
-    if (cc_ok || sp->crypto_out.lost.n || space != QUIC_SP_APP) {
+    /* a full record ring would forget this packet, and what it carries would never be resent if it were
+     * lost: only an ACK or a probe goes out until acks (or losses) free records */
+    int rec_ok = sp->nsent < QUIC_SENT_MAX;
+    if (rec_ok && (cc_ok || sp->crypto_out.lost.n || space != QUIC_SP_APP)) {
       uint64_t nb;
       p = quic__sb_emit(&sp->crypto_out, 1, 0, p, e, &k->rec, UINT64_MAX, &nb);
     }
-    if (space == QUIC_SP_APP && c->established) p = quic__app_frames(c, p, e, &k->rec, cc_ok);
+    if (rec_ok && space == QUIC_SP_APP && c->established) p = quic__app_frames(c, p, e, &k->rec, cc_ok);
     if (c->probes_due && p == after_ack && e - p > 1) *p++ = 0x01, quic__rec(&k->rec, QF_PING, 0, 0, 0, 0); /* probe */
     if (p == plain + poff) continue; /* nothing after all */
     k->ack_eliciting = p != after_ack;

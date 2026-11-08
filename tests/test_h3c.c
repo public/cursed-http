@@ -4,7 +4,7 @@
  *   - each run: handshake (ALPN h3, transport parameters checked both ways), then N requests (GETs, POSTs with
  *     bodies, large responses, HEAD); every status, body length and stream end is checked; both sides must
  *     finish without errors, and the client must confirm the handshake (HANDSHAKE_DONE).
- * Usage: test_h3c [loss_percent]. FUZZ=N scales the runs. */
+ * Usage: test_h3c [loss_percent [bulk_requests]]. FUZZ=N scales the runs. */
 #define _GNU_SOURCE
 #include <stdarg.h>
 #include <stdio.h>
@@ -55,6 +55,7 @@ typedef struct {
   int n;
 } wire;
 static wire TO_SRV, TO_CLI;
+static int BULK; /* every request is GET /big/1000000: slow start overfills the wire (4096 datagrams, tail drop) */
 static int LOSS, REORDER, BLACKHOLE; /* BLACKHOLE: drop client->server after its first datagram, for 8 s */
 static uint64_t BLACKHOLE_UNTIL;
 static long SENT_DGRAMS, LOST_DGRAMS;
@@ -68,7 +69,8 @@ static void put(wire *w, const uint8_t *d, size_t n) {
       return;
     }
   }
-  if ((int)(rnd() % 100) < LOSS) {
+  /* BULK: once slow start has run for a while (far more than QUIC_SENT_MAX packets in flight), 1 in 200 */
+  if ((int)(rnd() % 100) < LOSS || (BULK && w == &TO_CLI && SENT_DGRAMS > 12000 && rnd() % 200 == 0)) {
     LOST_DGRAMS++;
     return;
   }
@@ -270,12 +272,12 @@ static void submit_more(client *cl) {
   while (cl->submitted < cl->nreq && cl->submitted - cl->done < 50) {
     int64_t sid = quic_open_bidi(&cl->q);
     if (sid < 0) return; /* at the server's stream limit: MAX_STREAMS will raise it */
-    int k = (int)(rnd() % 5);
+    int k = BULK ? 2 : (int)(rnd() % 5);
     char *path = (char *)UPBUF + 60000 + (cl->submitted % 64) * 64;
     const char *m = k == 1 ? "POST" : k == 3 ? "HEAD" : "GET";
     long w = 0;
     if (k == 2) {
-      size_t big = 1000 + rnd() % 200000;
+      size_t big = BULK ? sizeof BIG - 48576 : 1000 + rnd() % 200000;
       snprintf(path, 64, "/big/%zu", big), w = (long)big;
     } else if (k == 4) snprintf(path, 64, "/204");
     else snprintf(path, 64, "/p/%d", cl->submitted), w = k == 1 ? 7 : k == 3 ? 0 : 13;
@@ -402,9 +404,9 @@ static int run(int nreq, int loss, int reorder) {
   CHECK(sv.errors == 0 && cl.q.undecryptable == 0, "server stream errors %ld, client undecryptable %llu", sv.errors,
         (unsigned long long)cl.q.undecryptable);
   printf(
-      "  loss %2d%% reorder %d: %d requests, %.1f simulated s, %ld datagrams (%ld lost), client cwnd %llu srtt %lld ms\n",
-      loss, reorder, nreq, (NOW_NS - start) / 1e9, SENT_DGRAMS, LOST_DGRAMS, (unsigned long long)cl.q.cwnd,
-      (long long)cl.q.smoothed_rtt);
+      "  loss %2d%% reorder %d%s: %d requests, %.1f simulated s, %ld datagrams (%ld lost), client cwnd %llu srtt %lld ms\n",
+      loss, reorder, BULK ? " bulk 1 MB, late 0.5%" : "", nreq, (NOW_NS - start) / 1e9, SENT_DGRAMS, LOST_DGRAMS,
+      (unsigned long long)cl.q.cwnd, (long long)cl.q.smoothed_rtt);
   SENT_DGRAMS = LOST_DGRAMS = 0;
   quic_free(&cl.q);
   if (accepted) quic_free(&sv.q);
@@ -416,7 +418,8 @@ int main(int argc, char **argv) {
   server_init();
   client_tls_init();
   printf("sizeof(quic_conn) = %zu, sizeof(h3_conn) = %zu\n", sizeof(quic_conn), sizeof(h3_conn));
-  if (argc > 1) run(100, atoi(argv[1]), 1);
+  if (argc > 2) BULK = 1, run(atoi(argv[2]), atoi(argv[1]), 0);
+  else if (argc > 1) run(100, atoi(argv[1]), 1);
   else
     for (long r = 0; r < scale(); r++) {
       run(50, 0, 0);
@@ -424,6 +427,9 @@ int main(int argc, char **argv) {
       run(100, 0, 1);
       run(100, 2, 1);
       run(60, 10, 1);
+      /* far more than QUIC_SENT_MAX packets in flight, then tail drops: a full record ring once forgot packets
+       * whose losses were then never repaired, and the transfer stalled */
+      BULK = 1, run(40, 0, 0), BULK = 0;
     }
   printf("%s: %ld failures / %ld checks\n", fails ? "FAIL" : "PASS", fails, checks);
   return fails != 0;
