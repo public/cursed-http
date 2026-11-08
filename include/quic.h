@@ -47,8 +47,8 @@
 #define QUIC_STREAM_WIN    (256u << 10) /* initial_max_stream_data_bidi_remote / _uni */
 #define QUIC_CONN_WIN      (4u << 20)   /* initial_max_data */
 #define QUIC_PEER_CIDS     4            /* active_connection_id_limit we advertise */
-#define QUIC_MAX_UDP       1472         /* max_udp_payload_size we accept; we send <= QUIC_SEND_MAX */
-#define QUIC_SEND_MAX      1252
+#define QUIC_MAX_UDP       1472         /* max_udp_payload_size we accept, and the most we probe the path for */
+#define QUIC_SEND_MAX      1252         /* datagrams before path MTU discovery finds more room */
 #define QUIC_MIN_INITIAL   1200
 #define QUIC_SCID_LEN      8
 #define QUIC_IDLE_MS       30000
@@ -384,7 +384,8 @@ enum {
   QF_PING,
   QF_ACK,
   QF_RETIRE_CID,
-  QF_NEW_TOKEN
+  QF_NEW_TOKEN,
+  QF_PMTU /* a path MTU probe (a: its size) */
 };
 typedef struct {
   uint8_t type, fin;
@@ -502,7 +503,13 @@ struct quic_conn {
   uint64_t bytes_recv, bytes_sent; /* before address validation: 3x limit */
   int64_t last_send_at;            /* a client's anti-deadlock probe before the handshake is confirmed */
   uint8_t pace_blocked;            /* quic_send last held data back for pacing */
-  uint64_t undecryptable;          /* packets dropped because they failed to decrypt */
+  /* path MTU discovery (DPLPMTUD, RFC 8899 / RFC 9000 §14.3): the datagram size in use, the peer's
+   * max_udp_payload_size, the probe in flight (its size), failures at that size, and when to probe next */
+  uint16_t mtu, pmtu_probe, pmtu_fails;
+  uint8_t pmtu_done;
+  uint64_t peer_max_udp;
+  int64_t pmtu_next_at;
+  uint64_t undecryptable; /* packets dropped because they failed to decrypt */
   quic_stream s[QUIC_MAX_STREAMS];
   uint32_t rr;
 };
@@ -686,6 +693,10 @@ static inline void quic__frame_acked(quic_conn *c, quic_space *sp, const quic_fr
       if ((s = quic__stream(c, f->a))) quic__sb_ack(c->ctx, &s->out, f->b, f->c, f->fin);
       break;
     case QF_CRYPTO: quic__sb_ack(c->ctx, &sp->crypto_out, f->b, f->c, 0); break;
+    case QF_PMTU: /* the path carries datagrams this big: use them, and try the next size */
+      if (f->a > c->mtu) c->mtu = (uint16_t)f->a;
+      if (c->pmtu_probe == f->a) c->pmtu_probe = 0, c->pmtu_fails = 0;
+      break;
     case QF_ACK: { /* the peer has our ACK up to f->a: stop repeating ranges below it */
       int w = 0;
       for (int i = 0; i < sp->nrcv; i++)
@@ -762,6 +773,9 @@ static inline void quic__frame_lost(quic_conn *c, quic_space *sp, const quic_fre
     case QF_HANDSHAKE_DONE: c->handshake_done_pending = 1; break;
     case QF_RETIRE_CID: quic__retire_queue(c, f->a); break;
     case QF_NEW_TOKEN: c->send_new_token = 1; break;
+    case QF_PMTU: /* the path did not carry it: three times, and that size is out of reach */
+      if (c->pmtu_probe == f->a) c->pmtu_probe = 0, c->pmtu_done |= ++c->pmtu_fails >= 3;
+      break;
     case QF_RESET:
       if ((s = quic__stream(c, f->a))) s->send_reset = 1;
       break;
@@ -806,6 +820,7 @@ static inline void quic__cc_acked(quic_conn *c, const quic_sent *p, int64_t now)
 static inline void quic__cc_lost(quic_conn *c, const quic_sent *p, int64_t now) {
   if (!p->in_flight) return;
   c->bytes_in_flight -= p->size;
+  if (p->nf && p->f[0].type == QF_PMTU) return; /* a probe's loss says nothing about congestion (§14.4) */
   c->episode_lost++;
   if (p->sent_at <= c->recovery_start) return; /* one reduction per episode */
   /* a new congestion event: remember the state for undo, then reduce */
@@ -942,6 +957,7 @@ static inline int quic__decode_tp(quic_conn *c, const uint8_t *p, const uint8_t 
       case 0x06: bidi_remote = v; break;
       case 0x03:
         if (v < 1200) return -1;
+        c->peer_max_udp = v;
         break;
       case 0x04: c->max_data_peer = v; break;
       case 0x05: bidi_local = v; break;
@@ -1859,6 +1875,7 @@ static inline int quic_accept_from(quic_conn *c, quic_ctx *x, uint8_t *d, size_t
   c->peer_max_ack_delay = 25, c->peer_ack_delay_exp = 3;
   c->next_uni_id = 3;
   c->cwnd = 10 * QUIC_SEND_MAX, c->ssthresh = UINT64_MAX, c->recovery_start = INT64_MIN;
+  c->mtu = QUIC_SEND_MAX, c->peer_max_udp = 65527;
   c->pkt_thresh = 3, c->time_thresh_8 = 9; /* RFC 9002 §6.1: 3 packets, 9/8 RTT, adapted on spurious losses */
   c->idle_deadline = now + QUIC_IDLE_MS;
   return quic_recv(c, d, len, now) == QUIC_E_CLOSED && c->draining ? QUIC_E_CLOSED : 0;
@@ -1927,6 +1944,7 @@ static inline int quic_connect_resume(quic_conn *c, quic_ctx *x, const char *ser
   c->peer_max_ack_delay = 25, c->peer_ack_delay_exp = 3;
   c->next_uni_id = 2, c->next_bidi_id = 0;
   c->cwnd = 10 * QUIC_SEND_MAX, c->ssthresh = UINT64_MAX, c->recovery_start = INT64_MIN;
+  c->mtu = QUIC_SEND_MAX, c->peer_max_udp = 65527;
   c->pkt_thresh = 3, c->time_thresh_8 = 9;
   c->idle_deadline = now + QUIC_IDLE_MS;
   /* the ClientHello: TLS's first flight, into the Initial space's crypto stream */
@@ -2199,10 +2217,48 @@ static inline void quic__pace_refill(quic_conn *c, int64_t now) {
   }
 }
 
+/* the next size to probe: 1350 (tunnels), 1452 (IPv6 over 1500), 1472 (IPv4 over 1500); within what the peer
+ * takes and we accept */
+static inline uint16_t quic__pmtu_next(const quic_conn *c) {
+  static const uint16_t sizes[3] = { 1350, 1452, 1472 };
+  for (int i = 0; i < 3; i++)
+    if (sizes[i] > c->mtu && sizes[i] <= QUIC_MAX_UDP && sizes[i] <= c->peer_max_udp) return sizes[i];
+  return 0;
+}
+/* a probe: a 1-RTT packet of PING and PADDING, exactly the size to try (RFC 9000 §14.4); in flight, but its loss
+ * is no congestion signal. 0 when nothing to probe or no room */
+static inline size_t quic__pmtu_probe(quic_conn *c, uint8_t *out, size_t cap, int64_t now) {
+  uint16_t size = quic__pmtu_next(c);
+  quic_space *sp = &c->sp[QUIC_SP_APP];
+  if (!size) {
+    c->pmtu_done = 1;
+    return 0;
+  }
+  if (cap < size || !sp->have_tx || sp->nsent >= QUIC_SENT_MAX || c->bytes_in_flight + size > c->cwnd) return 0;
+  uint8_t pl[QUIC_MAX_UDP], *p = out;
+  size_t hl = 1 + c->dcid_len + 2, pll = size - hl - 16;
+  memset(pl, 0, pll), pl[0] = 0x01; /* PING, then PADDING */
+  uint64_t pn = sp->next_pn++;
+  *p++ = (uint8_t)(0x40 | (c->key_phase << 2) | 1);
+  memcpy(p, c->dcid, c->dcid_len), p += c->dcid_len;
+  *p++ = (uint8_t)(pn >> 8), *p++ = (uint8_t)pn;
+  size_t ct = ptls_aead_encrypt(sp->tx.aead, p, pl, pll, pn, out, hl);
+  uint8_t mask[16];
+  quic__mask(&sp->tx, out + hl - 2 + 4, mask);
+  out[0] ^= mask[0] & 0x1f, out[hl - 2] ^= mask[1], out[hl - 1] ^= mask[2];
+  quic_sent r = { 0 };
+  r.pn = pn, r.sent_at = now, r.size = (uint16_t)(hl + ct), r.ack_eliciting = r.in_flight = 1;
+  quic__rec(&r, QF_PMTU, size, 0, 0, 0);
+  *quic__sent_at(sp, sp->nsent) = r, sp->nsent++;
+  c->bytes_in_flight += r.size, sp->last_ack_eliciting_at = now, c->bytes_sent += r.size;
+  c->pmtu_probe = size, c->pmtu_next_at = now + 2 * (c->rtt_sampled ? c->smoothed_rtt : 333);
+  return hl + ct;
+}
+
 /* build and protect one datagram */
 static inline size_t quic_send(quic_conn *c, uint8_t *out, size_t cap, int64_t now) {
   if (c->draining) return 0;
-  size_t limit = cap < QUIC_SEND_MAX ? cap : QUIC_SEND_MAX;
+  size_t limit = cap < c->mtu ? cap : c->mtu;
   if (!c->addr_validated) { /* anti-amplification: 3x what we received (RFC 9000 §8.1) */
     uint64_t room = 3 * c->bytes_recv > c->bytes_sent ? 3 * c->bytes_recv - c->bytes_sent : 0;
     if (room < limit) limit = (size_t)room;
@@ -2259,11 +2315,16 @@ static inline size_t quic_send(quic_conn *c, uint8_t *out, size_t cap, int64_t n
   }
   quic__pkt pk[QUIC_NSP];
   int np = 0;
-  uint8_t plain[QUIC_SEND_MAX];
+  uint8_t plain[QUIC_MAX_UDP];
   size_t w = 0, poff = 0; /* datagram bytes used / plaintext bytes used */
   int has_initial_ae = 0;
   quic__pace_refill(c, now);
-  int cwnd_ok = c->bytes_in_flight + QUIC_SEND_MAX <= c->cwnd, paced = c->pace_tokens >= QUIC_SEND_MAX;
+  if (!c->closing && (c->client ? c->confirmed : c->established) && !c->pmtu_done && !c->pmtu_probe &&
+      now >= c->pmtu_next_at && c->addr_validated) { /* a path MTU probe, when one is due */
+    size_t n = quic__pmtu_probe(c, out, cap, now);
+    if (n) return n;
+  }
+  int cwnd_ok = c->bytes_in_flight + c->mtu <= c->cwnd, paced = c->pace_tokens >= c->mtu;
   int cc_ok = (cwnd_ok && paced) || c->probes_due;
   c->pace_blocked = cwnd_ok && !paced && !c->probes_due;
   for (int space = 0; space < QUIC_NSP; space++) {
@@ -2394,7 +2455,7 @@ static inline int64_t quic_timeout(const quic_conn *c) {
     if (pto < t) t = pto;
   }
   if (c->pace_blocked) { /* the time the bucket holds a packet again: then quic_send */
-    double need = QUIC_SEND_MAX - c->pace_tokens, rate = quic__pace_rate(c);
+    double need = c->mtu - c->pace_tokens, rate = quic__pace_rate(c);
     int64_t pt = c->pace_at + (int64_t)(need / rate) + 1;
     if (pt < t) t = pt;
   }
@@ -2422,6 +2483,8 @@ static inline void quic_on_timeout(quic_conn *c, int64_t now) {
     if (inflight && sp->last_ack_eliciting_at + quic__pto(c, i) <= now) {
       fired = 1;
       c->pto_count++, c->probes_due = 2;
+      if (c->pto_count >= 3 && c->mtu > QUIC_SEND_MAX) /* the bigger datagrams may be black-holed: back down */
+        c->mtu = QUIC_SEND_MAX, c->pmtu_done = 1;
       /* resend what is outstanding in that space as the probe's payload */
       for (uint32_t k = 0; k < sp->nsent; k++) {
         quic_sent *p = quic__sent_at(sp, k);

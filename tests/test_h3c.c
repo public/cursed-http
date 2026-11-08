@@ -55,12 +55,15 @@ typedef struct {
   int n;
 } wire;
 static wire TO_SRV, TO_CLI;
-static int RETRY; /* the server validates the client's address with a Retry first */
+static int PATH_MTU = 1500 - 28; /* the largest UDP payload the simulated path carries */
+static int RETRY;                /* the server validates the client's address with a Retry first */
 static long EARLY_REQS;
-static unsigned long long BLOCKED_SUM; /* QPACK sections our server held for inserts, over all runs */
-static int EXPECT_EARLY;               /* resuming: 1 the server takes the 0-RTT requests, 0 it refuses them */
-static quic_resume RES, *RESUME_FROM;  /* what a run saves for the next; the run that resumes from it */
-static int LOSE_STATE; /* halfway, the server forgets the connection and answers with stateless resets */
+static unsigned long long BLOCKED_SUM;
+static int LAST_MTU;
+/* the server's datagram size at the end of the last run */ /* QPACK sections our server held for inserts, over all runs */
+static int EXPECT_EARLY;              /* resuming: 1 the server takes the 0-RTT requests, 0 it refuses them */
+static quic_resume RES, *RESUME_FROM; /* what a run saves for the next; the run that resumes from it */
+static int LOSE_STATE;                /* halfway, the server forgets the connection and answers with stateless resets */
 static int BULK; /* every request is GET /big/1000000: slow start overfills the wire (4096 datagrams, tail drop) */
 static int LOSS, REORDER, BLACKHOLE; /* BLACKHOLE: drop client->server after its first datagram, for 8 s */
 static uint64_t BLACKHOLE_UNTIL;
@@ -85,6 +88,10 @@ static void put(wire *w, const uint8_t *d, size_t n) {
     memcpy(g->d, d, n), g->n = n, g->at = NOW_NS + 10000000ull + (rnd() % 8) * 3000000ull, g->seq = SEQ++;
   }
   if (w->n == 4096 || n > 1500) return;
+  if ((int)n > PATH_MTU) { /* too big for the path: lost, silently */
+    LOST_DGRAMS++;
+    return;
+  }
   dgram *g = &w->q[w->n++];
   memcpy(g->d, d, n), g->n = n;
   g->at = NOW_NS + 10000000ull + (REORDER ? (rnd() % 8) * 3000000ull : 0); /* 10 ms one way, +0..21 ms jitter */
@@ -514,7 +521,7 @@ static int run(int nreq, int loss, int reorder) {
       (long long)cl.q.smoothed_rtt, cl.hdr_raw ? 100.0 * (double)cl.hdr_bytes / (double)cl.hdr_raw : 0.0,
       cl.tail_raw ? 100.0 * (double)cl.tail_bytes / (double)cl.tail_raw : 0.0, max_burst,
       (unsigned long long)sv.h.blocked_total);
-  BLOCKED_SUM += sv.h.blocked_total;
+  BLOCKED_SUM += sv.h.blocked_total, LAST_MTU = sv.q.mtu;
   SENT_DGRAMS = LOST_DGRAMS = 0;
   quic_free(&cl.q);
   if (accepted) quic_free(&sv.q);
@@ -565,6 +572,14 @@ int main(int argc, char **argv) {
       BULK = 1, run(40, 0, 0), BULK = 0;
       RETRY = 1, run(50, 0, 0), run(100, 2, 1), RETRY = 0; /* address validation first */
       LOSE_STATE = 1, run(60, 0, 0), run(60, 2, 1), LOSE_STATE = 0;
+      /* path MTU discovery: the server's datagrams grow to what the path carries (1472: IPv4 over Ethernet), to
+       * 1350 on a tunnel's 1400, and stay at 1252 on 1280 */
+      static const int paths[3] = { 1500 - 28, 1400 - 28, 1280 - 28 }, want[3] = { 1472, 1350, 1252 };
+      for (int m = 0; m < 3; m++) {
+        PATH_MTU = paths[m], BULK = 1, run(8, 0, 0), BULK = 0;
+        CHECK(LAST_MTU == want[m], "path %d: the server sends %d-byte datagrams", PATH_MTU + 28, LAST_MTU);
+      }
+      PATH_MTU = 1500 - 28;
       /* resumption: a ticket, a NEW_TOKEN and the server's limits saved, then 0-RTT; then the server's ticket key
        * changes (a restart): the ticket is refused, and the 0-RTT requests go again in 1-RTT */
       memset(&RES, 0, sizeof RES), run(30, 0, 0);
