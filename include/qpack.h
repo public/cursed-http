@@ -36,8 +36,7 @@ typedef struct {
   const char *n, *v;
   uint8_t nl, vl, hsidx;
 } qp_sent;
-#define QPS(n, v, h)                                                                                                   \
-  { n, v, sizeof(n) - 1, sizeof(v) - 1, h }
+#define QPS(n, v, h) { n, v, sizeof(n) - 1, sizeof(v) - 1, h }
 static const qp_sent qp_static[99] = {
   QPS(":authority", "", 1),                                                                   /* 0 */
   QPS(":path", "/", 4),                                                                       /* 1 */
@@ -435,11 +434,23 @@ static inline void qp_dec_cancel(qp_dec *d, uint64_t stream_id) {
 
 /* ----------------------------------------- encoder ----------------------------------------- */
 /* string with an N-bit prefix (H bit = 1 << nbits): Huffman when strictly shorter */
+static inline size_t qp__int_len(int nbits, uint64_t v) {
+  uint64_t m = (1u << nbits) - 1;
+  size_t k = 1;
+  if (v >= m)
+    for (v -= m, k = 2; v >= 128; v >>= 7) k++;
+  return k;
+}
+/* one pass: Huffman-code it in place after room for the raw length's prefix (the shorter code's is no longer),
+ * moving it down a byte or so if its own prefix is shorter; raw when Huffman is not strictly shorter. Writes up
+ * to n + 3 bytes past the prefix */
 static inline uint8_t *qp__put_str(uint8_t *p, int nbits, uint8_t first, const uint8_t *s, size_t n) {
-  size_t h = hh_encode_len(s, n);
-  if (h < n) {
-    p = qp__put_int(p, (uint8_t)(first | (1 << nbits)), nbits, h);
-    return p + hh_encode(p, s, n);
+  size_t pl = qp__int_len(nbits, n), h = n > 1 ? hh_encode_upto(p + pl, s, n, n) : SIZE_MAX;
+  if (h != SIZE_MAX) {
+    size_t hl = qp__int_len(nbits, h);
+    if (hl < pl) memmove(p + hl, p + pl, h);
+    qp__put_int(p, (uint8_t)(first | (1 << nbits)), nbits, h);
+    return p + hl + h;
   }
   p = qp__put_int(p, first, nbits, n);
   memcpy(p, s, n);
@@ -450,18 +461,34 @@ static inline size_t qp_enc_prefix(uint8_t *dst) {
   dst[0] = 0, dst[1] = 0;
   return 2;
 }
+/* the static table's names by a collision-free hash (length, first and last two bytes): each name's first
+ * index, and the next index with the same name (255: none) */
+static const uint8_t qp__nslot[128] = { 255, 76,  11,  255, 96,  1,   255, 86,  255, 255, 255, 255, 255, 72,  5,   97,
+                                        24,  255, 79,  12,  61,  73,  93,  255, 255, 255, 255, 255, 255, 95,  255, 255,
+                                        255, 42,  255, 255, 91,  80,  255, 255, 255, 2,   14,  85,  55,  255, 15,  255,
+                                        22,  255, 255, 255, 255, 255, 88,  35,  0,   255, 56,  255, 255, 255, 92,  44,
+                                        59,  255, 255, 255, 13,  4,   255, 62,  255, 255, 255, 81,  255, 255, 255, 255,
+                                        10,  255, 255, 255, 83,  36,  255, 87,  6,   255, 255, 255, 94,  255, 90,  29,
+                                        255, 255, 7,   84,  255, 255, 255, 9,   255, 255, 255, 255, 255, 32,  255, 3,
+                                        89,  255, 255, 255, 31,  255, 255, 8,   255, 255, 255, 255, 255, 255, 255, 33 };
+static const uint8_t qp__nnext[99] = { 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255,
+                                       16,  17,  18,  19,  20,  21,  255, 23,  255, 25,  26,  27,  28,  63,  30,
+                                       255, 255, 255, 34,  75,  255, 37,  38,  39,  40,  41,  255, 43,  255, 45,
+                                       46,  47,  48,  49,  50,  51,  52,  53,  54,  255, 255, 57,  58,  255, 60,
+                                       255, 255, 255, 64,  65,  66,  67,  68,  69,  70,  71,  255, 255, 74,  255,
+                                       255, 77,  78,  255, 255, 255, 82,  255, 255, 255, 255, 255, 255, 255, 255,
+                                       255, 255, 255, 255, 255, 255, 255, 98,  255 };
 static inline int qp__static_find(const uint8_t *n, size_t nl, const uint8_t *v, size_t vl, int *name_only) {
-  int name_idx = -1;
-  for (int i = 0; i < 99; i++)
-    if (qp_static[i].nl == nl && !memcmp(qp_static[i].n, n, nl)) {
-      if (qp_static[i].vl == vl && !memcmp(qp_static[i].v, v, vl)) {
-        *name_only = 0;
-        return i;
-      }
-      if (name_idx < 0) name_idx = i;
-    }
   *name_only = 1;
-  return name_idx;
+  if (nl < 2 || nl > 64) return -1;
+  int i = qp__nslot[(nl * 19 + (size_t)n[0] * 13 + (size_t)n[nl - 1] * 20 + (size_t)n[nl - 2] * 9) & 127];
+  if (i == 255 || qp_static[i].nl != nl || memcmp(qp_static[i].n, n, nl)) return -1;
+  for (int k = i; k != 255; k = qp__nnext[k])
+    if (qp_static[k].vl == vl && !memcmp(qp_static[k].v, v, vl)) {
+      *name_only = 0;
+      return k;
+    }
+  return i;
 }
 static inline size_t qp_enc_field(uint8_t *dst, const uint8_t *name, size_t nl, const uint8_t *val, size_t vl,
                                   int never) {

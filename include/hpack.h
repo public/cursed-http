@@ -343,22 +343,21 @@ static inline uint8_t *hp__put_int(uint8_t *p, uint8_t first, int nbits, uint32_
   *p++ = (uint8_t)v;
   return p;
 }
-/* string: Huffman when strictly shorter (hh_encode_upto writes it in one pass) */
+/* string: Huffman when strictly shorter, in one pass (as qp__put_str): coded in place after room for the raw
+ * length's prefix, moved down if its own prefix is shorter. Writes up to n + 3 bytes past the prefix */
+static inline size_t hp__int7_len(size_t v) {
+  size_t k = 1;
+  if (v >= 127)
+    for (v -= 127, k = 2; v >= 128; v >>= 7) k++;
+  return k;
+}
 static inline uint8_t *hp__put_str(uint8_t *p, const uint8_t *s, size_t n) {
-  uint8_t tmp[64];
-  if (n <= sizeof tmp - 4) {
-    size_t h = hh_encode_upto(tmp, s, n, n);
-    if (h != SIZE_MAX) {
-      p = hp__put_int(p, 0x80, 7, (uint32_t)h);
-      memcpy(p, tmp, h);
-      return p + h;
-    }
-  } else {
-    size_t h = hh_encode_len(s, n);
-    if (h < n) {
-      p = hp__put_int(p, 0x80, 7, (uint32_t)h);
-      return p + hh_encode(p, s, n);
-    }
+  size_t pl = hp__int7_len(n), h = n > 1 ? hh_encode_upto(p + pl, s, n, n) : SIZE_MAX;
+  if (h != SIZE_MAX) {
+    size_t hl = hp__int7_len(h);
+    if (hl < pl) memmove(p + hl, p + pl, h);
+    hp__put_int(p, 0x80, 7, (uint32_t)h);
+    return p + hl + h;
   }
   p = hp__put_int(p, 0, 7, (uint32_t)n);
   memcpy(p, s, n);
