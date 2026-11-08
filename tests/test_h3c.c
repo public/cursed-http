@@ -55,8 +55,11 @@ typedef struct {
   int n;
 } wire;
 static wire TO_SRV, TO_CLI;
-static int RETRY;      /* the server validates the client's address with a Retry first */
-static int LOSE_STATE; /* halfway, the server forgets the connection and answers with stateless resets */
+static int RETRY; /* the server validates the client's address with a Retry first */
+static long EARLY_REQS;
+static int EXPECT_EARLY;              /* resuming: 1 the server takes the 0-RTT requests, 0 it refuses them */
+static quic_resume RES, *RESUME_FROM; /* what a run saves for the next; the run that resumes from it */
+static int LOSE_STATE;                /* halfway, the server forgets the connection and answers with stateless resets */
 static int BULK; /* every request is GET /big/1000000: slow start overfills the wire (4096 datagrams, tail drop) */
 static int LOSS, REORDER, BLACKHOLE; /* BLACKHOLE: drop client->server after its first datagram, for 8 s */
 static uint64_t BLACKHOLE_UNTIL;
@@ -125,6 +128,7 @@ static uint8_t BIG[1 << 20];
 static int s_request(h3_conn *h, uint64_t sid, const h_request *rq, int end, void *u) {
   server *s = u;
   s->requests++;
+  if (!s->q.established) EARLY_REQS++; /* it came in 0-RTT */
   static const hp_field ct = { (const uint8_t *)"content-type", (const uint8_t *)"text/plain", 12, 10, 0, 0, 0, 0 };
   if (rq->path_len > 5 && !memcmp(rq->path, "/big/", 5))
     return h3_respond(h, sid, 200, &ct, 1, BIG, (size_t)atoi((const char *)rq->path + 5), 1) < 0;
@@ -217,6 +221,7 @@ static void server_init(void) {
   SRV_TLS.certificates.list = &SRV_CERT, SRV_TLS.certificates.count = 1;
   SRV_TLS.sign_certificate = &SRV_SIGN.super;
   quic_ctx_init(&QX, &SRV_TLS);
+  quic_ctx_resumption(&QX);
 }
 
 /* ------------------------------------------ our client ------------------------------------------ */
@@ -359,6 +364,7 @@ static void client_tls_init(void) {
   CLI_TLS.key_exchanges = ptls_openssl_key_exchanges;
   CLI_TLS.cipher_suites = ptls_openssl_cipher_suites;
   quic_ctx_init(&CQX, &CLI_TLS); /* no verify_certificate: the test's self-signed server is accepted */
+  quic_ctx_resumption(&CQX);     /* (saves tickets) */
 }
 
 /* --------------------------------------------- one run --------------------------------------------- */
@@ -370,7 +376,11 @@ static int run(int nreq, int loss, int reorder) {
   CLI = &cl, SRV = &sv;
   memset(&cl, 0, sizeof cl), memset(&sv, 0, sizeof sv);
   cl.nreq = nreq, cl.pending_sid = -1;
-  int r0 = quic_connect(&cl.q, &CQX, "localhost", now_ms(), &CQCB, &cl);
+  static quic_resume from;
+  if (RESUME_FROM) from = *RESUME_FROM; /* (RES is refilled by this run) */
+  EARLY_REQS = 0;
+  int r0 = quic_connect_resume(&cl.q, &CQX, "localhost", now_ms(), &CQCB, &cl, RESUME_FROM ? &from : NULL);
+  cl.q.resume_out = &RES;
   CHECK(r0 == 0, "quic_connect %d", r0);
   int accepted = 0, retries = 0, max_burst = 0, over_burst = 0, over_allowed = 0;
   uint64_t lost_at = 0;
@@ -401,14 +411,12 @@ static int run(int nreq, int loss, int reorder) {
           put(&TO_CLI, rt, rn);
           continue;
         }
-        if (RETRY) { /* a token for another address, or the right one */
+        if (RETRY && !RESUME_FROM) { /* a Retry token from another address (a NEW_TOKEN one would be ignored) */
           static quic_conn probe;
           CHECK(quic_accept_from(&probe, &QX, g.d, g.n, other, sizeof other, now_ms(), &QCB, &sv) == QUIC_E_DROP,
                 "a token from another address is refused");
         }
-        if (quic_accept_from(&sv.q, &QX, g.d, g.n, RETRY ? addr : NULL, RETRY ? sizeof addr : 0, now_ms(), &QCB, &sv) ==
-            0)
-          accepted = 1;
+        if (quic_accept_from(&sv.q, &QX, g.d, g.n, addr, sizeof addr, now_ms(), &QCB, &sv) == 0) accepted = 1;
         continue;
       }
       quic_recv(&sv.q, g.d, g.n, now_ms());
@@ -463,8 +471,14 @@ static int run(int nreq, int loss, int reorder) {
         accepted, sv.h3_ready, cl.ready);
   /* paced: no instant's sending beyond the bucket's cap at that moment */
   CHECK(!over_burst, "the server sent %d datagrams at one instant, %d allowed", over_burst, over_allowed);
-  CHECK(!RETRY || (cl.q.retried && sv.q.retried && retries >= 1), "Retry: client %d server %d (%d sent)", cl.q.retried,
-        sv.q.retried, retries);
+  CHECK(!RETRY || RESUME_FROM || (cl.q.retried && sv.q.retried && retries >= 1), "Retry: client %d server %d (%d sent)",
+        cl.q.retried, sv.q.retried, retries);
+  if (RESUME_FROM) { /* 0-RTT: sent, then taken (served before the handshake completed) or refused (sent again) */
+    CHECK(cl.q.zrtt_sent && (EXPECT_EARLY ? EARLY_REQS > 0 : EARLY_REQS == 0),
+          "0-RTT: sent %d, %ld requests served early (%s expected)", cl.q.zrtt_sent, EARLY_REQS,
+          EXPECT_EARLY ? "some" : "none");
+    CHECK(!RETRY || retries == 0, "the NEW_TOKEN validated the address: no Retry (%d sent)", retries);
+  }
   CHECK(cl.q.confirmed && cl.q.sp[QUIC_SP_INITIAL].discarded && cl.q.sp[QUIC_SP_HANDSHAKE].discarded,
         "client handshake confirmed (HANDSHAKE_DONE), Initial and Handshake keys discarded");
   CHECK(!cl.failed && cl.done == nreq && cl.ok == nreq && !cl.statuses_bad,
@@ -485,9 +499,12 @@ static int run(int nreq, int loss, int reorder) {
   printf(
       "  loss %2d%% reorder %d%s%s: %d requests, %.1f simulated s, %ld datagrams (%ld lost), client cwnd %llu srtt %lld ms, "
       "request headers %.1f%% of their fields (%.1f%% at the end), max burst %d\n",
-      loss, reorder, BULK ? " bulk 1 MB, late 0.5%" : "", RETRY ? " after a Retry" : "", nreq, (NOW_NS - start) / 1e9,
-      SENT_DGRAMS, LOST_DGRAMS, (unsigned long long)cl.q.cwnd, (long long)cl.q.smoothed_rtt,
-      cl.hdr_raw ? 100.0 * (double)cl.hdr_bytes / (double)cl.hdr_raw : 0.0,
+      loss, reorder, BULK ? " bulk 1 MB, late 0.5%" : "",
+      RETRY         ? " after a Retry"
+      : RESUME_FROM ? (EXPECT_EARLY ? " 0-RTT" : " 0-RTT refused")
+                    : "",
+      nreq, (NOW_NS - start) / 1e9, SENT_DGRAMS, LOST_DGRAMS, (unsigned long long)cl.q.cwnd,
+      (long long)cl.q.smoothed_rtt, cl.hdr_raw ? 100.0 * (double)cl.hdr_bytes / (double)cl.hdr_raw : 0.0,
       cl.tail_raw ? 100.0 * (double)cl.tail_bytes / (double)cl.tail_raw : 0.0, max_burst);
   SENT_DGRAMS = LOST_DGRAMS = 0;
   quic_free(&cl.q);
@@ -539,6 +556,16 @@ int main(int argc, char **argv) {
       BULK = 1, run(40, 0, 0), BULK = 0;
       RETRY = 1, run(50, 0, 0), run(100, 2, 1), RETRY = 0; /* address validation first */
       LOSE_STATE = 1, run(60, 0, 0), run(60, 2, 1), LOSE_STATE = 0;
+      /* resumption: a ticket, a NEW_TOKEN and the server's limits saved, then 0-RTT; then the server's ticket key
+       * changes (a restart): the ticket is refused, and the 0-RTT requests go again in 1-RTT */
+      memset(&RES, 0, sizeof RES), run(30, 0, 0);
+      CHECK(RES.ticket_len && RES.early && RES.token_len && RES.max_streams_bidi, "saved: ticket %u early %d token %u",
+            RES.ticket_len, RES.early, RES.token_len);
+      quic_resume saved = RES;
+      RESUME_FROM = &saved, EXPECT_EARLY = 1;
+      run(50, 0, 0), RETRY = 1, run(50, 0, 0), RETRY = 0, run(100, 2, 1);
+      CLI_TLS.random_bytes(QX.tickets.key, sizeof QX.tickets.key), EXPECT_EARLY = 0, run(50, 0, 0);
+      RESUME_FROM = NULL;
     }
   printf("%s: %ld failures / %ld checks\n", fails ? "FAIL" : "PASS", fails, checks);
   return fails != 0;

@@ -101,8 +101,8 @@ static int find(const uint8_t *d, size_t n) {
     if (!C[i]) continue;
     if (d[0] & 0x80) {
       if (n > 6 + QUIC_SCID_LEN && d[5] == QUIC_SCID_LEN && !memcmp(d + 6, C[i]->q.scid, QUIC_SCID_LEN)) return i;
-      if (n > 6u + d[5] && d[5] == C[i]->q.odcid_len && !memcmp(d + 6, C[i]->q.odcid, d[5]))
-        return i; /* client Initial retransmits */
+      if (n > 6u + d[5] && d[5] == C[i]->q.idcid_len && !memcmp(d + 6, C[i]->q.idcid, d[5]))
+        return i; /* the client's Initials and 0-RTT, before it has our ID */
     } else if (n > 1 + QUIC_SCID_LEN && !memcmp(d + 1, C[i]->q.scid, QUIC_SCID_LEN)) {
       return i;
     }
@@ -135,6 +135,7 @@ int main(int argc, char **argv) {
   tls.sign_certificate = &sign.super;
   static quic_ctx qx;
   quic_ctx_init(&qx, &tls);
+  quic_ctx_resumption(&qx); /* session tickets, 0-RTT (only GETs go in it from our clients), NEW_TOKEN */
 
   int fd = socket(AF_INET, SOCK_DGRAM, 0);
   struct sockaddr_in a = { .sin_family = AF_INET,
@@ -178,9 +179,7 @@ int main(int argc, char **argv) {
               continue;
             }
             conn *c = calloc(1, sizeof *c);
-            int r = c ? quic_accept_from(&c->q, &qx, buf, (size_t)n, retry ? (const void *)&from : NULL, retry ? fl : 0,
-                                         now, &QCB, c)
-                      : QUIC_E_NOMEM;
+            int r = c ? quic_accept_from(&c->q, &qx, buf, (size_t)n, &from, fl, now, &QCB, c) : QUIC_E_NOMEM;
             if (r == QUIC_E_VN) {
               size_t vl = quic_version_negotiation(out, sizeof out, buf, (size_t)n);
               if (vl) sendto(fd, out, vl, 0, (struct sockaddr *)&from, fl);
