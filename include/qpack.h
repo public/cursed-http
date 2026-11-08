@@ -505,4 +505,191 @@ static inline size_t qp_enc_status(uint8_t *dst, int status) {
   return qp_enc_field(dst, (const uint8_t *)":status", 7, (const uint8_t *)v, 3, 0);
 }
 static inline size_t qp_enc_bound(size_t nlen, size_t vlen) { return nlen + vlen + 16; }
+
+/* ------------------------------- encoder with a dynamic table ------------------------------- */
+/* An HTTP/3 client's request encoder (RFC 9204): fields worth keeping (hp_enc's rules) are inserted on the encoder
+ * stream, and a field section refers to an entry once the peer's decoder has acknowledged it, or before then while
+ * the peer's SETTINGS_QPACK_BLOCKED_STREAMS allows a section that may block. Entries are evicted only once
+ * acknowledged and referenced by no unacknowledged section. The table is hp_enc's (absolute numbers k).
+ *   qp_enc_init(&e)                          no table until the peer's SETTINGS
+ *   qp_enc_settings(&e, max_cap, blocked)    the peer's QPACK_MAX_TABLE_CAPACITY and QPACK_BLOCKED_STREAMS
+ *   qp_enc_begin(&e, &s, stream_id)          a field section: then p += qp_enc_ifield(&e, &s, p, ...) per field,
+ *   n = qp_enc_end(&e, &s, lines, p, out)    and the prefix + lines (moved) at out; returns the section's length
+ *   qp_enc_feedback(&e, buf, len)            the peer's decoder stream: bytes used, or -1 (DECODER_STREAM_ERROR)
+ *   qp_enc_pending(&e), qp_enc_take(&e, out, cap)   encoder stream bytes to send */
+#ifndef QP_ENC_SECTIONS
+#define QP_ENC_SECTIONS 128 /* unacknowledged sections with dynamic references */
+#endif
+#ifndef QP_ENC_BUF
+#define QP_ENC_BUF 8192 /* encoder stream bytes not yet sent */
+#endif
+typedef struct {
+  hp_enc t;
+  uint32_t max_entries, blocked_max; /* the peer's MaxEntries (its max capacity / 32), blocked streams */
+  uint32_t krc;                      /* Known Received Count */
+  struct {
+    uint64_t sid;
+    uint32_t ric, min; /* Required Insert Count; the smallest entry referenced */
+  } sec[QP_ENC_SECTIONS];
+  int nsec;
+  uint32_t len, off; /* encoder stream bytes in buf: [off, len) unsent */
+  uint8_t buf[QP_ENC_BUF];
+} qp_enc;
+typedef struct {
+  uint64_t sid;
+  uint32_t base, ric, min;
+  uint8_t refs, may_block; /* dynamic references allowed; to entries not yet acknowledged too */
+} qp_esec;
+
+static inline void qp_enc_init(qp_enc *e) {
+  hp_enc_init(&e->t, 0);
+  e->max_entries = e->blocked_max = e->krc = 0, e->nsec = 0, e->len = e->off = 0;
+}
+static inline uint8_t *qp__ebuf(qp_enc *e, size_t need) { /* room for an instruction, or NULL */
+  if (e->off == e->len) e->off = e->len = 0;
+  if (e->len + need > sizeof e->buf && e->off)
+    memmove(e->buf, e->buf + e->off, e->len - e->off), e->len -= e->off, e->off = 0;
+  return e->len + need <= sizeof e->buf ? e->buf + e->len : NULL;
+}
+static inline void qp_enc_settings(qp_enc *e, uint64_t max_cap, uint64_t blocked) {
+  uint32_t cap = max_cap < HP_ENC_TABLE ? (uint32_t)max_cap : HP_ENC_TABLE;
+  e->max_entries = (uint32_t)(max_cap / 32 < 0xffffffffu ? max_cap / 32 : 0xffffffffu);
+  e->blocked_max = blocked < 0xffff ? (uint32_t)blocked : 0xffff;
+  if (!cap) return;
+  uint8_t *p = qp__ebuf(e, 8);
+  if (!p) return;
+  e->len = (uint32_t)(qp__put_int(p, 0x20, 5, cap) - e->buf); /* Set Dynamic Table Capacity */
+  e->t.cap = e->t.want = e->t.low = cap;
+}
+static inline size_t qp_enc_pending(const qp_enc *e) { return e->len - e->off; }
+static inline size_t qp_enc_take(qp_enc *e, uint8_t *out, size_t cap) {
+  size_t m = e->len - e->off < cap ? e->len - e->off : cap;
+  memcpy(out, e->buf + e->off, m), e->off += (uint32_t)m;
+  return m;
+}
+/* sections whose Required Insert Count is not yet known received: those that may still block */
+static inline uint32_t qp__eblocking(const qp_enc *e) {
+  uint32_t n = 0;
+  for (int i = 0; i < e->nsec; i++) n += e->sec[i].ric > e->krc;
+  return n;
+}
+static inline void qp_enc_begin(qp_enc *e, qp_esec *s, uint64_t sid) {
+  s->sid = sid, s->base = e->t.ins, s->ric = 0, s->min = UINT32_MAX;
+  s->refs = e->t.cap && e->nsec < QP_ENC_SECTIONS;
+  s->may_block = s->refs && qp__eblocking(e) < e->blocked_max;
+}
+/* may entry k be evicted: acknowledged, and referenced by no unacknowledged section (nor this one) */
+static inline int qp__eevictable(const qp_enc *e, const qp_esec *s, uint32_t k) {
+  if (k >= e->krc || k >= s->min) return 0;
+  for (int i = 0; i < e->nsec; i++)
+    if (k >= e->sec[i].min) return 0;
+  return 1;
+}
+/* room for an entry of sz bytes, evicting what may be evicted; 0 if there is none */
+static inline int qp__eroom(qp_enc *e, const qp_esec *s, uint32_t sz) {
+  uint32_t size = e->t.size, k = e->t.gone, live = e->t.ins - e->t.gone;
+  while (size + sz > e->t.cap || live == HP_ENC_N) { /* can enough be evicted? */
+    if (k == e->t.ins || !qp__eevictable(e, s, k)) return 0;
+    size -= (uint32_t)e->t.nl[k % HP_ENC_N] + e->t.vl[k % HP_ENC_N] + 32, k++, live--;
+  }
+  while (e->t.gone < k) hp__eevict(&e->t);
+  return 1;
+}
+static inline void qp__eref(qp_esec *s, uint32_t k) {
+  if (k + 1 > s->ric) s->ric = k + 1;
+  if (k < s->min) s->min = k;
+}
+static inline int qp__eusable(const qp_enc *e, const qp_esec *s, uint32_t k) {
+  return k != UINT32_MAX && s->refs && (k < e->krc || s->may_block);
+}
+static inline size_t qp_enc_ifield(qp_enc *e, qp_esec *s, uint8_t *dst, const uint8_t *name, size_t nl,
+                                   const uint8_t *val, size_t vl, int never) {
+  int name_only, si = qp__static_find(name, nl, val, vl, &name_only);
+  uint8_t *p = dst;
+  if (si >= 0 && !name_only && !never) return (size_t)(qp__put_int(p, 0xc0, 6, (uint32_t)si) - dst);
+  if (!e->t.cap) return qp_enc_field(dst, name, nl, val, vl, never);
+  int idx = hp__eindexing(name, nl, vl, e->t.cap, &never);
+  uint32_t nh = hp__ehash(0, name, nl), fh = hp__ehash(nh, val, vl);
+  if (!never) {
+    uint32_t k = hp__efind(&e->t, e->t.fmap, e->t.fh, fh, name, nl, val, vl);
+    if (k != UINT32_MAX) idx = 0; /* in the table already (maybe not yet acknowledged): never insert it twice */
+    if (qp__eusable(e, s, k)) {
+      qp__eref(s, k);
+      return (size_t)((k < s->base ? qp__put_int(p, 0x80, 6, s->base - 1 - k) : qp__put_int(p, 0x10, 4, k - s->base)) -
+                      dst); /* indexed (dynamic) / indexed with post-base index */
+    }
+  }
+  if (idx && qp__eroom(e, s, (uint32_t)(nl + vl + 32))) {
+    uint8_t *q = qp__ebuf(e, nl + vl + 24);
+    if (q) { /* Insert With Name Reference (static), or With Literal Name */
+      uint8_t *w = si >= 0 ? qp__put_int(q, 0xc0, 6, (uint32_t)si) : qp__put_str(q, 5, 0x40, name, nl);
+      w = qp__put_str(w, 7, 0x00, val, vl);
+      e->len = (uint32_t)(w - e->buf);
+      hp__einsert(&e->t, name, nl, val, vl, nh, fh);
+      uint32_t k = e->t.ins - 1;
+      if (s->refs && s->may_block) { /* refer to it now: the section may block until the insert arrives */
+        qp__eref(s, k);
+        return (size_t)(qp__put_int(p, 0x10, 4, k - s->base) - dst);
+      }
+    }
+  }
+  /* a literal: its name from the static table, an entry (looked up after the insert's evictions), or spelled out */
+  uint32_t nk = si >= 0 ? UINT32_MAX : hp__efind(&e->t, e->t.nmap, e->t.nh, nh, name, nl, NULL, 0);
+  if (si >= 0) p = qp__put_int(p, (uint8_t)(0x50 | (never ? 0x20 : 0)), 4, (uint32_t)si);
+  else if (qp__eusable(e, s, nk)) {
+    qp__eref(s, nk);
+    p = nk < s->base ? qp__put_int(p, (uint8_t)(0x40 | (never ? 0x20 : 0)), 4, s->base - 1 - nk)
+                     : qp__put_int(p, (uint8_t)(never ? 0x08 : 0x00), 3, nk - s->base); /* post-base name */
+  } else p = qp__put_str(p, 3, (uint8_t)(0x20 | (never ? 0x10 : 0)), name, nl);
+  return (size_t)(qp__put_str(p, 7, 0x00, val, vl) - dst);
+}
+/* the field section: its prefix at out, then the lines [lines, end) (out may overlap them, below lines) */
+static inline size_t qp_enc_end(qp_enc *e, qp_esec *s, const uint8_t *lines, const uint8_t *end, uint8_t *out) {
+  uint8_t pre[16], *q = pre;
+  if (!s->ric) *q++ = 0, *q++ = 0;
+  else {
+    q = qp__put_int(q, 0x00, 8, s->ric % (2 * e->max_entries) + 1);
+    q = s->base >= s->ric ? qp__put_int(q, 0x00, 7, s->base - s->ric) : qp__put_int(q, 0x80, 7, s->ric - s->base - 1);
+    e->sec[e->nsec].sid = s->sid, e->sec[e->nsec].ric = s->ric, e->sec[e->nsec].min = s->min, e->nsec++;
+  }
+  size_t pl = (size_t)(q - pre), ll = (size_t)(end - lines);
+  memmove(out + pl, lines, ll), memcpy(out, pre, pl);
+  return pl + ll;
+}
+static inline void qp__edrop(qp_enc *e, int i) { e->sec[i] = e->sec[--e->nsec]; }
+static inline int qp_enc_feedback(qp_enc *e, const uint8_t *buf, size_t len) {
+  size_t pos = 0;
+  while (pos < len) {
+    const uint8_t *p = buf + pos;
+    uint8_t b = *p;
+    uint32_t v;
+    if (b & 0x80) { /* Section Acknowledgment */
+      if (qp__int(&p, buf + len, 7, &v)) {
+        if (len - pos >= 6) return -1; /* too big, not incomplete */
+        break;
+      }
+      int i = 0;
+      while (i < e->nsec && e->sec[i].sid != v) i++;
+      if (i == e->nsec) return -1; /* no section of that stream refers to the table */
+      if (e->sec[i].ric > e->krc) e->krc = e->sec[i].ric;
+      qp__edrop(e, i);
+    } else if (b & 0x40) { /* Stream Cancellation */
+      if (qp__int(&p, buf + len, 6, &v)) {
+        if (len - pos >= 6) return -1; /* too big, not incomplete */
+        break;
+      }
+      for (int i = e->nsec - 1; i >= 0; i--)
+        if (e->sec[i].sid == v) qp__edrop(e, i);
+    } else { /* Insert Count Increment */
+      if (qp__int(&p, buf + len, 6, &v)) {
+        if (len - pos >= 6) return -1; /* too big, not incomplete */
+        break;
+      }
+      if (!v || v > e->t.ins - e->krc) return -1;
+      e->krc += v;
+    }
+    pos = (size_t)(p - buf);
+  }
+  return (int)pos;
+}
 #endif

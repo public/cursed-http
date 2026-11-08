@@ -489,14 +489,33 @@ static inline uint32_t hp__efind(const hp_enc *e, const uint16_t *map, const uin
     if (e->nl[s] == nl && !memcmp(d, n, nl) && (!v || (e->vl[s] == vl && !memcmp(d + nl, v, vl)))) return k;
   }
 }
+/* nghttp2's rules: whether to index name: value in a table of cap bytes; *never becomes 1 for authorization and
+ * a short cookie */
+static inline int hp__eindexing(const uint8_t *name, size_t nl, size_t vl, uint32_t cap, int *never) {
+  int si = hp_name_index(name, nl);
+  if (!*never) *never = si == 23 || (si == 32 && vl < 20); /* authorization; a short cookie */
+  return !*never && nl + vl + 32 <= cap * 3 / 4 && si != 4 && si != 5 && si != 21 && si != 28 && si != 34 && si != 40 &&
+         si != 41 && si != 46 && si != 55; /* :path, age, content-length, etag, if-*, location, set-cookie */
+}
+/* add an entry (room made by the caller): it becomes absolute number e->ins - 1 */
+static inline void hp__einsert(hp_enc *e, const uint8_t *name, size_t nl, const uint8_t *val, size_t vl, uint32_t nh,
+                               uint32_t fh) {
+  if (e->dhi + nl + vl > sizeof e->data) { /* keep the bytes contiguous: compact at the buffer's end */
+    memmove(e->data, e->data + e->dlo, e->dhi - e->dlo);
+    for (uint32_t k = e->gone; k < e->ins; k++) e->off[k % HP_ENC_N] -= e->dlo;
+    e->dhi -= e->dlo, e->dlo = 0;
+  }
+  uint32_t s = e->ins % HP_ENC_N;
+  memcpy(e->data + e->dhi, name, nl), memcpy(e->data + e->dhi + nl, val, vl);
+  e->off[s] = e->dhi, e->nl[s] = (uint16_t)nl, e->vl[s] = (uint16_t)vl, e->fh[s] = fh, e->nh[s] = nh;
+  e->dhi += (uint32_t)(nl + vl), e->size += (uint32_t)(nl + vl + 32), e->ins++;
+  hp__emap_put(e->fmap, e->fh, s), hp__emap_put(e->nmap, e->nh, s);
+}
 static inline size_t hp_enc_ifield(hp_enc *e, uint8_t *dst, const uint8_t *name, size_t nl, const uint8_t *val,
                                    size_t vl, int never) {
   int si = hp_name_index(name, nl);
   uint8_t *p = dst;
-  if (!never) never = si == 23 || (si == 32 && vl < 20); /* authorization; a short cookie */
-  int idx = !never && nl + vl + 32 <= e->cap * 3 / 4 && si != 4 && si != 5 && si != 21 && si != 28 && si != 34 &&
-            si != 40 && si != 41 && si != 46 &&
-            si != 55; /* :path, age, content-length, etag, if-*, location, set-cookie */
+  int idx = hp__eindexing(name, nl, vl, e->cap, &never);
   uint32_t nh = e->cap ? hp__ehash(0, name, nl) : 0, fh = e->cap ? hp__ehash(nh, val, vl) : 0;
   if (e->cap && !never) { /* (a never-indexed field stays a literal, flag and all: RFC 7541 §6.2.3) */
     uint32_t k = hp__efind(e, e->fmap, e->fh, fh, name, nl, val, vl);
@@ -511,20 +530,11 @@ static inline size_t hp_enc_ifield(hp_enc *e, uint8_t *dst, const uint8_t *name,
   else if (nref) p = hp__put_int(p, never ? 0x10 : 0x00, 4, nref);
   else *p++ = never ? 0x10 : 0x00, p = hp__put_str(p, name, nl);
   p = hp__put_str(p, val, vl);
-  if (idx) { /* insert: evict to make room, keep the bytes contiguous (compact when the buffer's end is reached) */
+  if (idx) { /* insert: evict to make room */
     uint32_t sz = (uint32_t)(nl + vl + 32);
     while (e->size + sz > e->cap) hp__eevict(e);
     if (e->ins - e->gone == HP_ENC_N) hp__eevict(e);
-    if (e->dhi + nl + vl > sizeof e->data) {
-      memmove(e->data, e->data + e->dlo, e->dhi - e->dlo);
-      for (uint32_t k = e->gone; k < e->ins; k++) e->off[k % HP_ENC_N] -= e->dlo;
-      e->dhi -= e->dlo, e->dlo = 0;
-    }
-    uint32_t s = e->ins % HP_ENC_N;
-    memcpy(e->data + e->dhi, name, nl), memcpy(e->data + e->dhi + nl, val, vl);
-    e->off[s] = e->dhi, e->nl[s] = (uint16_t)nl, e->vl[s] = (uint16_t)vl, e->fh[s] = fh, e->nh[s] = nh;
-    e->dhi += (uint32_t)(nl + vl), e->size += sz, e->ins++;
-    hp__emap_put(e->fmap, e->fh, s), hp__emap_put(e->nmap, e->nh, s);
+    hp__einsert(e, name, nl, val, vl, nh, fh);
   }
   return (size_t)(p - dst);
 }

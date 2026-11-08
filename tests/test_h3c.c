@@ -224,8 +224,9 @@ typedef struct {
   quic_conn q;
   h3_conn h;
   int ready, nreq, submitted, done, ok, failed, statuses_bad, spilled, spill_waits;
-  int64_t pending_sid; /* opened, h3_submit said AGAIN */
-  long body, want_body;
+  int64_t pending_sid;                      /* opened, h3_submit said AGAIN */
+  long body, want_body, hdr_bytes, hdr_raw; /* request header frames sent; their fields' bytes */
+  long tail_bytes, tail_raw;                /* the same for the last quarter of the requests */
   int kind[4096];
   long want_s[4096], got_s[4096];
   size_t upload[4096];
@@ -291,14 +292,15 @@ static void submit_more(client *cl) {
     rq.scheme = (const uint8_t *)"https", rq.scheme_len = 5, rq.authority = (const uint8_t *)"localhost",
     rq.authority_len = 9;
     rq.path = (const uint8_t *)paths[(sid >> 2) % 4096], rq.path_len = (uint32_t)strlen(path);
-    /* every 7th request carries a 3000-byte cookie: a header frame beyond H3_HDR_MAX, from the spill area */
-    static char cookie[3001];
+    /* every 7th request carries a 1200-byte cookie: a header frame beyond H3_HDR_MAX (from the spill area) until
+     * the table has it */
+    static char cookie[1201];
     if (!cookie[0])
-      for (int i = 0; i < 3000; i++) cookie[i] = i % 50 == 49 ? ';' : (char)('a' + i % 26);
+      for (int i = 0; i < 1200; i++) cookie[i] = i % 50 == 49 ? ';' : (char)('a' + i % 26);
     static const hp_field ua = {
       (const uint8_t *)"user-agent", (const uint8_t *)"cursed-http-test", 10, 16, 0, 0, 0, 0
     };
-    hp_field fl[2] = { ua, { (const uint8_t *)"cookie", (const uint8_t *)cookie, 6, 3000, 0, 0, 0, 1 } };
+    hp_field fl[2] = { ua, { (const uint8_t *)"cookie", (const uint8_t *)cookie, 6, 1200, 0, 0, 0, 0 } };
     int big_hdr = cl->submitted % 7 == 3;
     rq.fields = fl, rq.nfields = big_hdr ? 2 : 1;
     cl->kind[(sid >> 2) % 4096] = k;
@@ -313,6 +315,10 @@ static void submit_more(client *cl) {
       return;
     }
     cl->spilled += big_hdr, cl->submitted++;
+    long hb = h3__find(&cl->h, (uint64_t)sid)->hdr_len,
+         hr = 7 + (long)strlen(m) + 7 + 5 + 10 + 9 + 5 + (long)strlen(path) + 10 + 16 + (big_hdr ? 6 + 1200 : 0);
+    cl->hdr_bytes += hb, cl->hdr_raw += hr;
+    if (cl->submitted > cl->nreq * 3 / 4) cl->tail_bytes += hb, cl->tail_raw += hr;
   }
 }
 static int64_t cq_on_stream(quic_conn *q, uint64_t sid, uint64_t off, const uint8_t *d, size_t len, int fin, void *u) {
@@ -409,7 +415,12 @@ static int run(int nreq, int loss, int reorder) {
         "client handshake confirmed (HANDSHAKE_DONE), Initial and Handshake keys discarded");
   CHECK(!cl.failed && cl.done == nreq && cl.ok == nreq && !cl.statuses_bad,
         "loss %d%%: %d/%d done, %d right statuses, %d wrong", loss, cl.done, nreq, cl.ok, cl.statuses_bad);
-  CHECK(nreq < 20 || cl.spilled >= nreq / 7, "requests with big header frames (spilled): %d", cl.spilled);
+  CHECK(nreq < 20 || cl.spilled >= nreq / 7 - 1, "requests with big header frames (spilled): %d", cl.spilled);
+  /* once the server has acknowledged the table's entries, a request is its :path and a few one-byte references (in
+   * runs long enough, and with loss low enough, for acknowledgements to arrive before the last quarter is sent) */
+  CHECK(nreq < 100 || loss > 2 || BULK || (cl.h.qe.krc > 0 && cl.tail_bytes * 3 < cl.tail_raw),
+        "QPACK: the server acknowledged %u inserts; the last requests' headers took %ld bytes for %ld bytes of fields",
+        cl.h.qe.krc, cl.tail_bytes, cl.tail_raw);
   CHECK(cl.body == cl.want_body, "loss %d%%: body %ld want %ld", loss, cl.body, cl.want_body);
   CHECK(!cl.q.closing && !cl.q.draining, "client closed the connection: code 0x%llx frame 0x%llx (h3 0x%llx)",
         (unsigned long long)cl.q.close_code, (unsigned long long)cl.q.close_frame, (unsigned long long)h3_error(&cl.h));
@@ -418,9 +429,12 @@ static int run(int nreq, int loss, int reorder) {
   CHECK(sv.errors == 0 && cl.q.undecryptable == 0, "server stream errors %ld, client undecryptable %llu", sv.errors,
         (unsigned long long)cl.q.undecryptable);
   printf(
-      "  loss %2d%% reorder %d%s: %d requests, %.1f simulated s, %ld datagrams (%ld lost), client cwnd %llu srtt %lld ms\n",
+      "  loss %2d%% reorder %d%s: %d requests, %.1f simulated s, %ld datagrams (%ld lost), client cwnd %llu srtt %lld ms, "
+      "request headers %.1f%% of their fields (%.1f%% at the end)\n",
       loss, reorder, BULK ? " bulk 1 MB, late 0.5%" : "", nreq, (NOW_NS - start) / 1e9, SENT_DGRAMS, LOST_DGRAMS,
-      (unsigned long long)cl.q.cwnd, (long long)cl.q.smoothed_rtt);
+      (unsigned long long)cl.q.cwnd, (long long)cl.q.smoothed_rtt,
+      cl.hdr_raw ? 100.0 * (double)cl.hdr_bytes / (double)cl.hdr_raw : 0.0,
+      cl.tail_raw ? 100.0 * (double)cl.tail_bytes / (double)cl.tail_raw : 0.0);
   SENT_DGRAMS = LOST_DGRAMS = 0;
   quic_free(&cl.q);
   if (accepted) quic_free(&sv.q);

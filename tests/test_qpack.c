@@ -312,10 +312,121 @@ static void test_encoder(void) {
   printf("encoder vs nghttp3 decoder: %s\n", fails == before ? "ok" : "FAILED");
 }
 
+/* qp_enc (the client's indexing encoder) against nghttp3's decoder: request-like streams of sections from a pool of
+ * fields, the peer's table capacity and blocked-streams limit random per connection. The encoder stream and the
+ * decoder's feedback both arrive late (a few sections behind), some sections are cancelled before they arrive, and
+ * a section is decoded only once the inserts it needs have arrived: the sections waiting so must never exceed the
+ * peer's blocked-streams limit. Every decoded section must equal its fields. */
+typedef struct {
+  int64_t sid;
+  uint8_t *p;
+  size_t n;
+  uint32_t ric;
+  int k;
+  tf t[16];
+} qsec;
+static void test_enc_table(void) {
+  long before = fails, sections = 0, dyn = 0, bytes = 0, raw = 0, cancelled = 0, waited = 0;
+  const nghttp3_mem *mem = nghttp3_mem_default();
+  static qp_enc E;
+  static const char *names[] = { "user-agent", "accept",        "accept-language", "cookie",   "referer",
+                                 "x-trace-id", "authorization", ":authority",      "priority", "x-big" };
+  for (long c = 0; c < 150 * scale(); c++) {
+    uint32_t cap = rnd() % 3 ? 4096 : (uint32_t)(rnd() % 4097), blocked = (uint32_t[]){ 0, 1, 4, 100 }[rnd() % 4];
+    nghttp3_qpack_decoder *dec;
+    nghttp3_qpack_decoder_new(&dec, cap, blocked, mem);
+    qp_enc_init(&E);
+    int settings_at = (int)(rnd() % 3); /* sections before the peer's SETTINGS: static only */
+    tf pool[30];
+    for (int i = 0; i < 30; i++) {
+      const char *n = names[rnd() % (sizeof names / sizeof names[0])];
+      pool[i].nl = strlen(n), memcpy(pool[i].n, n, pool[i].nl);
+      pool[i].vl = !strcmp(n, "x-big") ? 200 + rnd() % 90 : rnd() % 4 ? 1 + rnd() % 100 : rnd() % 25;
+      for (size_t q = 0; q < pool[i].vl; q++) pool[i].v[q] = (char)(' ' + 1 + rnd() % 94);
+      pool[i].flags = rnd() % 12 == 0;
+    }
+    static qsec wait[64];
+    int nwait = 0;
+    static uint8_t es[1 << 16], fb[1 << 14];
+    size_t esn = 0, fbn = 0;
+    for (int r = 0; r < 80 && fails == before; r++) {
+      if (r == settings_at) qp_enc_settings(&E, cap, blocked);
+      qsec *q = &wait[nwait];
+      q->sid = 4 * r, q->k = 1 + (int)(rnd() % 12);
+      static uint8_t blk[1 << 15];
+      qp_esec st;
+      qp_enc_begin(&E, &st, (uint64_t)q->sid);
+      uint8_t *p = blk + 8;
+      for (int i = 0; i < q->k; i++) {
+        q->t[i] = pool[rnd() % 30];
+        if (rnd() % 8 == 0)
+          for (size_t z = 0; z < q->t[i].vl; z++) q->t[i].v[z] = (char)(' ' + 1 + rnd() % 94);
+        size_t w = qp_enc_ifield(&E, &st, p, (uint8_t *)q->t[i].n, q->t[i].nl, (uint8_t *)q->t[i].v, q->t[i].vl,
+                                 q->t[i].flags);
+        CHECK(w <= qp_enc_bound(q->t[i].nl, q->t[i].vl), "field longer than qp_enc_bound");
+        raw += (long)(q->t[i].nl + q->t[i].vl), p += w;
+      }
+      q->n = qp_enc_end(&E, &st, blk + 8, p, blk), q->ric = st.ric;
+      q->p = malloc(q->n), memcpy(q->p, blk, q->n), nwait++;
+      bytes += (long)q->n, sections++, dyn += q->ric != 0;
+      esn += qp_enc_take(&E, es + esn, sizeof es - esn);
+      CHECK(!qp_enc_pending(&E), "encoder stream drained");
+      /* the network: maybe deliver the encoder stream, maybe the feedback; then every section that can be decoded */
+      if (rnd() % 3 == 0 || nwait > 40) {
+        nghttp3_ssize u = nghttp3_qpack_decoder_read_encoder(dec, es, esn);
+        CHECK(u == (nghttp3_ssize)esn, "nghttp3 rejected our encoder stream: %d (%s)", (int)u,
+              nghttp3_strerror((int)u));
+        esn = 0;
+      }
+      if (rnd() % 4 == 0 && nwait > 1) { /* the peer gives up on a section before reading it */
+        int i = (int)(rnd() % (unsigned)nwait);
+        nghttp3_qpack_decoder_cancel_stream(dec, wait[i].sid);
+        free(wait[i].p), wait[i] = wait[--nwait], cancelled++;
+      }
+      uint64_t icnt = nghttp3_qpack_decoder_get_icnt(dec);
+      int blockedn = 0;
+      for (int i = 0; i < nwait; i++) blockedn += wait[i].ric > icnt;
+      CHECK((uint32_t)blockedn <= blocked, "conn %ld: %d sections wait for inserts, the peer allows %u", c, blockedn,
+            blocked);
+      waited += blockedn;
+      for (int i = 0; i < nwait;) {
+        if (wait[i].ric > icnt) {
+          i++;
+          continue;
+        }
+        int kk = n3_section(dec, wait[i].sid, wait[i].p, wait[i].n);
+        int ok = kk == wait[i].k;
+        for (int f = 0; ok && f < kk; f++)
+          ok = RF[f].nl == wait[i].t[f].nl && !memcmp(RF[f].n, wait[i].t[f].n, RF[f].nl) &&
+               RF[f].vl == wait[i].t[f].vl && !memcmp(RF[f].v, wait[i].t[f].v, RF[f].vl);
+        CHECK(ok, "conn %ld section %lld: nghttp3 decoded %d of %d fields", c, (long long)wait[i].sid, kk, wait[i].k);
+        free(wait[i].p), wait[i] = wait[--nwait];
+      }
+      nghttp3_buf db;
+      db.begin = db.pos = db.last = fb + fbn, db.end = fb + sizeof fb;
+      if (nghttp3_qpack_decoder_get_decoder_streamlen2(dec) <= sizeof fb - fbn) {
+        nghttp3_qpack_decoder_write_decoder(dec, &db);
+        fbn += (size_t)(db.last - db.pos);
+      }
+      if (rnd() % 2 && fbn) {
+        int u = qp_enc_feedback(&E, fb, fbn);
+        CHECK(u == (int)fbn, "our encoder rejected nghttp3's decoder stream (%d of %zu bytes)", u, fbn);
+        fbn = 0;
+      }
+    }
+    for (int i = 0; i < nwait; i++) free(wait[i].p);
+    nghttp3_qpack_decoder_del(dec);
+  }
+  printf("indexing encoder vs nghttp3 decoder: %s (%ld sections, %ld with dynamic references, %ld cancelled, %ld "
+         "waits for inserts; %.1f%% of the field bytes)\n",
+         fails == before ? "ok" : "FAILED", sections, dyn, cancelled, waited, 100.0 * (double)bytes / (double)raw);
+}
+
 int main(void) {
   test_rfc();
   test_live();
   test_encoder();
+  test_enc_table();
   printf("%s: %ld failures / %ld checks\n", fails ? "FAILED" : "PASS", fails, checks);
   return fails != 0;
 }

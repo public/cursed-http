@@ -149,6 +149,7 @@ struct h3_conn {
   uint32_t spill_used, spill_users; /* bytes allocated in spill (reset once no stream holds any), holders */
   qp_dec qd;
   h3_stream s[H3_MAX_STREAMS];
+  qp_enc qe; /* a client's request encoder (a server's has no table: responses use the static table) */
 #if H3_CLIENT_SPILL
   uint8_t spill[H3_CLIENT_SPILL];
 #endif
@@ -213,6 +214,7 @@ static inline void h3_init(h3_conn *c, const h3_callbacks *cb, void *user, uint6
   c->out_id[0] = ctrl_id, c->out_id[1] = enc_id, c->out_id[2] = dec_id;
   c->in_id[0] = c->in_id[1] = c->in_id[2] = -1;
   qp_dec_init(&c->qd, H3_QPACK_CAP);
+  qp_enc_init(&c->qe);
   for (int i = 0; i < H3_MAX_STREAMS; i++) c->s[i].active = 0;
   /* control stream: type 0x00, then SETTINGS */
   uint8_t st[32], *q = st;
@@ -451,7 +453,7 @@ static inline int h3__control(h3_conn *c, const uint8_t *buf, size_t len) {
       const uint8_t *p = buf + pos + hl, *e = p + flen;
       if (type == H3F_SETTINGS) {
         if (c->got_settings) return h3__fail(c, H3_FRAME_UNEXPECTED);
-        uint64_t seen[16];
+        uint64_t seen[16], qcap = 0, qblocked = 0;
         int nseen = 0;
         while (p < e) {
           uint64_t id, v;
@@ -462,9 +464,12 @@ static inline int h3__control(h3_conn *c, const uint8_t *buf, size_t len) {
           for (int k = 0; k < nseen; k++)
             if (seen[k] == id) return h3__fail(c, H3_SETTINGS_ERROR);
           if (nseen < 16) seen[nseen++] = id;
-          p += x + y; /* the peer's QPACK limits only matter to our encoder, which never indexes */
+          if (id == 0x01) qcap = v; /* QPACK_MAX_TABLE_CAPACITY */
+          if (id == 0x07) qblocked = v;
+          p += x + y;
         }
         c->got_settings = 1;
+        if (c->client) qp_enc_settings(&c->qe, qcap, qblocked); /* a server's encoder keeps to the static table */
       } else {
         uint64_t v;
         int x = h3__vi(p, e, &v);
@@ -488,16 +493,8 @@ static inline int h3__control(h3_conn *c, const uint8_t *buf, size_t len) {
   return (int)pos;
 }
 static inline int h3__decoder_stream(h3_conn *c, const uint8_t *buf, size_t len) {
-  size_t pos = 0;
-  while (pos < len) { /* our encoder never inserts: only Stream Cancellation is acceptable */
-    uint8_t b = buf[pos];
-    const uint8_t *p = buf + pos;
-    uint32_t v;
-    if ((b & 0xc0) != 0x40) return h3__fail(c, QPACK_DECODER_STREAM_ERROR);
-    if (qp__int(&p, buf + len, 6, &v)) break;
-    pos = (size_t)(p - buf);
-  }
-  return (int)pos;
+  int r = qp_enc_feedback(&c->qe, buf, len); /* (a server's encoder has no table: only cancellations are valid) */
+  return r < 0 ? h3__fail(c, QPACK_DECODER_STREAM_ERROR) : r;
 }
 
 static inline int h3_recv(h3_conn *c, h3_scratch *sc, uint64_t sid, uint64_t offset, const uint8_t *buf, size_t len,
@@ -606,18 +603,20 @@ static inline int h3_submit(h3_conn *c, uint64_t sid, const h_request *rq, const
     return H3_E_TOO_BIG;
 #endif
   }
-  uint8_t *p = blk + 16, *e = blk + 16 + need;
-  p += qp_enc_prefix(p);
-  p += qp_enc_field(p, (const uint8_t *)":method", 7, rq->method, rq->method_len, 0);
-  if (rq->scheme) p += qp_enc_field(p, (const uint8_t *)":scheme", 7, rq->scheme, rq->scheme_len, 0);
-  if (rq->authority) p += qp_enc_field(p, (const uint8_t *)":authority", 10, rq->authority, rq->authority_len, 0);
-  if (rq->path) p += qp_enc_field(p, (const uint8_t *)":path", 5, rq->path, rq->path_len, 0);
+  /* the field lines 4 bytes further in, so the prefix (known once they are) goes in front of them */
+  uint8_t *lines = blk + 20, *p = lines;
+  qp_esec es;
+  qp_enc_begin(&c->qe, &es, sid);
+  p += qp_enc_ifield(&c->qe, &es, p, (const uint8_t *)":method", 7, rq->method, rq->method_len, 0);
+  if (rq->scheme) p += qp_enc_ifield(&c->qe, &es, p, (const uint8_t *)":scheme", 7, rq->scheme, rq->scheme_len, 0);
+  if (rq->authority)
+    p += qp_enc_ifield(&c->qe, &es, p, (const uint8_t *)":authority", 10, rq->authority, rq->authority_len, 0);
+  if (rq->path) p += qp_enc_ifield(&c->qe, &es, p, (const uint8_t *)":path", 5, rq->path, rq->path_len, 0);
   for (int i = 0; i < rq->nfields; i++) {
     const hp_field *f = &rq->fields[i];
-    p += qp_enc_field(p, f->name, f->nlen, f->value, f->vlen, f->never);
+    p += qp_enc_ifield(&c->qe, &es, p, f->name, f->nlen, f->value, f->vlen, f->never);
   }
-  (void)e;
-  size_t bl = (size_t)(p - (blk + 16));
+  size_t bl = qp_enc_end(&c->qe, &es, lines, p, blk + 16);
   uint8_t hdr[16], *q = h3__put_vi(h3__put_vi(hdr, H3F_HEADERS), bl);
   size_t hl = (size_t)(q - hdr);
   if (blk == small && hl + bl > sizeof s->hdr) return H3_E_TOO_BIG; /* (need bounds it: not reached) */
@@ -672,7 +671,7 @@ static inline int h3__has_out(const h3_conn *c, const h3_stream *s) {
 /* does stream sid have output? (O(1) on average, for a transport's per-stream check) */
 static inline int h3_stream_wants(h3_conn *c, uint64_t sid) {
   if (sid == c->out_id[0]) return c->ctrl_off < c->ctrl_len;
-  if (sid == c->out_id[1]) return !c->type_sent[0];
+  if (sid == c->out_id[1]) return !c->type_sent[0] || qp_enc_pending(&c->qe);
   if (sid == c->out_id[2]) return !c->type_sent[1] || c->qd.fb_len || c->qd.inserted > c->qd.known;
   h3_stream *s = h3__find(c, sid);
   return s && h3__has_out(c, s);
@@ -680,7 +679,7 @@ static inline int h3_stream_wants(h3_conn *c, uint64_t sid) {
 static inline int h3_pending(h3_conn *c, uint64_t *sids, int max) {
   int n = 0;
   if (c->ctrl_off < c->ctrl_len && n < max) sids[n++] = c->out_id[0];
-  if (!c->type_sent[0] && n < max) sids[n++] = c->out_id[1];
+  if ((!c->type_sent[0] || qp_enc_pending(&c->qe)) && n < max) sids[n++] = c->out_id[1];
   if ((!c->type_sent[1] || c->qd.fb_len || c->qd.inserted > c->qd.known) && n < max) sids[n++] = c->out_id[2];
   /* the queued slots, round-robin from rr: those at or after it, then those before it */
   uint32_t start = c->rr % H3_MAX_STREAMS;
@@ -706,9 +705,9 @@ static inline size_t h3_stream_send(h3_conn *c, uint64_t sid, uint8_t *out, size
     return m;
   }
   if (sid == c->out_id[1]) {
-    if (c->type_sent[0] || !cap) return 0;
-    out[0] = 0x02, c->type_sent[0] = 1;
-    return 1;
+    size_t w = 0;
+    if (!c->type_sent[0] && cap) out[w++] = 0x02, c->type_sent[0] = 1;
+    return w + qp_enc_take(&c->qe, out + w, cap - w); /* inserts */
   }
   if (sid == c->out_id[2]) {
     size_t w = 0;

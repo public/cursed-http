@@ -405,6 +405,7 @@ typedef struct {
   quic_conn q;
   h3_conn h;
   int ready, nreq, submitted, done, ok, failed, statuses_bad;
+  long hdr_bytes, hdr_tail; /* request header frames: all, and the last quarter's */
   long body, want_body;
   int kind[4096];
   long want_s[4096], got_s[4096];
@@ -480,7 +481,9 @@ static void submit_more(client *cl) {
       cl->failed = 1;
       return;
     }
-    cl->submitted++;
+    long hb = h3__find(&cl->h, (uint64_t)sid)->hdr_len;
+    cl->hdr_bytes += hb, cl->submitted++;
+    if (cl->submitted > cl->nreq * 3 / 4) cl->hdr_tail += hb;
   }
 }
 static int64_t cq_on_stream(quic_conn *q, uint64_t sid, uint64_t off, const uint8_t *d, size_t len, int fin, void *u) {
@@ -591,10 +594,15 @@ static int run(int nreq, int loss, int reorder) {
   CHECK(sv.failed == 0 && (reorder ? cl.q.undecryptable * 20 <= (uint64_t)SENT_DGRAMS : cl.q.undecryptable == 0),
         "server failures %ld, client undecryptable %llu of %ld datagrams (duplicates injected %ld)", sv.failed,
         (unsigned long long)cl.q.undecryptable, SENT_DGRAMS, DUPS_TO_CLI);
+  /* nghttp3's decoder takes a 4096-byte table and 100 blocked streams: inserts are referenced at once (once its
+   * SETTINGS are in: a run's first 50 requests go before) */
+  int tailn = nreq - nreq * 3 / 4;
+  CHECK(nreq <= 50 || loss > 2 || (cl.h.qe.t.ins > 0 && cl.hdr_tail <= 16L * tailn),
+        "QPACK: %u inserts, the last requests' headers %.1f bytes each", cl.h.qe.t.ins, (double)cl.hdr_tail / tailn);
   printf("  ngtcp2 server, loss %2d%% reorder %d: %d requests, %.1f simulated s, %ld datagrams (%ld lost), client cwnd "
-         "%llu srtt %lld ms\n",
+         "%llu srtt %lld ms, request headers %.1f bytes each (%.1f at the end)\n",
          loss, reorder, nreq, (NOW_NS - start) / 1e9, SENT_DGRAMS, LOST_DGRAMS, (unsigned long long)cl.q.cwnd,
-         (long long)cl.q.smoothed_rtt);
+         (long long)cl.q.smoothed_rtt, (double)cl.hdr_bytes / nreq, (double)cl.hdr_tail / tailn);
   SENT_DGRAMS = LOST_DGRAMS = DUPS_TO_CLI = 0;
   quic_free(&cl.q);
   if (accepted) {
