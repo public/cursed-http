@@ -1,6 +1,7 @@
 # HTTP/1.1 origin behind the proxies in run.sh: POST /echo returns the body; /trailers is chunked with
 # trailers; /204 is empty; other paths are files from DOCROOT.   python3 origin.py PORT DOCROOT
-import os, sys
+import os
+import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 

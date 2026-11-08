@@ -52,7 +52,8 @@ typedef struct {
   const char *n, *v;
   uint8_t nl, vl;
 } hp_sent;
-#define HPS(n, v) { n, v, sizeof(n) - 1, sizeof(v) - 1 }
+#define HPS(n, v)                                                                                                      \
+  { n, v, sizeof(n) - 1, sizeof(v) - 1 }
 static const hp_sent hp_static[62] = { { 0, 0, 0, 0 },
                                        HPS(":authority", ""),
                                        HPS(":method", "GET"),

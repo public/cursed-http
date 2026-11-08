@@ -70,13 +70,23 @@ cases() { # $@: the client and its address
 wait_port() { # $1: tcp or udp
   for _ in $(seq 50); do
     if [ "$1" = udp ]; then ss -lun | grep -q "127.0.0.1:$PORT3 " && return; else
-      ss -ltn | grep -q "127.0.0.1:$PORT " && return; fi
+      ss -ltn | grep -q "127.0.0.1:$PORT " && return
+    fi
     sleep 0.1
   done
   echo "  (the server did not start: $(tail -c 300 "$run/log"))"
 }
-h2() { echo "$1 (h2c)"; wait_port tcp; cases "$B/h2_client" 127.0.0.1 $PORT; }
-h3() { echo "$1 (h3)"; wait_port udp; sleep 0.3; cases "$B/h3_client" 127.0.0.1 $PORT3 -k; }
+h2() {
+  echo "$1 (h2c)"
+  wait_port tcp
+  cases "$B/h2_client" 127.0.0.1 $PORT
+}
+h3() {
+  echo "$1 (h3)"
+  wait_port udp
+  sleep 0.3
+  cases "$B/h3_client" 127.0.0.1 $PORT3 -k
+}
 origin() { start python3 "$here/origin.py" $ORIGIN "$docs"; }
 [ $# -gt 0 ] || set -- nginx apache h2o haproxy caddy node caddy-h3 aioquic
 for s in "$@"; do

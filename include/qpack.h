@@ -36,7 +36,8 @@ typedef struct {
   const char *n, *v;
   uint8_t nl, vl, hsidx;
 } qp_sent;
-#define QPS(n, v, h) { n, v, sizeof(n) - 1, sizeof(v) - 1, h }
+#define QPS(n, v, h)                                                                                                   \
+  { n, v, sizeof(n) - 1, sizeof(v) - 1, h }
 static const qp_sent qp_static[99] = {
   QPS(":authority", "", 1),                                                                   /* 0 */
   QPS(":path", "/", 4),                                                                       /* 1 */

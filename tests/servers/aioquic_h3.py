@@ -1,6 +1,8 @@
 # aioquic's HTTP/3 server: files from DOCROOT, POST echoes, /trailers sends trailers.
 #   python3 aioquic_h3.py PORT DOCROOT CERT KEY
-import asyncio, os, sys
+import asyncio
+import os
+import sys
 from aioquic.asyncio import serve
 from aioquic.asyncio.protocol import QuicConnectionProtocol
 from aioquic.h3.connection import H3_ALPN, H3Connection
@@ -35,8 +37,9 @@ class P(QuicConnectionProtocol):
                 h3.send_data(sid, b"not found\n", end_stream=True)
                 return
             d = open(f, "rb").read()
-            h3.send_headers(sid, [(b":status", b"200"), (b"content-length", str(len(d)).encode())],
-                            end_stream=method == b"HEAD")
+            h3.send_headers(
+                sid, [(b":status", b"200"), (b"content-length", str(len(d)).encode())], end_stream=method == b"HEAD"
+            )
             if method != b"HEAD":
                 h3.send_data(sid, d, end_stream=True)
 
