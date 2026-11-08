@@ -1,10 +1,13 @@
 // The Go clients' response parsers on the heads bench/bench_resp.c times (bench_resp --dump DIR CORPUS...):
 // ns per head for
-//   net/http  http.ReadResponse on a reused bufio.Reader (what http.Client runs on every response; it builds the
-//             Response and its Header map)
-//   fasthttp  ResponseHeader.Read on a reused bufio.Reader and ResponseHeader (fasthttp.Client's path)
+//
+//	net/http  http.ReadResponse on a reused bufio.Reader (what http.Client runs on every response; it builds the
+//	          Response and its Header map)
+//	fasthttp  ResponseHeader.Read on a reused bufio.Reader and ResponseHeader (fasthttp.Client's path)
+//
 // Each pass parses every head once; the best of the passes is kept, the two parsers interleaved.
-//   go run . DIR [passes]     (DIR: one subdirectory per corpus with a responses.dat)
+//
+//	go run . DIR [passes]     (DIR: one subdirectory per corpus with a responses.dat)
 package main
 
 import (
