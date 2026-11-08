@@ -125,8 +125,9 @@ typedef struct {
   uint64_t data_left, skip_left; /* rest of the DATA / unknown frame being received */
   int64_t content_length, data_seen;
   uint16_t hdr_len, hdr_off, trl_len, trl_off;
-  uint8_t spill;        /* the header frame is in the connection's spill area, at spill_at */
-  uint64_t blocked_ric; /* its header section waits for this many QPACK inserts (0: not blocked) */
+  uint8_t spill;                /* the header frame is in the connection's spill area, at spill_at */
+  uint64_t blocked_ric;         /* its header section waits for this many QPACK inserts (0: not blocked) */
+  uint8_t urgency, incremental; /* RFC 9218 (h3_stream_priority) */
   uint32_t spill_at;
   const uint8_t *body;
   size_t body_len, body_off;
@@ -333,6 +334,9 @@ static inline int h3__headers(h3_conn *c, h3_scratch *sc, h3_stream *s, uint64_t
     return 0;
   }
   if (end) s->flags |= H3_ST_REMOTE_END;
+  for (int i = 0; i < rq.nfields; i++) /* the priority field (RFC 9218 §5) */
+    if (h_eq(rq.fields[i].name, rq.fields[i].nlen, "priority"))
+      h_priority_parse(rq.fields[i].value, rq.fields[i].vlen, &s->urgency, &s->incremental);
   if (c->cb.on_request && c->cb.on_request(c, sid, &rq, end, c->user) && h3__find(c, sid))
     h3__reset(c, s, sid, H3_INTERNAL_ERROR);
   return 0;
@@ -382,7 +386,7 @@ static inline int h3__request_stream(h3_conn *c, h3_scratch *sc, uint64_t sid, u
       return (int)len;
     }
     memset(s, 0, offsetof(h3_stream, hdr));
-    s->id = sid, s->active = 1, s->content_length = -1;
+    s->id = sid, s->active = 1, s->content_length = -1, s->urgency = H_URGENCY_DEFAULT;
   }
   size_t pos = 0;
   while (pos < len) {
@@ -473,6 +477,22 @@ static inline int h3__control(h3_conn *c, const uint8_t *buf, size_t len) {
     if (!c->got_settings && type != H3F_SETTINGS) return h3__fail(c, H3_MISSING_SETTINGS);
     if (type == H3F_DATA || type == H3F_HEADERS || type == H3F_PUSH_PROMISE || h3__reserved_h2(type))
       return h3__fail(c, H3_FRAME_UNEXPECTED);
+    if (type == 0xf0700 || type == 0xf0701) { /* PRIORITY_UPDATE (RFC 9218 §7.2): a client's, for a request */
+      if (c->client) return h3__fail(c, H3_FRAME_UNEXPECTED);
+      if (flen > 4096) return h3__fail(c, H3_EXCESSIVE_LOAD);
+      if (len - pos - hl < flen) break;
+      const uint8_t *p = buf + pos + hl, *e = p + flen;
+      uint64_t id;
+      int x = h3__vi(p, e, &id);
+      if (!x) return h3__fail(c, H3_FRAME_ERROR);
+      if (type == 0xf0700) { /* (a push's: we never push) */
+        if ((id & 3) != 0) return h3__fail(c, H3_ID_ERROR);
+        h3_stream *s = h3__find(c, id); /* (one not open yet, or gone: nothing to do) */
+        if (s) h_priority_parse(p + x, (size_t)(e - p - x), &s->urgency, &s->incremental);
+      }
+      pos += hl + (size_t)flen;
+      continue;
+    }
     if (type == H3F_SETTINGS || type == H3F_GOAWAY || type == H3F_MAX_PUSH_ID || type == H3F_CANCEL_PUSH) {
       if (flen > 4096) return h3__fail(c, H3_EXCESSIVE_LOAD);
       if (len - pos - hl < flen) break;
@@ -655,7 +675,7 @@ static inline int h3_submit(h3_conn *c, uint64_t sid, const h_request *rq, const
   size_t hl = (size_t)(q - hdr);
   if (blk == small && hl + bl > sizeof s->hdr) return H3_E_TOO_BIG; /* (need bounds it: not reached) */
   memset(s, 0, offsetof(h3_stream, hdr));
-  s->id = sid, s->active = 1, s->content_length = -1;
+  s->id = sid, s->active = 1, s->content_length = -1, s->urgency = H_URGENCY_DEFAULT;
   memcpy(blk + 16 - hl, hdr, hl);
   if (blk == small) memcpy(s->hdr, blk + 16 - hl, hl + bl);
 #if H3_CLIENT_SPILL
@@ -666,6 +686,24 @@ static inline int h3_submit(h3_conn *c, uint64_t sid, const h_request *rq, const
   s->body = body ? body : (const uint8_t *)"", s->body_len = body ? len : 0, s->body_off = 0;
   if (end) s->flags |= H3_ST_BODY_END;
   h3__want(c, s);
+  return 0;
+}
+/* a request stream's priority for the transport's scheduler (quic_callbacks.stream_priority): urgency << 1 |
+ * incremental, from its priority field or a PRIORITY_UPDATE; the default (3, not incremental) for others */
+static inline int h3_stream_priority(h3_conn *c, uint64_t sid) {
+  h3_stream *s = (sid & 3) == 0 ? h3__find(c, sid) : NULL;
+  return s ? s->urgency << 1 | s->incremental : H_URGENCY_DEFAULT << 1;
+}
+/* client: change a request's priority (RFC 9218 PRIORITY_UPDATE, on our control stream); 0, or H3_E_STATE /
+ * H3_E_AGAIN (the control stream's buffer is full: send, then again) */
+static inline int h3_priority_update(h3_conn *c, uint64_t sid, int urgency, int incremental) {
+  if (!c->client || c->error || (sid & 3) != 0) return H3_E_STATE;
+  if (c->ctrl_off == c->ctrl_len) c->ctrl_off = c->ctrl_len = 0; /* all sent: the buffer is free again */
+  uint8_t f[32], *q = h3__put_vi(f, 0xf0700), *ln = q++, *v = h3__put_vi(q, sid);
+  v += h_priority_value((char *)v, urgency, incremental);
+  *ln = (uint8_t)(v - q); /* (under 64: one byte) */
+  if ((size_t)c->ctrl_len + (size_t)(v - f) > sizeof c->ctrl) return H3_E_AGAIN;
+  memcpy(c->ctrl + c->ctrl_len, f, (size_t)(v - f)), c->ctrl_len = (uint16_t)(c->ctrl_len + (v - f));
   return 0;
 }
 static inline int h3_data(h3_conn *c, uint64_t sid, const uint8_t *body, size_t len, int end) {

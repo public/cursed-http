@@ -56,7 +56,9 @@ typedef struct {
 } wire;
 static wire TO_SRV, TO_CLI;
 static int PATH_MTU = 1500 - 28; /* the largest UDP payload the simulated path carries */
-static int RETRY;                /* the server validates the client's address with a Retry first */
+static int PRIO; /* 1: the 5th of five big responses is urgent by its priority field; 2: by PRIORITY_UPDATE */
+static int ORDER[8], NORDER;
+static int RETRY; /* the server validates the client's address with a Retry first */
 static long EARLY_REQS;
 static unsigned long long BLOCKED_SUM;
 static int LAST_MTU;
@@ -202,7 +204,12 @@ static void q_established(quic_conn *q, void *u) {
   h3_init(&s->h, &H3CB, s, (uint64_t)a, (uint64_t)b, (uint64_t)c);
   s->h3_ready = 1;
 }
-static const quic_callbacks QCB = { q_on_stream, q_send, q_wants, q_reset, q_established };
+static int q_prio(quic_conn *q, uint64_t sid, void *u) { /* RFC 9218: the request's priority orders its data */
+  server *s = u;
+  (void)q;
+  return s->h3_ready ? h3_stream_priority(&s->h, sid) : H_URGENCY_DEFAULT << 1;
+}
+static const quic_callbacks QCB = { q_on_stream, q_send, q_wants, q_reset, q_established, q_prio };
 
 static void make_cert(void) {
   EVP_PKEY *pk = EVP_EC_gen("P-256");
@@ -271,6 +278,7 @@ static int c_data(h3_conn *h, uint64_t sid, const uint8_t *d, size_t n, int end,
 static void c_close(h3_conn *h, uint64_t sid, uint64_t err, void *u) {
   (void)h;
   client *cl = u;
+  if (!err && NORDER < 8) ORDER[NORDER++] = (int)sid;
   long ws = cl->want_s[(sid >> 2) % 4096], gs = cl->got_s[(sid >> 2) % 4096];
   if (!err && ws != gs) {
     printf("client: stream %llu (kind %d) body %ld want %ld\n", (unsigned long long)sid, cl->kind[(sid >> 2) % 4096],
@@ -293,12 +301,12 @@ static void submit_more(client *cl) {
     int64_t sid = cl->pending_sid >= 0 ? cl->pending_sid : quic_open_bidi(&cl->q);
     if (sid < 0) return; /* at the server's stream limit: MAX_STREAMS will raise it */
     cl->pending_sid = -1;
-    int k = BULK ? 2 : (int)(rnd() % 5);
+    int k = BULK || PRIO ? 2 : (int)(rnd() % 5);
     char *path = (char *)UPBUF + 60000 + (cl->submitted % 64) * 64;
     const char *m = k == 1 ? "POST" : k == 3 ? "HEAD" : "GET";
     long w = 0;
     if (k == 2) {
-      size_t big = BULK ? sizeof BIG - 48576 : 1000 + rnd() % 200000;
+      size_t big = BULK || PRIO ? sizeof BIG - 48576 : 1000 + rnd() % 200000;
       snprintf(path, 64, "/big/%zu", big), w = (long)big;
     } else if (k == 4) snprintf(path, 64, "/204");
     else snprintf(path, 64, "/p/%d", cl->submitted), w = k == 1 ? 7 : k == 3 ? 0 : 13;
@@ -319,8 +327,18 @@ static void submit_more(client *cl) {
       (const uint8_t *)"user-agent", (const uint8_t *)"cursed-http-test", 10, 16, 0, 0, 0, 0
     };
     hp_field fl[2] = { ua, { (const uint8_t *)"cookie", (const uint8_t *)cookie, 6, 1200, 0, 0, 0, 0 } };
-    int big_hdr = cl->submitted % 7 == 3;
+    int big_hdr = !PRIO && cl->submitted % 7 == 3;
     rq.fields = fl, rq.nfields = big_hdr ? 2 : 1;
+    if (PRIO) /* the priority field (RFC 9218): all u=5 but the 5th, u=1 (PRIO 1) */
+      fl[1] = (hp_field){ (const uint8_t *)"priority",
+                          (const uint8_t *)(PRIO == 1 && cl->submitted == 4 ? "u=1" : "u=5"),
+                          8,
+                          3,
+                          0,
+                          0,
+                          0,
+                          0 },
+      rq.nfields = 2;
     cl->kind[(sid >> 2) % 4096] = k;
     size_t up = k == 1 ? 1 + rnd() % 30000 : 0;
     int r = h3_submit(&cl->h, (uint64_t)sid, &rq, up ? UPBUF : NULL, up, 1);
@@ -370,7 +388,7 @@ static void cq_established(quic_conn *q, void *u) {
   cl->ready = 1;
   submit_more(cl);
 }
-static const quic_callbacks CQCB = { cq_on_stream, cq_send, cq_wants, cq_reset, cq_established };
+static const quic_callbacks CQCB = { cq_on_stream, cq_send, cq_wants, cq_reset, cq_established, NULL };
 static void client_tls_init(void) {
   memset(&CLI_TLS, 0, sizeof CLI_TLS);
   CLI_TLS.random_bytes = ptls_openssl_random_bytes;
@@ -398,11 +416,17 @@ static int run(int nreq, int loss, int reorder) {
   CHECK(r0 == 0, "quic_connect %d", r0);
   int accepted = 0, retries = 0, max_burst = 0, over_burst = 0, over_allowed = 0;
   uint64_t lost_at = 0;
+  int prio_sent = 0;
+  NORDER = 0;
   long before = fails;
   uint8_t out[1500];
   uint64_t start = NOW_NS;
   for (int guard = 0; guard < 2000000; guard++) {
     if (cl.ready) submit_more(&cl);
+    if (PRIO == 2 && !prio_sent && cl.body > 20000) { /* midway: the 5th request becomes urgent */
+      CHECK(h3_priority_update(&cl.h, 16, 0, 0) == 0, "PRIORITY_UPDATE");
+      prio_sent = 1;
+    }
     size_t n;
     while ((n = quic_send(&cl.q, out, sizeof out, now_ms())) > 0) put(&TO_SRV, out, n);
     dgram g;
@@ -574,6 +598,13 @@ int main(int argc, char **argv) {
       LOSE_STATE = 1, run(60, 0, 0), run(60, 2, 1), LOSE_STATE = 0;
       /* path MTU discovery: the server's datagrams grow to what the path carries (1472: IPv4 over Ethernet), to
        * 1350 on a tunnel's 1400, and stay at 1252 on 1280 */
+      for (PRIO = 1; PRIO <= 2; PRIO++) { /* RFC 9218: the urgent response first, then the others in order */
+        run(5, 0, 0);
+        CHECK(NORDER == 5 && ORDER[0] == 16 && ORDER[1] == 0 && ORDER[2] == 4 && ORDER[3] == 8 && ORDER[4] == 12,
+              "%s: responses finished in the order %d %d %d %d %d (want 16 0 4 8 12)",
+              PRIO == 1 ? "priority field" : "PRIORITY_UPDATE", ORDER[0], ORDER[1], ORDER[2], ORDER[3], ORDER[4]);
+      }
+      PRIO = 0;
       static const int paths[3] = { 1500 - 28, 1400 - 28, 1280 - 28 }, want[3] = { 1472, 1350, 1252 };
       for (int m = 0; m < 3; m++) {
         PATH_MTU = paths[m], BULK = 1, run(8, 0, 0), BULK = 0;

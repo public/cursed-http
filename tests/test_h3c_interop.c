@@ -546,7 +546,7 @@ static void cq_established(quic_conn *q, void *u) {
   cl->ready = 1;
   submit_more(cl);
 }
-static const quic_callbacks CQCB = { cq_on_stream, cq_send, cq_wants, cq_reset, cq_established };
+static const quic_callbacks CQCB = { cq_on_stream, cq_send, cq_wants, cq_reset, cq_established, NULL };
 static void client_tls_init(void) {
   memset(&CLI_TLS, 0, sizeof CLI_TLS);
   CLI_TLS.random_bytes = ptls_openssl_random_bytes;

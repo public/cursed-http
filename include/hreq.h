@@ -131,4 +131,40 @@ static inline int h_check_trailers(const hp_field *f, int n) {
   return 1;
 }
 
+/* RFC 9218 priority parameters, from a priority field value or a PRIORITY_UPDATE: urgency u=0..7 (default 3,
+ * lower first) and incremental i (default false). A Structured Fields Dictionary; members we do not know, and
+ * values out of range, are ignored (§4); *u and *inc are left as they were for what is absent */
+#define H_URGENCY_DEFAULT 3
+static inline void h_priority_parse(const uint8_t *v, size_t n, uint8_t *u, uint8_t *inc) {
+  size_t i = 0;
+  while (i < n) {
+    while (i < n && (v[i] == ' ' || v[i] == '\t' || v[i] == ',')) i++;
+    size_t k = i;
+    while (i < n && ((v[i] >= 'a' && v[i] <= 'z') || (v[i] >= '0' && v[i] <= '9') || v[i] == '_' || v[i] == '-' ||
+                     v[i] == '.' || v[i] == '*'))
+      i++;
+    size_t kl = i - k, vs = i, ve = i;
+    if (i < n && v[i] == '=') {
+      vs = ++i;
+      while (i < n && v[i] != ',' && v[i] != ';') i++;
+      ve = i;
+      while (ve > vs && (v[ve - 1] == ' ' || v[ve - 1] == '\t')) ve--;
+    }
+    while (i < n && v[i] != ',') i++; /* parameters (;...) are ignored */
+    if (kl == 1 && v[k] == 'u' && ve == vs + 1 && v[vs] >= '0' && v[vs] <= '7') *u = (uint8_t)(v[vs] - '0');
+    else if (kl == 1 && v[k] == 'i') {
+      if (ve == vs) *inc = 1; /* a bare key is true */
+      else if (ve == vs + 2 && v[vs] == '?' && (v[vs + 1] == '0' || v[vs + 1] == '1'))
+        *inc = (uint8_t)(v[vs + 1] - '0');
+    }
+  }
+}
+/* the value for u, i: "u=N" or "u=N, i"; returns its length (at most 7) */
+static inline size_t h_priority_value(char *out, int u, int inc) {
+  out[0] = 'u', out[1] = '=', out[2] = (char)('0' + (u < 0 ? 0 : u > 7 ? 7 : u));
+  if (!inc) return 3;
+  out[3] = ',', out[4] = ' ', out[5] = 'i';
+  return 6;
+}
+
 #endif

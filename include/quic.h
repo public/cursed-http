@@ -93,6 +93,8 @@ typedef struct {
   int (*stream_wants)(quic_conn *c, uint64_t sid, void *user);
   void (*on_stream_reset)(quic_conn *c, uint64_t sid, uint64_t code, void *user); /* RESET_STREAM or STOP_SENDING */
   void (*on_established)(quic_conn *c, void *user); /* handshake complete (a client may send 1-RTT data now) */
+  /* optional: a stream's priority, urgency (0..7) << 1 | incremental (RFC 9218), for the order of its data */
+  int (*stream_priority)(quic_conn *c, uint64_t sid, void *user);
 } quic_callbacks;
 
 /* what a client keeps to resume (quic_connect_resume): a session ticket (for 0-RTT if early), a NEW_TOKEN token
@@ -2155,11 +2157,30 @@ static inline uint8_t *quic__app_frames(quic_conn *c, uint8_t *p, uint8_t *e, qu
     *p++ = 0x07, p = quic__put_vi(p, c->new_token_len), memcpy(p, c->new_token, c->new_token_len);
     p += c->new_token_len, quic__rec(r, QF_NEW_TOKEN, 0, 0, 0, 0), c->send_new_token = 0;
   }
-  /* two passes: our unidirectional streams first (HTTP/3's control and QPACK streams: small, and what the peer
-   * needs to read the rest), then the others round-robin */
-  for (int k = 0; k < 2 * QUIC_MAX_STREAMS && r->nf < QUIC_FREC_MAX; k++) {
-    quic_stream *s = &c->s[(c->rr + (uint32_t)k) % QUIC_MAX_STREAMS];
-    if (!s->used || ((k < QUIC_MAX_STREAMS) != ((s->id & 2) && QUIC__OURS(c, s->id)))) continue;
+  /* the order: our unidirectional streams first (HTTP/3's control and QPACK streams: small, and what the peer
+   * needs to read the rest), then the others by the application's priority (stream_priority: urgency << 1 |
+   * incremental, RFC 9218): lower urgency first; at the same, the non-incremental in stream order, then the
+   * incremental round-robin. Without stream_priority, round-robin */
+  uint16_t ord[QUIC_MAX_STREAMS];
+  uint64_t key[QUIC_MAX_STREAMS];
+  int no = 0;
+  for (int k = 0; k < QUIC_MAX_STREAMS; k++) {
+    uint32_t slot = (c->rr + (uint32_t)k) % QUIC_MAX_STREAMS;
+    quic_stream *s = &c->s[slot];
+    if (!s->used) continue;
+    uint64_t kk;
+    if ((s->id & 2) && QUIC__OURS(c, s->id)) kk = (uint64_t)k;
+    else if (c->cb.stream_priority) {
+      int pr = c->cb.stream_priority(c, s->id, c->user), inc = pr & 1;
+      kk = 1ull << 50 | (uint64_t)(pr >> 1 & 7) << 42 | (uint64_t)inc << 41 | (inc ? (uint64_t)k : s->id >> 2);
+    } else kk = 1ull << 50 | (uint64_t)k;
+    int i = no++;
+    while (i > 0 && key[i - 1] > kk) key[i] = key[i - 1], ord[i] = ord[i - 1], i--;
+    key[i] = kk, ord[i] = (uint16_t)slot;
+  }
+  for (int k = 0; k < no && r->nf < QUIC_FREC_MAX; k++) {
+    quic_stream *s = &c->s[ord[k]];
+    if (!s->used) continue;
     if (s->send_max_stream_data && e - p > 18)
       *p++ = 0x11, p = quic__put_vi(p, s->id), p = quic__put_vi(p, s->max_recv),
       quic__rec(r, QF_MAX_STREAM_DATA, s->id, 0, 0, 0), s->send_max_stream_data = 0;

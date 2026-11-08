@@ -96,7 +96,12 @@ static void q_established(quic_conn *q, void *u) {
   h3_init(&c->h, &H3CB, c, (uint64_t)a, (uint64_t)b, (uint64_t)d);
   c->ready = 1;
 }
-static const quic_callbacks QCB = { q_stream, q_send, q_wants, q_reset, q_established };
+static int q_prio(quic_conn *q, uint64_t sid, void *u) { /* RFC 9218: the request's priority orders its data */
+  conn *c = u;
+  (void)q;
+  return c->ready ? h3_stream_priority(&c->h, sid) : H_URGENCY_DEFAULT << 1;
+}
+static const quic_callbacks QCB = { q_stream, q_send, q_wants, q_reset, q_established, q_prio };
 
 /* the connection a datagram belongs to: our connection ID is at a fixed place in either header */
 static int find(const uint8_t *d, size_t n) {

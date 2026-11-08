@@ -124,7 +124,7 @@ static void q_established(quic_conn *q, void *u) {
   ready = 1;
   submit_more();
 }
-static const quic_callbacks QCB = { q_on_stream, q_send, q_wants, q_reset, q_established };
+static const quic_callbacks QCB = { q_on_stream, q_send, q_wants, q_reset, q_established, NULL };
 
 int main(int argc, char **argv) {
   if (argc < 4) {

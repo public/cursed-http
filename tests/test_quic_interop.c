@@ -185,7 +185,12 @@ static void q_established(quic_conn *q, void *u) {
   h3_init(&s->h, &H3CB, s, (uint64_t)a, (uint64_t)b, (uint64_t)c);
   s->h3_ready = 1;
 }
-static const quic_callbacks QCB = { q_on_stream, q_send, q_wants, q_reset, q_established };
+static int q_prio(quic_conn *q, uint64_t sid, void *u) { /* RFC 9218: the request's priority orders its data */
+  server *s = u;
+  (void)q;
+  return s->h3_ready ? h3_stream_priority(&s->h, sid) : H_URGENCY_DEFAULT << 1;
+}
+static const quic_callbacks QCB = { q_on_stream, q_send, q_wants, q_reset, q_established, q_prio };
 
 static void make_cert(void) {
   EVP_PKEY *pk = EVP_EC_gen("P-256");
