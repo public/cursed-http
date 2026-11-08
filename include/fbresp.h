@@ -43,6 +43,12 @@
 #ifndef FBR_CTB
 #define FBR_CTB 4 // blocks per batch (c002: 4 and 8 tie; growing batches lose on short heads)
 #endif
+#ifndef FBR_WIN_LOAD
+#define FBR_WIN_LOAD 1 // 1: one unaligned load of the bit array; 0: two aligned words and a funnel shift
+#endif
+#ifndef FBR_LINE_FIRST
+#define FBR_LINE_FIRST 1 // the line's end from its start (off the name scan's latency), not from after the colon
+#endif
 #ifndef FBR_CTMAX
 #define FBR_CTMAX 128 // 8 KB of head with the array (1 KB of stack: no stack-clash probes); longer heads use fbr_next
 #endif
@@ -80,6 +86,7 @@ FB_INLINE int fbr_ct(const char *b, int len, int p, fbr_scan_t *s, const int sim
     if (k + 1 >= FBR_CTMAX) return fbr_next(b, len, p, s, FB_CT, simd);
     fbr_fill(b, len, s, k + 1, simd);
   }
+#if FBR_WIN_LOAD
   // the 57+ bytes from p: the bit array read as bytes, one unaligned load at byte p / 8 (words k and k + 1 are filled)
   uint64_t m;
   memcpy(&m, (const char *)s->ct + (p >> 3), 8);
@@ -87,7 +94,13 @@ FB_INLINE int fbr_ct(const char *b, int len, int p, fbr_scan_t *s, const int sim
   if (FB_LIKELY(m)) return p + __builtin_ctzll(m);
   sh = (p + 57) & 63; // positions p .. p + 56 had no ct: on from p + 57
   k = (p + 57) >> 6;
-  // a long value: the rest of word k (positions >= p + 57), then whole words
+#else
+  // the 64 bytes from p from words k and k + 1 (aligned loads: they forward from the fill's stores)
+  uint64_t m = (s->ct[k] >> sh) | ((s->ct[k + 1] << 1) << (63 - sh));
+  if (FB_LIKELY(m)) return p + __builtin_ctzll(m);
+  k++; // positions p .. p + 63 had no ct: on from p + 64, in word k + 1
+#endif
+  // a long value: the rest of word k, then whole words
   uint64_t w = s->ct[k] & (~0ull << sh);
   for (;;) {
     if (w) return (k << 6) + __builtin_ctzll(w);
@@ -114,6 +127,12 @@ FB_INLINE int fbr_headers(const char *b, int len, int p, fbr_scan_t *sc, struct 
     unsigned char c = (unsigned char)b[p];
     const char *name;
     int nl, vs, e;
+#if FBR_LINE_FIRST
+    // the line's first ct, from its start: a name, its ':' and the whitespace after it hold no ct, so this is the
+    // value's end too. Searching from the line start keeps the line-to-line chain (p -> e -> p) off the name scan,
+    // so lines overlap in the CPU; the name is still checked first below, so every result is pico's.
+    e = fbr_ct(b, len, p, sc, simd);
+#endif
     if (FB_UNLIKELY(c <= ' ')) { // the end of the head, obs-fold, or an error
       if (c == '\r') {
         if (p + 1 >= len) FBR_RET(-2);
@@ -156,7 +175,9 @@ FB_INLINE int fbr_headers(const char *b, int len, int p, fbr_scan_t *sc, struct 
     }
     // the value's end first: SP and HT are not ct, so the first ct after the colon is pico's (it skips the
     // whitespace, then looks for the first ct); whitespace running into len is -2 there as here
+#if !FBR_LINE_FIRST
     e = fbr_ct(b, len, vs, sc, simd);
+#endif
     if (FB_LIKELY(e + 1 < len && (unsigned char)b[e] == '\r' && (unsigned char)b[e + 1] == '\n')) p = e + 2;
     else { // pico's order: incomplete before the line end, then a bare LF ends it, anything else is invalid
       if (e >= len) FBR_RET(-2);
