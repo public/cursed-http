@@ -46,6 +46,7 @@
 #define QUIC_MAX_UNI       8            /* initial_max_streams_uni */
 #define QUIC_STREAM_WIN    (256u << 10) /* initial_max_stream_data_bidi_remote / _uni */
 #define QUIC_CONN_WIN      (4u << 20)   /* initial_max_data */
+#define QUIC_PEER_CIDS     4            /* active_connection_id_limit we advertise */
 #define QUIC_MAX_UDP       1472         /* max_udp_payload_size we accept; we send <= QUIC_SEND_MAX */
 #define QUIC_SEND_MAX      1252
 #define QUIC_MIN_INITIAL   1200
@@ -98,6 +99,7 @@ typedef struct {
   ptls_context_t *tls;
   void *(*alloc)(void *p, size_t n); /* realloc-like; n == 0 frees */
   uint8_t token_key[16];             /* a server's Retry tokens (random per quic_ctx_init) */
+  uint8_t reset_key[32];             /* a server's stateless reset tokens: HMAC of the connection ID */
 } quic_ctx;
 
 /* --------------------------------------------- varints --------------------------------------------- */
@@ -362,7 +364,8 @@ enum {
   QF_RESET,
   QF_STOP,
   QF_PING,
-  QF_ACK
+  QF_ACK,
+  QF_RETIRE_CID
 };
 typedef struct {
   uint8_t type, fin;
@@ -412,6 +415,18 @@ struct quic_conn {
   uint8_t retried, rscid[20], rscid_len; /* a Retry happened: the server's Retry Source Connection ID */
   uint8_t *token;                        /* a client's: the Retry token its Initials carry */
   uint32_t vn_version;                   /* a client's: after Version Negotiation, the server's first version */
+  /* the peer's connection IDs (RFC 9000 §5.1): seq 0 is its first; the one in use is in dcid. Each may come with a
+   * stateless reset token. retire_prior: the peer's retire_prior_to; retire_q: RETIRE_CONNECTION_IDs to send */
+  struct {
+    uint64_t seq;
+    uint8_t len, cid[20], token[16], has_token;
+  } pcid[QUIC_PEER_CIDS];
+  int npcid;
+  uint64_t pcid_seq, retire_prior, retire_q[8]; /* pcid_seq: the one in use */
+  int nretire;
+  uint8_t got_packet;                 /* a packet of the current datagram decrypted (else: a stateless reset?) */
+  uint8_t tp_token[16], has_tp_token; /* the server's stateless_reset_token transport parameter */
+  uint8_t reset;                      /* closed by the peer's stateless reset */
   uint16_t token_len;
   quic_space sp[QUIC_NSP];
   ptls_cipher_suite_t *cs; /* negotiated suite (for key updates) */
@@ -485,6 +500,28 @@ static inline void quic_ctx_init(quic_ctx *x, ptls_context_t *tls) {
   tls->update_traffic_key = &quic__utk;
   tls->max_early_data_size = 0;
   tls->random_bytes(x->token_key, sizeof x->token_key);
+  tls->random_bytes(x->reset_key, sizeof x->reset_key);
+}
+/* a server's stateless reset token for its connection ID (RFC 9000 §10.3.2): HMAC-SHA256 under the context's key,
+ * so a server that lost the connection can still compute it. 0, or -1 */
+static inline int quic_reset_token(const quic_ctx *x, const uint8_t *cid, size_t len, uint8_t token[16]) {
+  extern ptls_hash_algorithm_t ptls_openssl_sha256;
+  uint8_t h[32];
+  ptls_hash_context_t *m = ptls_hmac_create(&ptls_openssl_sha256, x->reset_key, sizeof x->reset_key);
+  if (!m) return -1;
+  m->update(m, cid, len), m->final(m, h, PTLS_HASH_FINAL_MODE_FREE);
+  memcpy(token, h, 16), ptls_clear_memory(h, sizeof h);
+  return 0;
+}
+/* a server's answer to a short-header datagram d for a connection it does not have (RFC 9000 §10.3): a stateless
+ * reset in out (smaller than d, so two endpoints never loop), or 0 (d too small to answer, or no room) */
+static inline size_t quic_stateless_reset(const quic_ctx *x, const uint8_t *d, size_t len, uint8_t *out, size_t cap) {
+  if ((d[0] & 0x80) || len < 1 + QUIC_SCID_LEN || len - 1 < 21) return 0;
+  size_t n = len - 1 < 43 ? len - 1 : 43; /* 43: what a 1-RTT packet of a few bytes would be */
+  if (n > cap) return 0;
+  x->tls->random_bytes(out, n - 16);
+  out[0] = (uint8_t)(0x40 | (out[0] & 0x3f));
+  return quic_reset_token(x, d + 1, QUIC_SCID_LEN, out + n - 16) ? 0 : n;
 }
 
 /* slots probed from a hash of the id: O(1) on average */
@@ -582,6 +619,56 @@ static inline void quic__frame_acked(quic_conn *c, quic_space *sp, const quic_fr
     default: break;
   }
 }
+static inline void quic__retire_queue(quic_conn *c, uint64_t seq) {
+  for (int i = 0; i < c->nretire; i++)
+    if (c->retire_q[i] == seq) return;
+  if (c->nretire < 8) c->retire_q[c->nretire++] = seq;
+}
+/* ------------------------------------- the peer's connection IDs ------------------------------------- */
+/* the peer's first connection ID (seq 0), once known: the DCID in use */
+static inline void quic__pcid_first(quic_conn *c) {
+  c->pcid[0].seq = 0, c->pcid[0].len = c->dcid_len, memcpy(c->pcid[0].cid, c->dcid, c->dcid_len);
+  if (!c->npcid) c->npcid = 1;
+  c->pcid_seq = 0;
+}
+/* NEW_CONNECTION_ID (RFC 9000 §19.15): 0, or a transport error code */
+static inline uint64_t quic__new_cid(quic_conn *c, uint64_t seq, uint64_t rpt, const uint8_t *cid, uint8_t len,
+                                     const uint8_t *token) {
+  for (int i = 0; i < c->npcid; i++)
+    if (c->pcid[i].seq == seq) /* a repeat: it must be the same */
+      return c->pcid[i].len == len && !memcmp(c->pcid[i].cid, cid, len) ? 0 : QUIC_PROTOCOL_VIOLATION;
+  if (seq < c->retire_prior) { /* retired already: say so again */
+    quic__retire_queue(c, seq);
+    return 0;
+  }
+  if (rpt > c->retire_prior) { /* retire everything below rpt */
+    c->retire_prior = rpt;
+    for (int i = 0; i < c->npcid;)
+      if (c->pcid[i].seq < rpt) quic__retire_queue(c, c->pcid[i].seq), c->pcid[i] = c->pcid[--c->npcid];
+      else i++;
+  }
+  if (c->npcid == QUIC_PEER_CIDS) return QUIC_CONNECTION_ID_LIMIT_ERROR;
+  int k = c->npcid++;
+  c->pcid[k].seq = seq, c->pcid[k].len = len, memcpy(c->pcid[k].cid, cid, len);
+  memcpy(c->pcid[k].token, token, 16), c->pcid[k].has_token = 1;
+  if (c->pcid_seq < c->retire_prior) { /* ours was retired: the oldest left takes over */
+    int best = 0;
+    for (int i = 1; i < c->npcid; i++)
+      if (c->pcid[i].seq < c->pcid[best].seq) best = i;
+    c->pcid_seq = c->pcid[best].seq, c->dcid_len = c->pcid[best].len;
+    memcpy(c->dcid, c->pcid[best].cid, c->dcid_len);
+  }
+  return 0;
+}
+/* a datagram that decrypted to nothing: a stateless reset (RFC 9000 §10.3) if it ends with one of the peer's
+ * tokens; then the connection is over, at once */
+static inline int quic__is_reset(quic_conn *c, const uint8_t *d, size_t len) {
+  if (len < 21 || (d[0] & 0x80)) return 0;
+  for (int i = 0; i < c->npcid; i++)
+    if (c->pcid[i].has_token && !memcmp(d + len - 16, c->pcid[i].token, 16)) return 1;
+  return 0;
+}
+
 static inline void quic__frame_lost(quic_conn *c, quic_space *sp, const quic_frec *f) {
   quic_stream *s;
   switch (f->type) {
@@ -596,6 +683,7 @@ static inline void quic__frame_lost(quic_conn *c, quic_space *sp, const quic_fre
     case QF_MAX_STREAMS_BIDI: c->send_max_streams_bidi = 1; break;
     case QF_MAX_STREAMS_UNI: c->send_max_streams_uni = 1; break;
     case QF_HANDSHAKE_DONE: c->handshake_done_pending = 1; break;
+    case QF_RETIRE_CID: quic__retire_queue(c, f->a); break;
     case QF_RESET:
       if ((s = quic__stream(c, f->a))) s->send_reset = 1;
       break;
@@ -756,8 +844,10 @@ static inline int quic__decode_tp(quic_conn *c, const uint8_t *p, const uint8_t 
         if (!c->client || len != c->odcid_len || memcmp(p, c->odcid, len)) return -1;
         have_odcid = 1;
         break;
-      case 0x02: /* stateless_reset_token: kept for nothing (no stateless reset detection) */
+      case 0x02: /* stateless_reset_token: for the server's first connection ID */
         if (!c->client || len != 16) return -1;
+        memcpy(c->tp_token, p, 16), c->has_tp_token = 1;
+        if (c->npcid) memcpy(c->pcid[0].token, p, 16), c->pcid[0].has_token = 1;
         break;
       case 0x0d: /* preferred_address: we stay on the first path */
         if (!c->client) return -1;
@@ -845,6 +935,10 @@ static inline int quic__collected_ext(ptls_t *tls, ptls_handshake_properties_t *
   p = quic__tp_int(p, 0x09, QUIC_MAX_UNI);
   p = quic__put_vi(p, 0x0c), p = quic__put_vi(p, 0); /* disable_active_migration */
   p = quic__put_vi(p, 0x0f), p = quic__put_vi(p, QUIC_SCID_LEN), memcpy(p, c->scid, QUIC_SCID_LEN), p += QUIC_SCID_LEN;
+  p = quic__tp_int(p, 0x0e, QUIC_PEER_CIDS);          /* active_connection_id_limit */
+  p = quic__put_vi(p, 0x02), p = quic__put_vi(p, 16); /* stateless_reset_token */
+  if (quic_reset_token(c->ctx, c->scid, QUIC_SCID_LEN, p)) return PTLS_ERROR_LIBRARY;
+  p += 16;
   if (c->retried) /* retry_source_connection_id */
     p = quic__put_vi(p, 0x10), p = quic__put_vi(p, c->rscid_len), memcpy(p, c->rscid, c->rscid_len), p += c->rscid_len;
   ptls_buffer_init(&c->tpbuf, "", 0);
@@ -1210,7 +1304,7 @@ static inline int quic__frames(quic_conn *c, int space, const uint8_t *p, const 
       case 0x15: QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b)); break; /* STREAM_DATA_BLOCKED */
       case 0x16:
       case 0x17: QUIC__NEED(quic__vi(&p, end, &a)); break; /* STREAMS_BLOCKED */
-      case 0x18: { /* NEW_CONNECTION_ID: we keep using the client's first CID (no migration) */
+      case 0x18: {                                         /* NEW_CONNECTION_ID */
         QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b) || p >= end);
         uint8_t l = *p++;
         if (b > a || l < 1 || l > 20) {
@@ -1218,6 +1312,11 @@ static inline int quic__frames(quic_conn *c, int space, const uint8_t *p, const 
           return -1;
         }
         QUIC__NEED((size_t)(end - p) < (size_t)l + 16);
+        uint64_t err = quic__new_cid(c, a, b, p, l, p + l);
+        if (err) {
+          quic__error(c, err, type);
+          return -1;
+        }
         p += l + 16;
         break;
       }
@@ -1453,6 +1552,7 @@ static inline size_t quic__packet(quic_conn *c, uint8_t *p, uint8_t *end, int64_
     c->undecryptable++;
     return plen;
   }
+  c->got_packet = 1;
   /* reserved bits */
   if ((p[0] & 0x80 ? first & 0x0c : first & 0x18)) {
     quic__error(c, QUIC_PROTOCOL_VIOLATION, 0);
@@ -1461,6 +1561,8 @@ static inline size_t quic__packet(quic_conn *c, uint8_t *p, uint8_t *end, int64_
   /* the server's connection ID, from the first Initial that decrypts (RFC 9000 §7.2) */
   if (c->client && !c->got_server_cid && space == QUIC_SP_INITIAL && pscid) {
     memcpy(c->dcid, pscid, pscid_len), c->dcid_len = pscid_len, c->got_server_cid = 1;
+    quic__pcid_first(c);
+    if (c->has_tp_token) memcpy(c->pcid[0].token, c->tp_token, 16), c->pcid[0].has_token = 1;
   }
   if (phase_flip && !late) { /* the peer updated keys: rotate ours (RFC 9001 §6) */
     quic__key_free(&c->prev_rx);
@@ -1497,11 +1599,14 @@ static inline int quic_recv(quic_conn *c, uint8_t *d, size_t len, int64_t now) {
     c->close_sent_once = 0;
     return QUIC_E_CLOSED;
   }
+  c->got_packet = 0;
   for (uint8_t *p = d, *end = d + len; p < end;) {
     size_t n = quic__packet(c, p, end, now);
     if (!n) break;
     p += n;
   }
+  if (!c->got_packet && !c->closing && !c->draining && quic__is_reset(c, d, len))
+    c->draining = c->reset = 1, c->close_code = 0, c->close_deadline = now; /* no CONNECTION_CLOSE back */
   return c->closing || c->draining ? QUIC_E_CLOSED : 0;
 }
 
@@ -1610,6 +1715,7 @@ static inline int quic_accept_from(quic_conn *c, quic_ctx *x, uint8_t *d, size_t
   memcpy(c->idcid, d + 6, dl), c->idcid_len = dl;
   if (retried) c->retried = 1, memcpy(c->rscid, d + 6, dl), c->rscid_len = dl, c->addr_validated = 1;
   memcpy(c->dcid, d + 7 + dl, sl), c->dcid_len = sl;
+  quic__pcid_first(c);
   x->tls->random_bytes(c->scid, QUIC_SCID_LEN);
   if (!x->tls->on_client_hello) x->tls->on_client_hello = &quic__och;
   extern ptls_cipher_suite_t ptls_openssl_aes128gcmsha256;
@@ -1670,6 +1776,7 @@ static inline int quic_connect(quic_conn *c, quic_ctx *x, const char *server_nam
   p = quic__tp_int(p, 0x09, QUIC_MAX_UNI);
   p = quic__put_vi(p, 0x0c), p = quic__put_vi(p, 0); /* disable_active_migration */
   p = quic__put_vi(p, 0x0f), p = quic__put_vi(p, QUIC_SCID_LEN), memcpy(p, c->scid, QUIC_SCID_LEN), p += QUIC_SCID_LEN;
+  p = quic__tp_int(p, 0x0e, QUIC_PEER_CIDS); /* active_connection_id_limit */
   ptls_buffer_init(&c->tpbuf, "", 0);
   if (ptls_buffer_reserve(&c->tpbuf, (size_t)(p - tp))) return QUIC_E_NOMEM;
   memcpy(c->tpbuf.base, tp, (size_t)(p - tp)), c->tpbuf.off = (size_t)(p - tp);
@@ -1835,7 +1942,7 @@ static inline int quic__space_wants(quic_conn *c, int space, int64_t now) {
   if (c->probes_due) return 1;
   if (space != QUIC_SP_APP || !c->established) return 0;
   if (c->handshake_done_pending || c->path_response_pending || c->send_max_data || c->send_max_streams_bidi ||
-      c->send_max_streams_uni)
+      c->nretire || c->send_max_streams_uni)
     return 1;
   for (int i = 0; i < QUIC_MAX_STREAMS; i++) {
     quic_stream *s = &c->s[i];
@@ -1867,6 +1974,10 @@ static inline uint8_t *quic__app_frames(quic_conn *c, uint8_t *p, uint8_t *e, qu
   if (c->send_max_streams_uni && e - p > 9)
     *p++ = 0x13, p = quic__put_vi(p, c->max_streams_uni_local), quic__rec(r, QF_MAX_STREAMS_UNI, 0, 0, 0, 0),
     c->send_max_streams_uni = 0;
+  while (c->nretire && e - p > 9 && r->nf < QUIC_FREC_MAX) { /* RETIRE_CONNECTION_ID */
+    uint64_t seq = c->retire_q[--c->nretire];
+    *p++ = 0x19, p = quic__put_vi(p, seq), quic__rec(r, QF_RETIRE_CID, seq, 0, 0, 0);
+  }
   /* two passes: our unidirectional streams first (HTTP/3's control and QPACK streams: small, and what the peer
    * needs to read the rest), then the others round-robin */
   for (int k = 0; k < 2 * QUIC_MAX_STREAMS && r->nf < QUIC_FREC_MAX; k++) {

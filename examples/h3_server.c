@@ -163,7 +163,10 @@ int main(int argc, char **argv) {
       if (n > 0) {
         int i = find(buf, (size_t)n);
         if (i >= 0) quic_recv(&C[i]->q, buf, (size_t)n, now);
-        else {
+        else if (!(buf[0] & 0x80)) { /* a short header for a connection we do not have (a restart?): reset it */
+          size_t rl = quic_stateless_reset(&qx, buf, (size_t)n, out, sizeof out);
+          if (rl) sendto(fd, out, rl, 0, (struct sockaddr *)&from, fl);
+        } else {
           for (i = 0; i < MAXC && C[i]; i++) {}
           if (i < MAXC) {
             /* -r: an Initial without a token gets a Retry (bound to the client's address); one with a token is

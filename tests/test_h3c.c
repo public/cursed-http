@@ -55,8 +55,9 @@ typedef struct {
   int n;
 } wire;
 static wire TO_SRV, TO_CLI;
-static int RETRY; /* the server validates the client's address with a Retry first */
-static int BULK;  /* every request is GET /big/1000000: slow start overfills the wire (4096 datagrams, tail drop) */
+static int RETRY;      /* the server validates the client's address with a Retry first */
+static int LOSE_STATE; /* halfway, the server forgets the connection and answers with stateless resets */
+static int BULK; /* every request is GET /big/1000000: slow start overfills the wire (4096 datagrams, tail drop) */
 static int LOSS, REORDER, BLACKHOLE; /* BLACKHOLE: drop client->server after its first datagram, for 8 s */
 static uint64_t BLACKHOLE_UNTIL;
 static long SENT_DGRAMS, LOST_DGRAMS;
@@ -372,6 +373,7 @@ static int run(int nreq, int loss, int reorder) {
   int r0 = quic_connect(&cl.q, &CQX, "localhost", now_ms(), &CQCB, &cl);
   CHECK(r0 == 0, "quic_connect %d", r0);
   int accepted = 0, retries = 0, max_burst = 0, over_burst = 0, over_allowed = 0;
+  uint64_t lost_at = 0;
   long before = fails;
   uint8_t out[1500];
   uint64_t start = NOW_NS;
@@ -381,6 +383,13 @@ static int run(int nreq, int loss, int reorder) {
     while ((n = quic_send(&cl.q, out, sizeof out, now_ms())) > 0) put(&TO_SRV, out, n);
     dgram g;
     while (take(&TO_SRV, &g)) {
+      if (LOSE_STATE && cl.done >= nreq / 2) { /* the server restarted: it knows the connection no more */
+        uint8_t rt[64];
+        size_t rn = quic_stateless_reset(&QX, g.d, g.n, rt, sizeof rt);
+        if (rn) put(&TO_CLI, rt, rn);
+        if (!lost_at) lost_at = NOW_NS;
+        continue;
+      }
       if (!accepted) {
         static const char addr[] = "198.51.100.7:4433", other[] = "203.0.113.9:4433";
         int has_token = g.n > 7 && g.d[5] <= 20 && g.d[6 + g.d[5]] <= 20 && g.d[7 + g.d[5] + g.d[6 + g.d[5]]] != 0;
@@ -439,6 +448,16 @@ static int run(int nreq, int loss, int reorder) {
       CHECK(0, "run took > 120 simulated seconds");
       break;
     }
+  }
+  if (LOSE_STATE) { /* the client learns at once: the server's token came in its transport parameters */
+    CHECK(cl.q.reset && cl.q.draining && lost_at && NOW_NS - lost_at < 1000000000ull,
+          "stateless reset: client reset %d draining %d, %.3f s after the server lost the connection", cl.q.reset,
+          cl.q.draining, lost_at ? (NOW_NS - lost_at) / 1e9 : -1.0);
+    printf("  loss %2d%%: the server lost its state halfway; the client was reset after %.0f ms\n", loss,
+           (NOW_NS - lost_at) / 1e6);
+    quic_free(&cl.q);
+    if (accepted) quic_free(&sv.q);
+    return 1;
   }
   CHECK(accepted && sv.h3_ready && cl.ready, "handshake (loss %d%%): accepted %d server h3 %d client h3 %d", loss,
         accepted, sv.h3_ready, cl.ready);
@@ -519,6 +538,7 @@ int main(int argc, char **argv) {
        * whose losses were then never repaired, and the transfer stalled */
       BULK = 1, run(40, 0, 0), BULK = 0;
       RETRY = 1, run(50, 0, 0), run(100, 2, 1), RETRY = 0; /* address validation first */
+      LOSE_STATE = 1, run(60, 0, 0), run(60, 2, 1), LOSE_STATE = 0;
     }
   printf("%s: %ld failures / %ld checks\n", fails ? "FAIL" : "PASS", fails, checks);
   return fails != 0;
