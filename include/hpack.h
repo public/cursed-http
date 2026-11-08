@@ -52,8 +52,7 @@ typedef struct {
   const char *n, *v;
   uint8_t nl, vl;
 } hp_sent;
-#define HPS(n, v)                                                                                                      \
-  { n, v, sizeof(n) - 1, sizeof(v) - 1 }
+#define HPS(n, v) { n, v, sizeof(n) - 1, sizeof(v) - 1 }
 static const hp_sent hp_static[62] = { { 0, 0, 0, 0 },
                                        HPS(":authority", ""),
                                        HPS(":method", "GET"),
@@ -120,11 +119,18 @@ static const hp_sent hp_static[62] = { { 0, 0, 0, 0 },
 
 /* first static index whose name is (p, n), or 0. One pass over the 61 names, filtered by length and
  * first byte; called once per literal name (dynamic entries cache the result). */
+/* the static table's names by a collision-free hash of length, first and last byte: the first index of each */
+static const uint8_t hp__nslot[128] = { 0,  31, 54, 51, 0,  0,  0,  0,  57, 0,  0,  26, 35, 0,  39, 0,  30, 48, 17,
+                                        0,  28, 0,  18, 33, 38, 42, 8,  0,  29, 0,  0,  59, 40, 24, 46, 0,  0,  20,
+                                        0,  32, 58, 0,  0,  0,  0,  0,  0,  47, 56, 1,  0,  0,  0,  0,  0,  0,  0,
+                                        0,  22, 0,  0,  27, 43, 53, 0,  0,  0,  55, 0,  0,  0,  0,  0,  25, 0,  0,
+                                        15, 0,  0,  4,  0,  2,  0,  23, 19, 61, 0,  0,  0,  41, 0,  0,  0,  0,  21,
+                                        0,  16, 0,  0,  0,  0,  0,  0,  44, 60, 0,  50, 37, 0,  0,  0,  0,  0,  45,
+                                        0,  34, 36, 0,  0,  0,  6,  0,  0,  0,  0,  52, 0,  49 };
 static inline int hp_name_index(const uint8_t *p, size_t n) {
   if (n == 0 || n > 27) return 0;
-  for (int i = 1; i <= 61; i++)
-    if (hp_static[i].nl == n && hp_static[i].n[0] == p[0] && !memcmp(hp_static[i].n, p, n)) return i;
-  return 0;
+  int i = hp__nslot[(n * 15 + (size_t)p[0] * 14 + (size_t)p[n - 1] * 39) & 127];
+  return i && hp_static[i].nl == n && !memcmp(hp_static[i].n, p, n) ? i : 0;
 }
 
 /* --------------------------------------- decoder --------------------------------------- */
@@ -381,4 +387,146 @@ static inline size_t hp_enc_field(uint8_t *dst, const uint8_t *name, size_t nl, 
   else *p++ = never ? 0x10 : 0x00, p = hp__put_str(p, name, nl);
   return (size_t)(hp__put_str(p, val, vl) - dst);
 }
+/* ------------------------------- encoder with a dynamic table ------------------------------- */
+/* What a client wants for repeated request headers: each field it sends again (user-agent, cookie, accept, ...)
+ * costs one byte once it is in the table. The rules are nghttp2's (and Firefox's): authorization, a cookie
+ * shorter than 20 bytes and never-indexed fields are never indexed; :path, age, content-length, etag,
+ * if-modified-since, if-none-match, location, set-cookie and anything over 3/4 of the table go without
+ * indexing; everything else is indexed incrementally. Blocks must reach the peer in the order they are encoded.
+ *   hp_enc_init(&e, cap)                     a table of at most cap bytes (<= HP_ENC_TABLE)
+ *   hp_enc_resize(&e, cap)                   the peer's SETTINGS_HEADER_TABLE_SIZE changed: the next block
+ *                                            starts with the size update(s) RFC 7541 §4.2 asks for
+ *   p += hp_enc_begin(&e, p)                 at the start of every block (pending size updates)
+ *   p += hp_enc_ifield(&e, p, n, nl, v, vl, never)   one field: hp_enc_bound(nl, vl) bytes at most */
+#ifndef HP_ENC_TABLE
+#define HP_ENC_TABLE 4096
+#endif
+#define HP_ENC_N   (HP_ENC_TABLE / 32) /* the most entries a table this size holds */
+#define HP_ENC_MAP (2 * HP_ENC_N)      /* hash slots (a power of two) */
+typedef struct {
+  uint32_t cap, size, want, low; /* in use, current size; target (the peer's limit) and its lowest since a block */
+  uint32_t ins, gone;            /* entries inserted / evicted: entry k (absolute) is live for gone <= k < ins */
+  uint32_t dlo, dhi;             /* their bytes, data[dlo, dhi), oldest first */
+  uint32_t stale;                /* evictions since the maps were rebuilt */
+  uint32_t fh[HP_ENC_N], nh[HP_ENC_N]; /* per entry (k % HP_ENC_N): hash of name + value, of the name */
+  uint32_t off[HP_ENC_N];
+  uint16_t nl[HP_ENC_N], vl[HP_ENC_N];
+  uint16_t fmap[HP_ENC_MAP], nmap[HP_ENC_MAP]; /* open addressing: k % HP_ENC_N + 1 of the newest entry, 0 empty */
+  uint8_t data[2 * HP_ENC_TABLE];
+} hp_enc;
+
+static inline uint32_t hp__ehash(uint32_t h, const uint8_t *p, size_t n) {
+  uint64_t x = h ^ (uint64_t)n * 0x9e3779b97f4a7c15ull;
+  for (; n >= 8; n -= 8, p += 8) {
+    uint64_t w;
+    memcpy(&w, p, 8);
+    x = (x ^ w) * 0xff51afd7ed558ccdull, x ^= x >> 32;
+  }
+  if (n) {
+    uint64_t w = 0;
+    memcpy(&w, p, n);
+    x = (x ^ w) * 0xc4ceb9fe1a85ec53ull, x ^= x >> 29;
+  }
+  return (uint32_t)x | 1; /* never 0 */
+}
+static inline void hp__emap_put(uint16_t *map, const uint32_t *hs, uint32_t slot) {
+  uint32_t h = hs[slot];
+  for (uint32_t i = h & (HP_ENC_MAP - 1);; i = (i + 1) & (HP_ENC_MAP - 1)) {
+    uint32_t o = map[i];
+    if (!o || hs[o - 1] == h || o - 1 == slot) { /* empty, or the same key (the newest entry wins) */
+      map[i] = (uint16_t)(slot + 1);
+      return;
+    }
+  }
+}
+static inline void hp__emap_rebuild(hp_enc *e) {
+  memset(e->fmap, 0, sizeof e->fmap), memset(e->nmap, 0, sizeof e->nmap);
+  for (uint32_t k = e->gone; k < e->ins; k++)
+    hp__emap_put(e->fmap, e->fh, k % HP_ENC_N), hp__emap_put(e->nmap, e->nh, k % HP_ENC_N);
+  e->stale = 0;
+}
+static inline void hp_enc_init(hp_enc *e, uint32_t cap) {
+  e->cap = e->want = e->low = cap < HP_ENC_TABLE ? cap : HP_ENC_TABLE;
+  e->size = e->ins = e->gone = e->dlo = e->dhi = e->stale = 0;
+  memset(e->fmap, 0, sizeof e->fmap), memset(e->nmap, 0, sizeof e->nmap);
+}
+static inline void hp__eevict(hp_enc *e) {
+  uint32_t s = e->gone % HP_ENC_N;
+  e->size -= (uint32_t)e->nl[s] + e->vl[s] + 32, e->dlo += (uint32_t)e->nl[s] + e->vl[s], e->gone++;
+  if (e->gone == e->ins) e->dlo = e->dhi = 0;
+  if (++e->stale >= HP_ENC_N / 2) hp__emap_rebuild(e); /* dead slots lengthen probes (and must leave one empty) */
+}
+static inline void hp__ecap(hp_enc *e, uint32_t cap) {
+  e->cap = cap;
+  while (e->size > cap) hp__eevict(e);
+}
+static inline void hp_enc_resize(hp_enc *e, uint32_t peer) {
+  e->want = peer < HP_ENC_TABLE ? peer : HP_ENC_TABLE;
+  if (e->want < e->low) e->low = e->want;
+}
+static inline size_t hp_enc_begin(hp_enc *e, uint8_t *dst) {
+  uint8_t *p = dst;
+  if (e->low < e->cap) p += hp_enc_size_update(p, e->low), hp__ecap(e, e->low); /* the smallest first */
+  if (e->want != e->cap) p += hp_enc_size_update(p, e->want), hp__ecap(e, e->want);
+  e->low = e->want;
+  return (size_t)(p - dst);
+}
+/* a live entry in slot o - 1 (o from a map) whose key is h: its absolute number, or UINT32_MAX */
+static inline uint32_t hp__elive(const hp_enc *e, uint32_t o, uint32_t h, const uint32_t *hs) {
+  if (!o || hs[o - 1] != h) return UINT32_MAX;
+  uint32_t s = o - 1, k = e->ins - 1 - ((e->ins - 1 - s) % HP_ENC_N); /* the newest absolute number in slot s */
+  return k >= e->gone && k < e->ins ? k : UINT32_MAX;
+}
+static inline uint32_t hp__efind(const hp_enc *e, const uint16_t *map, const uint32_t *hs, uint32_t h, const uint8_t *n,
+                                 size_t nl, const uint8_t *v, size_t vl) {
+  for (uint32_t i = h & (HP_ENC_MAP - 1);; i = (i + 1) & (HP_ENC_MAP - 1)) {
+    uint32_t o = map[i];
+    if (!o) return UINT32_MAX;
+    uint32_t k = hp__elive(e, o, h, hs);
+    if (k == UINT32_MAX) continue;
+    uint32_t s = k % HP_ENC_N;
+    const uint8_t *d = e->data + e->off[s];
+    if (e->nl[s] == nl && !memcmp(d, n, nl) && (!v || (e->vl[s] == vl && !memcmp(d + nl, v, vl)))) return k;
+  }
+}
+static inline size_t hp_enc_ifield(hp_enc *e, uint8_t *dst, const uint8_t *name, size_t nl, const uint8_t *val,
+                                   size_t vl, int never) {
+  int si = hp_name_index(name, nl);
+  uint8_t *p = dst;
+  if (!never) never = si == 23 || (si == 32 && vl < 20); /* authorization; a short cookie */
+  int idx = !never && nl + vl + 32 <= e->cap * 3 / 4 && si != 4 && si != 5 && si != 21 && si != 28 && si != 34 &&
+            si != 40 && si != 41 && si != 46 &&
+            si != 55; /* :path, age, content-length, etag, if-*, location, set-cookie */
+  uint32_t nh = e->cap ? hp__ehash(0, name, nl) : 0, fh = e->cap ? hp__ehash(nh, val, vl) : 0;
+  if (e->cap && !never) { /* (a never-indexed field stays a literal, flag and all: RFC 7541 §6.2.3) */
+    uint32_t k = hp__efind(e, e->fmap, e->fh, fh, name, nl, val, vl);
+    if (k != UINT32_MAX) return (size_t)(hp__put_int(p, 0x80, 7, 62 + (e->ins - 1 - k)) - dst);
+  }
+  uint32_t nref = (uint32_t)si; /* the name: static when it is there, else a dynamic entry with it */
+  if (!nref && e->cap) {
+    uint32_t k = hp__efind(e, e->nmap, e->nh, nh, name, nl, NULL, 0);
+    if (k != UINT32_MAX) nref = 62 + (e->ins - 1 - k);
+  }
+  if (idx) p = nref ? hp__put_int(p, 0x40, 6, nref) : (*p++ = 0x40, hp__put_str(p, name, nl));
+  else if (nref) p = hp__put_int(p, never ? 0x10 : 0x00, 4, nref);
+  else *p++ = never ? 0x10 : 0x00, p = hp__put_str(p, name, nl);
+  p = hp__put_str(p, val, vl);
+  if (idx) { /* insert: evict to make room, keep the bytes contiguous (compact when the buffer's end is reached) */
+    uint32_t sz = (uint32_t)(nl + vl + 32);
+    while (e->size + sz > e->cap) hp__eevict(e);
+    if (e->ins - e->gone == HP_ENC_N) hp__eevict(e);
+    if (e->dhi + nl + vl > sizeof e->data) {
+      memmove(e->data, e->data + e->dlo, e->dhi - e->dlo);
+      for (uint32_t k = e->gone; k < e->ins; k++) e->off[k % HP_ENC_N] -= e->dlo;
+      e->dhi -= e->dlo, e->dlo = 0;
+    }
+    uint32_t s = e->ins % HP_ENC_N;
+    memcpy(e->data + e->dhi, name, nl), memcpy(e->data + e->dhi + nl, val, vl);
+    e->off[s] = e->dhi, e->nl[s] = (uint16_t)nl, e->vl[s] = (uint16_t)vl, e->fh[s] = fh, e->nh[s] = nh;
+    e->dhi += (uint32_t)(nl + vl), e->size += sz, e->ins++;
+    hp__emap_put(e->fmap, e->fh, s), hp__emap_put(e->nmap, e->nh, s);
+  }
+  return (size_t)(p - dst);
+}
+
 #endif

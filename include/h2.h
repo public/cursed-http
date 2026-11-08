@@ -158,7 +158,7 @@ struct h2_conn {
   h2_callbacks cb;
   void *user;
   uint32_t preface_left; /* client preface bytes still expected */
-  uint8_t got_settings, closed, goaway_sent, goaway_recv, sent_size_update;
+  uint8_t got_settings, closed, goaway_sent, goaway_recv;
   uint8_t client;       /* h2_init_client */
   uint32_t last_sid;    /* highest client stream id seen (a client: the last one it opened) */
   uint32_t next_sid;    /* a client's next stream id */
@@ -169,6 +169,7 @@ struct h2_conn {
   int nactive;
   uint32_t qh, qn; /* send queue: ring of stream slots with a body or trailers pending */
   uint16_t q[H2_MAX_STREAMS];
+  hp_enc enc; /* a client indexes its requests' fields; a server's table is 0 (one size update) */
   hp_dec dec;
   size_t stage_len, stage_off;
   uint8_t stage[H2_STAGE];
@@ -198,6 +199,9 @@ static inline uint8_t *h2__stage(h2_conn *c, size_t n) {
   uint8_t *p = c->stage + c->stage_len;
   c->stage_len += n;
   return p;
+}
+static inline int h2__stage_room(const h2_conn *c, size_t n) {
+  return c->stage_len - c->stage_off + n <= sizeof c->stage;
 }
 static inline void h2__ctrl(h2_conn *c, uint8_t type, uint8_t flags, uint32_t sid, const uint8_t *payload, uint32_t n) {
   uint8_t *p = h2__stage(c, 9 + n);
@@ -273,6 +277,7 @@ static inline void h2_init(h2_conn *c, const h2_callbacks *cb, void *user) {
   c->stage_len = c->stage_off = 0;
   for (int i = 0; i < H2_MAX_STREAMS; i++) c->s[i].state = H2S_FREE;
   hp_dec_init(&c->dec, 4096);
+  hp_enc_init(&c->enc, 4096), hp_enc_resize(&c->enc, 0); /* responses never index */
   /* server preface: SETTINGS, then the connection window raised once */
   uint8_t st[18];
   const uint16_t id[3] = { 0x3 /* MAX_CONCURRENT_STREAMS */, 0x6 /* MAX_HEADER_LIST_SIZE */, 0x2 /* ENABLE_PUSH */ };
@@ -297,6 +302,7 @@ static inline void h2_init_client(h2_conn *c, const h2_callbacks *cb, void *user
   c->stage_len = c->stage_off = 0;
   for (int i = 0; i < H2_MAX_STREAMS; i++) c->s[i].state = H2S_FREE;
   hp_dec_init(&c->dec, 4096);
+  hp_enc_init(&c->enc, 4096); /* the peer's default SETTINGS_HEADER_TABLE_SIZE */
   uint8_t *p = h2__stage(c, 24);
   memcpy(p, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 24);
   uint8_t st[18];
@@ -579,7 +585,10 @@ static inline int h2__frame(h2_conn *c, h2_scratch *sc, const uint8_t *p, size_t
         uint16_t id = (uint16_t)(pl[i] << 8 | pl[i + 1]);
         uint32_t v = h2__be32(pl + i + 2);
         switch (id) {
-          case 1: c->peer_header_table = v; break;
+          case 1:
+            c->peer_header_table = v;
+            if (c->client) hp_enc_resize(&c->enc, v);
+            break;
           case 2: /* a server may only send 0 (§6.5.2) */
             if (v > 1 || (c->client && v)) return h2__fail(c, H2_PROTOCOL_ERROR);
             break;
@@ -671,9 +680,13 @@ static inline int h2_recv(h2_conn *c, h2_scratch *sc, const uint8_t *buf, size_t
 }
 
 /* ------------------------------------------- send ------------------------------------------- */
-static inline size_t h2__enc_block(h2_conn *c, uint8_t *dst, size_t cap, int status, const hp_field *f, int n) {
+/* staged: the block goes to the stage now, so it may carry the table size updates due (a server's one, to 0);
+ * trailers wait in their stream and may reach the wire after later blocks, so they carry none */
+static inline size_t h2__enc_block(h2_conn *c, uint8_t *dst, size_t cap, int staged, int status, const hp_field *f,
+                                   int n) {
   uint8_t *p = dst, *e = dst + cap;
-  if (!c->sent_size_update) p += hp_enc_size_update(p, 0), c->sent_size_update = 1; /* we never index */
+  if (cap < 32) return 0;
+  if (staged) p += hp_enc_begin(&c->enc, p);
   if (status) p += hp_enc_status(p, status);
   for (int i = 0; i < n; i++) {
     if ((size_t)(e - p) < hp_enc_bound(f[i].nlen, f[i].vlen)) return 0;
@@ -702,7 +715,7 @@ static inline int h2_respond(h2_conn *c, uint32_t sid, int status, const hp_fiel
   h2_stream *s = h2__find(c, sid);
   if (c->client || !s || (s->flags & H2_ST_RESPONDED)) return H2_E_STATE;
   uint8_t blk[H2_STAGE];
-  size_t bl = h2__enc_block(c, blk, sizeof blk, status, f, n);
+  size_t bl = h2__enc_block(c, blk, sizeof blk, 1, status, f, n);
   if (!bl) return H2_E_TOO_BIG;
   int headers_end = end && !body;
   int r = h2__stage_block(c, sid, blk, bl, headers_end ? H2_FL_END_STREAM : 0);
@@ -744,14 +757,17 @@ static inline int h2_submit(h2_conn *c, const h2_request *rq, const uint8_t *bod
   size_t need = 32 + rq->method_len + rq->scheme_len + rq->authority_len + rq->path_len;
   for (int i = 0; i < rq->nfields; i++) need += hp_enc_bound(rq->fields[i].nlen, rq->fields[i].vlen);
   if (need > sizeof blk) return H2_E_TOO_BIG;
-  if (!c->sent_size_update) p += hp_enc_size_update(p, 0), c->sent_size_update = 1; /* we never index */
+  /* the encoder's table changes as the block is encoded: it must reach the stage, so check for room first */
+  if (!h2__stage_room(c, need + 9 * ((need + c->peer_max_frame - 1) / c->peer_max_frame))) return H2_E_AGAIN;
+  p += hp_enc_begin(&c->enc, p);
   p = h2__pseudo(p, 2, 3, ":method", rq->method, rq->method_len);
   if (rq->scheme) p = h2__pseudo(p, 6, 7, ":scheme", rq->scheme, rq->scheme_len);
-  if (rq->authority) p += hp_enc_field(p, (const uint8_t *)":authority", 10, rq->authority, rq->authority_len, 0);
+  if (rq->authority)
+    p += hp_enc_ifield(&c->enc, p, (const uint8_t *)":authority", 10, rq->authority, rq->authority_len, 0);
   if (rq->path) p = h2__pseudo(p, 4, 5, ":path", rq->path, rq->path_len);
   for (int i = 0; i < rq->nfields; i++) {
     const hp_field *f = &rq->fields[i];
-    p += hp_enc_field(p, f->name, f->nlen, f->value, f->vlen, f->never);
+    p += hp_enc_ifield(&c->enc, p, f->name, f->nlen, f->value, f->vlen, f->never);
   }
   (void)e;
   int headers_end = end && !body;
@@ -783,7 +799,7 @@ static inline int h2_data(h2_conn *c, uint32_t sid, const uint8_t *body, size_t 
 static inline int h2_trailers(h2_conn *c, uint32_t sid, const hp_field *f, int n) {
   h2_stream *s = h2__find(c, sid);
   if (!s || !(s->flags & H2_ST_RESPONDED) || (s->flags & (H2_ST_BODY_END | H2_ST_TRAILERS))) return H2_E_STATE;
-  size_t bl = h2__enc_block(c, s->trailer, sizeof s->trailer, 0, f, n);
+  size_t bl = h2__enc_block(c, s->trailer, sizeof s->trailer, 0, 0, f, n);
   if (!bl) return H2_E_TOO_BIG;
   s->trailer_len = (uint16_t)bl, s->flags |= H2_ST_TRAILERS;
   if (!s->body) s->body = (const uint8_t *)"", s->body_len = s->body_off = 0;
