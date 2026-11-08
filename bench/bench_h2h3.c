@@ -27,6 +27,7 @@
 #include "qpack.h"
 #include "h3.h"
 #include "h2_headers.h"
+#include "h2_client_inputs.h"
 #include <nghttp2/nghttp2.h>
 #include <nghttp3/nghttp3.h>
 #ifdef RIVALS
@@ -799,73 +800,18 @@ static double h3_n3(int s) {
 }
 
 /* ------------------------------------- 5. HTTP/2 client ------------------------------------- */
-/* the responses, one per request of each set: what a browser (a CDN's static file), a gRPC client
- * (trailers) and h2load (a minimal server) get back; every body is BODY */
-typedef struct {
-  const char *n;
-  char v[96];
-} rs_field;
-typedef struct {
-  int n, nt;
-  rs_field f[16], t[2]; /* t: trailers */
-} rs_set;
+/* the responses (bench/h2_client_inputs.h) and requests as h_request, per set */
 static rs_set RS[3][R];
 static long RS_FIELDS[3], RS_TRAILERS[3]; /* totals over a set, for the gates */
 static void build_responses(void) {
   for (int s = 0; s < 3; s++)
-    for (int i = 0; i < R; i++) {
-      rs_set *r = &RS[s][i];
-      r->n = r->nt = 0;
-#define RF(N, ...) (r->f[r->n].n = N, snprintf(r->f[r->n].v, sizeof r->f[0].v, __VA_ARGS__), r->n++)
-      RF(":status", "200");
-      if (s == 0) {
-        RF("date", "Sun, 08 Nov 2026 12:%02d:%02d GMT", i / 60 % 60, i % 60);
-        RF("content-type", "%s", i % 3 ? "text/javascript; charset=utf-8" : "image/webp");
-        RF("content-length", "13");
-        RF("server", "nginx");
-        RF("last-modified", "Mon, 02 Nov 2026 09:%02d:00 GMT", i % 60);
-        RF("etag", "\"%08llx-%x\"", hs_mix((unsigned long long)i) & 0xffffffffull, i + 1000);
-        RF("cache-control", "public, max-age=31536000, immutable");
-        RF("vary", "Accept-Encoding");
-        RF("x-content-type-options", "nosniff");
-        RF("strict-transport-security", "max-age=63072000; includeSubDomains; preload");
-        RF("alt-svc", "h3=\":443\"; ma=86400");
-      } else if (s == 1) {
-        RF("content-type", "application/grpc");
-        RF("grpc-accept-encoding", "identity,deflate,gzip");
-        r->t[0].n = "grpc-status", strcpy(r->t[0].v, "0");
-        r->t[1].n = "grpc-message", strcpy(r->t[1].v, "OK");
-        r->nt = 2;
-      } else {
-        RF("server", "h2o/2.3.0");
-        RF("date", "Sun, 08 Nov 2026 12:00:%02d GMT", i % 60);
-        RF("content-length", "13");
-      }
-#undef RF
-      RS_FIELDS[s] += r->n, RS_TRAILERS[s] += r->nt;
-    }
+    for (int i = 0; i < R; i++) rs_build(&RS[s][i], s, i), RS_FIELDS[s] += RS[s][i].n, RS_TRAILERS[s] += RS[s][i].nt;
 }
-/* the requests as h_request (pseudo-headers split out), for h2_submit / h3_submit */
 static h_request RQ[3][R];
 static hp_field RQF[3][R][24];
 static void build_requests(void) {
   for (int s = 0; s < 3; s++)
-    for (int i = 0; i < R; i++) {
-      const hs_set *h = &SETS[s][i];
-      h_request *q = &RQ[s][i];
-      memset(q, 0, sizeof *q);
-      for (int k = 0; k < h->n; k++) {
-        const uint8_t *v = (const uint8_t *)h->f[k].value;
-        uint32_t vl = (uint32_t)strlen(h->f[k].value);
-        const char *n = h->f[k].name;
-        if (!strcmp(n, ":method")) q->method = v, q->method_len = vl;
-        else if (!strcmp(n, ":scheme")) q->scheme = v, q->scheme_len = vl;
-        else if (!strcmp(n, ":authority")) q->authority = v, q->authority_len = vl;
-        else if (!strcmp(n, ":path")) q->path = v, q->path_len = vl;
-        else RQF[s][i][q->nfields++] = (hp_field){ (const uint8_t *)n, v, (uint32_t)strlen(n), vl, 0, 0, 0, 0 };
-      }
-      q->fields = RQF[s][i], q->content_length = -1;
-    }
+    for (int i = 0; i < R; i++) rq_build(&SETS[s][i], &RQ[s][i], RQF[s][i]);
 }
 /* the server's bytes for one connection, recorded from an nghttp2 server answering an nghttp2 client's R requests
  * (MAX_CONCURRENT_STREAMS 1000, so all go out at once); its first frame, SETTINGS, is fed before the requests */

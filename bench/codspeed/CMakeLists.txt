@@ -36,11 +36,13 @@ else()
   set(CH_MARCH "")
 endif()
 
-add_library(cursed_http_fixtures STATIC fixtures.c ${REPO_ROOT}/vendor/pico/picohttpparser.c)
+add_library(cursed_http_fixtures STATIC fixtures.c client_fixtures.c ${REPO_ROOT}/vendor/pico/picohttpparser.c)
 target_include_directories(cursed_http_fixtures PRIVATE ${REPO_ROOT}/include ${REPO_ROOT}/tests ${REPO_ROOT}/bench
                                                          ${REPO_ROOT}/vendor/pico ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(cursed_http_fixtures PRIVATE ${CH_MARCH} -Wall -Wextra -Wno-unused-function
                                                     -Wno-unused-parameter -Wno-deprecated-declarations)
+# the HTTP/2 server of the client benchmarks' recordings answers all 256 requests at once
+set_source_files_properties(client_fixtures.c PROPERTIES COMPILE_DEFINITIONS H2_MAX_STREAMS=1000)
 
 add_executable(cursed_http_bench bench.cpp)
 target_include_directories(cursed_http_bench PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

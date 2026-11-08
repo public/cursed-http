@@ -158,4 +158,45 @@ static void BM_huffman_decode(benchmark::State &state, int set) {
 BENCHMARK_CAPTURE(BM_huffman_decode, browser, H_BROWSER);
 BENCHMARK_CAPTURE(BM_huffman_decode, grpc, H_GRPC);
 
+// ---------------- HTTP/2 and HTTP/3 clients ----------------
+// one connection: 256 requests encoded and sent, their responses decoded (fields, bodies, trailers)
+static void BM_h2_client(benchmark::State &state, int set) {
+  cb_h2c *c = cb_h2c_new(set);
+  for (auto _ : state) {
+    long r = cb_h2c_run(c);
+    benchmark::DoNotOptimize(r);
+  }
+  state.SetItemsProcessed(state.iterations() * kRequests);
+  cb_h2c_free(c);
+}
+BENCHMARK_CAPTURE(BM_h2_client, browser, H_BROWSER);
+BENCHMARK_CAPTURE(BM_h2_client, grpc, H_GRPC);
+BENCHMARK_CAPTURE(BM_h2_client, h2load, H_H2LOAD);
+
+static void BM_h3_client(benchmark::State &state, int set) {
+  cb_h3c *c = cb_h3c_new(set);
+  for (auto _ : state) {
+    long r = cb_h3c_run(c);
+    benchmark::DoNotOptimize(r);
+  }
+  state.SetItemsProcessed(state.iterations() * kRequests);
+  cb_h3c_free(c);
+}
+BENCHMARK_CAPTURE(BM_h3_client, browser, H_BROWSER);
+BENCHMARK_CAPTURE(BM_h3_client, grpc, H_GRPC);
+BENCHMARK_CAPTURE(BM_h3_client, h2load, H_H2LOAD);
+
+// the request blocks of one connection through hp_enc, the indexing encoder (a fresh table per pass)
+static void BM_hpack_encode(benchmark::State &state, int set) {
+  cb_h2c *c = cb_h2c_new(set);
+  for (auto _ : state) {
+    long r = cb_hpack_encode(c);
+    benchmark::DoNotOptimize(r);
+  }
+  state.SetItemsProcessed(state.iterations() * kRequests);
+  cb_h2c_free(c);
+}
+BENCHMARK_CAPTURE(BM_hpack_encode, browser, H_BROWSER);
+BENCHMARK_CAPTURE(BM_hpack_encode, grpc, H_GRPC);
+
 BENCHMARK_MAIN();
