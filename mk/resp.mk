@@ -76,3 +76,27 @@ $(B)/bench_resp_hx: bench/bench_resp.c $(RESP_HDRS) $(RESP_BENCH_O) $(B)/libhx_r
 	$(CC_T) -DHAVE_HTTPARSE $< $(RESP_BENCH_O) $(B)/libhx_resp.a -lpthread -ldl -lm -o $@
 bench-resp: $(if $(HTTPARSE),$(B)/bench_resp_hx,$(B)/bench_resp) $(RESP_CORPUS)
 	./$< 200 $(dir $(RESP_CORPUS))
+# the HTTP client parsers (tests/responses/fetch-clients.sh first: libcurl, nginx, nodejs/http-parser; + httparse)
+RC := third_party/resp-clients
+RC_NGX := $(RC)/nginx-1.31.8
+RC_NGXI := -I$(RC_NGX)/src/core -I$(RC_NGX)/src/event -I$(RC_NGX)/src/event/modules -I$(RC_NGX)/src/os/unix \
+           -I$(RC_NGX)/src/http -I$(RC_NGX)/src/http/modules -I$(RC_NGX)/objs
+$(B)/rc_curl.o: bench/curl_resp_shim.c | $(B)
+	$(CC) -O3 $(MARCH) -w -I$(RC)/curl-8.23.0/lib -I$(RC)/curl-build/lib -I$(RC)/curl-8.23.0/include -Ivendor/pico \
+	  -DHAVE_CONFIG_H -DBUILDING_LIBCURL -c $< -o $@
+$(B)/rc_nginx.o: bench/nginx_resp_shim.c | $(B)
+	$(CC) -O3 $(MARCH) -w $(RC_NGXI) -Ivendor/pico -c $< -o $@
+$(B)/rc_ngx_parse.o: $(RC_NGX)/src/http/ngx_http_parse.c | $(B)
+	$(CC) -O3 $(MARCH) -w $(RC_NGXI) -c $< -o $@
+$(B)/rc_hp.o: bench/http_parser_resp_shim.c | $(B)
+	$(CC) -O3 $(MARCH) -w -Ithird_party/http-parser -Ivendor/pico -c $< -o $@
+$(B)/rc_hp_parser.o: third_party/http-parser/http_parser.c | $(B)
+	$(CC) -O3 $(MARCH) -w -c $< -o $@
+RC_O := $(B)/rc_curl.o $(B)/rc_nginx.o $(B)/rc_ngx_parse.o $(B)/rc_hp.o $(B)/rc_hp_parser.o
+$(B)/bench_resp_clients: bench/bench_resp.c $(RESP_HDRS) $(RESP_BENCH_O) $(RC_O) $(B)/libhx_resp.a
+	$(CC_T) -DHAVE_HTTPARSE -DHAVE_CLIENTS $< $(RESP_BENCH_O) $(RC_O) $(B)/libhx_resp.a $(RC)/curl-build/lib/libcurl.a \
+	  -lpthread -ldl -lm -o $@
+# + the Go clients (net/http, fasthttp; Go >= 1.26, modules pinned by bench/go-resp/go.sum)
+bench-resp-clients: $(B)/bench_resp_clients $(RESP_CORPUS)
+	./$< 200 $(dir $(RESP_CORPUS))
+	./$< --dump $(B)/resp-heads $(dir $(RESP_CORPUS)) && cd bench/go-resp && go run . ../../$(B)/resp-heads 200

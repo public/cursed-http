@@ -236,6 +236,7 @@ FB_INLINE int fbr_core(const char *b, int len, int *minor, int *status, const ch
   // the reason phrase, with its leading spaces, up to the first ct (pico's get_token_to_eol)
   fbr_scan_t sc;
   sc.k[0] = sc.k[1] = -1;
+  sc.m[0] = sc.m[1] = 0; // never read before a fill (k = -1); set for -Wmaybe-uninitialized
   sc.done = 0;
   int rs = p + 3, e = fbr_ct(b, len, rs, &sc, simd);
   if (e >= len) return -2;
@@ -275,6 +276,7 @@ FB_INLINE int fbr_headers_core(const char *b, int len, struct fb_header *h, size
   }
   fbr_scan_t sc;
   sc.k[0] = sc.k[1] = -1;
+  sc.m[0] = sc.m[1] = 0; // never read before a fill (k = -1); set for -Wmaybe-uninitialized
   sc.done = 0;
   return fbr_headers(b, len, 0, &sc, h, max, num_headers, simd, NULL);
 }

@@ -28,6 +28,14 @@ int lx_parse_response(const char *, size_t, int *, int *, const char **, size_t 
 int hx_parse_response(const char *, size_t, int *, int *, const char **, size_t *, struct phr_header *, size_t *,
                       size_t);
 #endif
+#ifdef HAVE_CLIENTS // make bench-resp-clients: libcurl, nginx's upstream parser, nodejs/http-parser
+int cu_parse_response(const char *, size_t, int *, int *, const char **, size_t *, struct phr_header *, size_t *,
+                      size_t);
+int ngx_parse_response(const char *, size_t, int *, int *, const char **, size_t *, struct phr_header *, size_t *,
+                       size_t);
+int hpn_parse_response(const char *, size_t, int *, int *, const char **, size_t *, struct phr_header *, size_t *,
+                       size_t);
+#endif
 __attribute__((noinline)) static int fb_r(const char *b, size_t l, int *mv, int *st, const char **m, size_t *ml,
                                           struct phr_header *h, size_t *nh, size_t ll) {
   return fb_parse_response(b, l, mv, st, m, ml, (struct fb_header *)h, nh, ll);
@@ -58,6 +66,11 @@ static const struct {
   { "llhttp", lx_parse_response },
 #ifdef HAVE_HTTPARSE
   { "httparse", hx_parse_response },
+#endif
+#ifdef HAVE_CLIENTS
+  { "curl", cu_parse_response },
+  { "nginx", ngx_parse_response },
+  { "http_parser", hpn_parse_response },
 #endif
 };
 enum { NP = sizeof P / sizeof *P };
@@ -135,24 +148,42 @@ static double pass(const corpus_t *c, rfn f) {
   sink += s;
   return now() - t0;
 }
-static void bench(const corpus_t *c, int rounds) {
-  double best[NP];
-  // all parsers must accept every head (else the comparison is unfair): report, and skip a parser that does not
-  for (int p = 0; p < NP; p++) {
-    best[p] = 1e30;
-    int bad = 0;
-    for (int i = 0; i < c->n; i++) {
+// the heads every parser accepts (the others are counted in *left). libcurl waits for the final response after a 1xx
+// and refuses a 101 it did not ask for: the client's protocol, not a parse
+static corpus_t accepted(const corpus_t *c0, int *left) {
+  corpus_t c = *c0;
+  c.b = malloc(sizeof(char *) * (c0->n + 1));
+  c.len = malloc(sizeof(int) * (c0->n + 1));
+  c.n = 0;
+  c.bytes = 0;
+  *left = 0;
+  for (int i = 0; i < c0->n; i++) {
+    int ok = 1;
+    for (int p = 0; p < NP && ok; p++) {
       int mv, st;
       const char *m;
       size_t ml, nh = MAXH;
       struct phr_header h[MAXH];
-      if (P[p].f(c->b[i], c->len[i], &mv, &st, &m, &ml, h, &nh, 0) != c->len[i]) bad++;
+      ok = P[p].f(c0->b[i], c0->len[i], &mv, &st, &m, &ml, h, &nh, 0) == c0->len[i];
     }
-    if (bad) {
-      printf("  (%s rejects %d of %d heads: not timed)\n", P[p].name, bad, c->n);
-      best[p] = -1;
+    if (!ok) {
+      ++*left;
+      continue;
     }
+    c.b[c.n] = c0->b[i];
+    c.len[c.n++] = c0->len[i];
+    c.bytes += c0->len[i];
   }
+  return c;
+}
+static void bench(const corpus_t *c0, int rounds) {
+  double best[NP];
+  int left;
+  static corpus_t c1;
+  corpus_t *c = &c1;
+  *c = accepted(c0, &left); // every parser is timed on the same heads
+  if (left) printf("  (%s: %d of %d heads left out: not accepted by every parser)\n", c0->name, left, c0->n);
+  for (int p = 0; p < NP; p++) best[p] = 1e30;
   for (int r = 0; r < rounds; r++)
     for (int k = 0; k < NP; k++) {
       int p = (k + r) % NP;
@@ -161,7 +192,9 @@ static void bench(const corpus_t *c, int rounds) {
       if (t < best[p]) best[p] = t;
     }
   printf("%-14s %6d heads, %5.0f B/head:", c->name, c->n, (double)c->bytes / c->n);
-  double pico = best[3];
+  double pico = 0;
+  for (int p = 0; p < NP; p++)
+    if (!strcmp(P[p].name, "pico")) pico = best[p];
   for (int p = 0; p < NP; p++)
     if (best[p] < 0) printf("  %s -", P[p].name);
     else printf("  %s %.1f ns (%.2fx)", P[p].name, best[p] / c->n, pico / best[p]);
@@ -237,7 +270,43 @@ static void bench_chunked(int rounds) {
   }
 }
 
+// --dump DIR [CORPUS...]: write every corpus's heads (the built-in shapes, and the heads cut out of each CORPUS) to
+// DIR/<name>/responses.dat, for the benchmarks in other languages (bench/go-resp)
+static corpus_t accepted(const corpus_t *c0, int *left);
+static void dump(const corpus_t *c0, const char *dir) {
+  int left;
+  corpus_t cc = accepted(c0, &left), *c = &cc; // the heads bench() times
+  char path[700];
+  snprintf(path, sizeof path, "mkdir -p '%s/%s'", dir, c->name);
+  if (system(path)) exit(2);
+  snprintf(path, sizeof path, "%s/%s/responses.dat", dir, c->name);
+  FILE *f = fopen(path, "wb");
+  for (int i = 0; i < c->n; i++) {
+    unsigned char lb[4] = { (unsigned char)c->len[i], (unsigned char)(c->len[i] >> 8), (unsigned char)(c->len[i] >> 16),
+                            (unsigned char)(c->len[i] >> 24) };
+    fwrite(lb, 1, 4, f);
+    fwrite(c->b[i], 1, c->len[i], f);
+  }
+  fclose(f);
+}
+
 int main(int argc, char **argv) {
+  if (argc > 2 && !strcmp(argv[1], "--dump")) {
+    static char s[1 << 14];
+    for (int k = 0; k < RS_N; k++) {
+      corpus_t c = { 0 };
+      snprintf(c.name, sizeof c.name, "%s", RS_NAME[k]);
+      rs_seed();
+      for (int i = 0; i < 256; i++) add(&c, s, rs_shape(k, s));
+      dump(&c, argv[2]);
+    }
+    for (int a = 3; a < argc; a++) {
+      corpus_t c = { 0 };
+      load_dir(&c, argv[a]);
+      dump(&c, argv[2]);
+    }
+    return 0;
+  }
   int rounds = argc > 1 && atoi(argv[1]) > 0 ? atoi(argv[1]) : 200;
   printf("bench_resp: fbresp backend %s; ns per head, best of %d interleaved passes; (x) = pico's time / this\n",
          FB_BACKEND_NAME, rounds);
