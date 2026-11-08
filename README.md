@@ -1146,6 +1146,34 @@ takes the best of 300 interleaved passes per parser. Vultr 1-vCPU VMs, 2026-11-0
 `fbr_parse` (the head plus the RFC 9112 framing) adds 15–48% to fbresp.h's time. With the framing, it is 1.00–1.77×
 pico's time for the head alone (1.00× on Cascade Lake's api and 304 heads).
 
+**vs the HTTP clients' own parsers** (`tests/responses/fetch-clients.sh`, then `make bench-resp-clients`; c007,
+2026-11-08, gcc). ns per head on the heads every parser accepts. libcurl waits for the final response after a 1xx and
+refuses a 101 it did not ask for, so 22 of the 248 server heads are left out for every parser. Each figure is the
+other parser's time / fbresp.h's:
+
+| CPU | corpus | fbresp.h | pico | httparse ¹ | llhttp ² | libcurl ³ | nginx ⁴ | http_parser ⁵ | Go net/http ⁶ | fasthttp ⁶ |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Turin | top-1k | **199** | 2.1× | 2.7× | 4.5× | 12.8× | 7.9× | 8.2× | 23.7× | 5.9× |
+| | servers | **35** | 1.6× | 2.0× | 3.6× | 15.9× | 3.4× | 6.9× | 24.1× | 5.8× |
+| Genoa | top-1k | **221** | 1.9× | 2.6× | 4.4× | 14.6× | 8.9× | 10.5× | 27.3× | 6.8× |
+| | servers | **43** | 1.5× | 2.6× | 3.7× | 15.7× | 3.6× | 7.6× | 24.5× | 6.5× |
+| Cascade Lake | top-1k | **380** | 1.7× | 2.4× | 4.0× | 15.1× | 7.4× | 12.3× | 25.5× | 6.8× |
+| | servers | **74** | 1.5× | 2.5× | 4.1× | 16.1× | 3.5× | 7.8× | 23.7× | 7.1× |
+
+What each figure includes:
+1. **httparse** 1.10.1's `Response`: the parser in hyper, and so in reqwest.
+2. **llhttp** 9.4.3 in response mode, with callbacks recording spans: the parser in Node's `http`, undici, aiohttp and
+   httptools.
+3. **libcurl** 8.23.0: `Curl_http_write_resp_hds`, the code every curl transfer runs on the bytes it receives. That's
+   line splitting, the status line, header handling, header storage for `curl_easy_header()` and the header callback,
+   plus a request reset per response. curl has no standalone parser.
+4. **nginx** 1.31.8: `ngx_http_parse_status_line` and `ngx_http_parse_header_line`, the parser of its upstream (proxy)
+   side, without the proxy's per-header hash lookup and copy.
+5. **nodejs/http-parser**: Node's parser before llhttp, still embedded in many C clients.
+6. **Go 1.27.3** with fasthttp 1.77.0 (`bench/go-resp`): `http.ReadResponse`, which builds the `Response` and its
+   `Header` map, and fasthttp's `ResponseHeader.Read`. Both read from a reused `bufio.Reader`, run in a separate
+   process right after the C run on the same box and heads.
+
 Chunked bodies (`fbr_chunked`, the same run). The table is pico's `phr_decode_chunked` (in place) time / fbr_chunked's,
 gcc:
 
