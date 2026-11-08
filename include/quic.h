@@ -96,6 +96,7 @@ typedef struct {
 typedef struct {
   ptls_context_t *tls;
   void *(*alloc)(void *p, size_t n); /* realloc-like; n == 0 frees */
+  uint8_t token_key[16];             /* a server's Retry tokens (random per quic_ctx_init) */
 } quic_ctx;
 
 /* --------------------------------------------- varints --------------------------------------------- */
@@ -405,6 +406,11 @@ struct quic_conn {
   ptls_buffer_t tpbuf;
   ptls_raw_extension_t tpext[2];
   uint8_t dcid[20], scid[QUIC_SCID_LEN], odcid[20], dcid_len, odcid_len;
+  uint8_t idcid[20], idcid_len;          /* a server's: the DCID of the client's Initials (odcid, or after a Retry its
+                                           * Source Connection ID) */
+  uint8_t retried, rscid[20], rscid_len; /* a Retry happened: the server's Retry Source Connection ID */
+  uint8_t *token;                        /* a client's: the Retry token its Initials carry */
+  uint16_t token_len;
   quic_space sp[QUIC_NSP];
   ptls_cipher_suite_t *cs; /* negotiated suite (for key updates) */
   uint8_t app_secret_rx[PTLS_MAX_DIGEST_SIZE], app_secret_tx[PTLS_MAX_DIGEST_SIZE];
@@ -475,6 +481,7 @@ static inline void quic_ctx_init(quic_ctx *x, ptls_context_t *tls) {
   tls->omit_end_of_early_data = 1;
   tls->update_traffic_key = &quic__utk;
   tls->max_early_data_size = 0;
+  tls->random_bytes(x->token_key, sizeof x->token_key);
 }
 
 /* slots probed from a hash of the id: O(1) on average */
@@ -728,7 +735,7 @@ static inline uint8_t *quic__tp_int(uint8_t *p, uint64_t id, uint64_t v) {
 }
 static inline int quic__decode_tp(quic_conn *c, const uint8_t *p, const uint8_t *end) {
   uint64_t seen = 0, bidi_remote = 0;
-  int have_iscid = 0, have_odcid = 0;
+  int have_iscid = 0, have_odcid = 0, have_rscid = 0;
   c->peer_max_ack_delay = 25, c->peer_ack_delay_exp = 3;
   uint64_t bidi_local = 0;
   while (p < end) {
@@ -749,8 +756,12 @@ static inline int quic__decode_tp(quic_conn *c, const uint8_t *p, const uint8_t 
       case 0x02: /* stateless_reset_token: kept for nothing (no stateless reset detection) */
         if (!c->client || len != 16) return -1;
         break;
-      case 0x10: /* preferred_address: we stay on the first path */
+      case 0x0d: /* preferred_address: we stay on the first path */
         if (!c->client) return -1;
+        break;
+      case 0x10: /* retry_source_connection_id: present exactly when there was a Retry, and its SCID */
+        if (!c->client || !c->retried || len != c->rscid_len || memcmp(p, c->rscid, len)) return -1;
+        have_rscid = 1;
         break;
       case 0x06: bidi_remote = v; break;
       case 0x03:
@@ -786,7 +797,7 @@ static inline int quic__decode_tp(quic_conn *c, const uint8_t *p, const uint8_t 
     }
     p += len;
   }
-  if (!have_iscid || (c->client && !have_odcid)) return -1;
+  if (!have_iscid || (c->client && (!have_odcid || have_rscid != c->retried))) return -1;
   c->peer_bidi_local = bidi_local, c->peer_bidi_remote = bidi_remote;
   for (int i = 0; i < QUIC_MAX_STREAMS; i++)
     if (c->s[i].used && !(c->s[i].id & 2)) c->s[i].max_send = QUIC__OURS(c, c->s[i].id) ? bidi_remote : bidi_local;
@@ -831,6 +842,8 @@ static inline int quic__collected_ext(ptls_t *tls, ptls_handshake_properties_t *
   p = quic__tp_int(p, 0x09, QUIC_MAX_UNI);
   p = quic__put_vi(p, 0x0c), p = quic__put_vi(p, 0); /* disable_active_migration */
   p = quic__put_vi(p, 0x0f), p = quic__put_vi(p, QUIC_SCID_LEN), memcpy(p, c->scid, QUIC_SCID_LEN), p += QUIC_SCID_LEN;
+  if (c->retried) /* retry_source_connection_id */
+    p = quic__put_vi(p, 0x10), p = quic__put_vi(p, c->rscid_len), memcpy(p, c->rscid, c->rscid_len), p += c->rscid_len;
   ptls_buffer_init(&c->tpbuf, "", 0);
   if (ptls_buffer_reserve(&c->tpbuf, (size_t)(p - tp))) return PTLS_ERROR_NO_MEMORY;
   memcpy(c->tpbuf.base, tp, (size_t)(p - tp)), c->tpbuf.off = (size_t)(p - tp);
@@ -1287,6 +1300,60 @@ static inline uint32_t quic__be32(const uint8_t *p) {
   return (uint32_t)p[0] << 24 | (uint32_t)p[1] << 16 | (uint32_t)p[2] << 8 | p[3];
 }
 
+
+/* ---------------------------------------------- Retry ---------------------------------------------- */
+/* the Retry Integrity Tag (RFC 9001 §5.8): AES-128-GCM over the Retry pseudo-packet (ODCID, then the packet
+ * without its tag), with QUIC v1's fixed key and nonce; tag is 16 bytes */
+static inline int quic__retry_tag(const uint8_t *odcid, size_t odl, const uint8_t *pkt, size_t n, uint8_t *tag) {
+  static const uint8_t key[16] = { 0xbe, 0x0c, 0x69, 0x0b, 0x9f, 0x66, 0x57, 0x5a,
+                                   0x1d, 0x76, 0x6b, 0x54, 0xe3, 0x68, 0xc8, 0x4e };
+  static const uint8_t iv[12] = { 0x46, 0x15, 0x99, 0xd3, 0x5d, 0x63, 0x2b, 0xf2, 0x23, 0x98, 0x25, 0xbb };
+  extern ptls_aead_algorithm_t ptls_openssl_aes128gcm;
+  uint8_t aad[1 + 20 + 1500];
+  if (odl > 20 || n > 1500) return -1;
+  aad[0] = (uint8_t)odl, memcpy(aad + 1, odcid, odl), memcpy(aad + 1 + odl, pkt, n);
+  ptls_aead_context_t *a = ptls_aead_new_direct(&ptls_openssl_aes128gcm, 1, key, iv);
+  if (!a) return -1;
+  ptls_aead_encrypt(a, tag, "", 0, 0, aad, 1 + odl + n);
+  ptls_aead_free(a);
+  return 0;
+}
+/* a client's Retry (RFC 9000 §17.2.5): p..end the datagram's rest (a Retry is the last packet), scid its Source
+ * Connection ID, tok its token. Used once, before any server Initial: then the Initials go again, to the new
+ * Destination Connection ID with new keys and the token. Returns the bytes used (all of them) */
+static inline size_t quic__on_retry(quic_conn *c, const uint8_t *p, const uint8_t *end, const uint8_t *scid, size_t sl,
+                                    const uint8_t *tok) {
+  size_t n = (size_t)(end - p);
+  if (c->retried || c->got_server_cid || end - tok <= 16 || n > 1500 ||
+      (sl == c->odcid_len && !memcmp(scid, c->odcid, sl)))
+    return n;
+  uint8_t tag[16];
+  if (quic__retry_tag(c->odcid, c->odcid_len, p, n - 16, tag) || memcmp(tag, end - 16, 16)) return n;
+  size_t tl = (size_t)(end - 16 - tok);
+  uint8_t *t = c->ctx->alloc(NULL, tl);
+  if (!t) return n;
+  c->token = t, c->token_len = (uint16_t)tl, memcpy(t, tok, tl);
+  c->retried = 1, memcpy(c->rscid, scid, sl), c->rscid_len = (uint8_t)sl;
+  memcpy(c->dcid, scid, sl), c->dcid_len = (uint8_t)sl;
+  extern ptls_cipher_suite_t ptls_openssl_aes128gcmsha256;
+  quic_space *sp = &c->sp[QUIC_SP_INITIAL];
+  quic__key_free(&sp->rx), quic__key_free(&sp->tx);
+  if (quic__initial_keys_role(&sp->rx, &sp->tx, scid, sl, &ptls_openssl_aes128gcmsha256, 1)) {
+    quic__error(c, QUIC_INTERNAL_ERROR, 0);
+    return n;
+  }
+  /* what was sent in Initials goes again (packet numbers carry on, RFC 9000 §17.2.5.3): it all counts as lost,
+   * without counting against congestion control (nothing was lost in the network) */
+  for (uint32_t i = 0; i < sp->nsent; i++) {
+    quic_sent *r = quic__sent_at(sp, i);
+    if (r->acked || r->lost) continue;
+    if (r->in_flight) c->bytes_in_flight -= r->size;
+    for (int k = 0; k < r->nf; k++) quic__frame_lost(c, sp, &r->f[k]);
+  }
+  sp->nsent = 0, sp->loss_time = 0, c->pto_count = 0;
+  return n;
+}
+
 /* one packet at p (datagram end at end): returns the bytes it occupies, or 0 to drop the rest */
 static inline size_t quic__packet(quic_conn *c, uint8_t *p, uint8_t *end, int64_t now) {
   size_t avail = (size_t)(end - p), pn_off;
@@ -1301,13 +1368,14 @@ static inline size_t quic__packet(quic_conn *c, uint8_t *p, uint8_t *end, int64_
     uint8_t dl = *q++;
     if (dl > 20 || (size_t)(e - q) < (size_t)dl + 1) return 0;
     int ours = dl == QUIC_SCID_LEN && !memcmp(q, c->scid, QUIC_SCID_LEN);
-    int odcid = !c->client && dl == c->odcid_len && !memcmp(q, c->odcid, dl);
+    int odcid = !c->client && dl == c->idcid_len && !memcmp(q, c->idcid, dl);
     if (!ours && !(type == 0 && odcid)) return 0;
     q += dl;
     uint8_t sl = *q++;
     if (sl > 20 || (size_t)(e - q) < sl) return 0;
     pscid = q, pscid_len = sl;
     q += sl;
+    if (type == 3) return c->client ? quic__on_retry(c, p, end, pscid, pscid_len, q) : 0;
     if (type == 0) { /* Initial: token */
       uint64_t tl;
       if (quic__vi(&q, e, &tl) || (uint64_t)(e - q) < tl) return 0;
@@ -1316,7 +1384,7 @@ static inline size_t quic__packet(quic_conn *c, uint8_t *p, uint8_t *end, int64_
     uint64_t len;
     if (quic__vi(&q, e, &len) || (uint64_t)(e - q) < len) return 0;
     pkt_end = (uint8_t *)q + len;
-    if (type == 1 || type == 3) return (size_t)(pkt_end - p); /* 0-RTT not supported; Retry is server-sent */
+    if (type == 1) return (size_t)(pkt_end - p); /* 0-RTT not supported */
     space = type == 0 ? QUIC_SP_INITIAL : QUIC_SP_HANDSHAKE;
     pn_off = (size_t)(q - p);
   } else {
@@ -1327,7 +1395,7 @@ static inline size_t quic__packet(quic_conn *c, uint8_t *p, uint8_t *end, int64_
   size_t plen = (size_t)(pkt_end - p);
   if (!sp->have_rx || plen < pn_off + 4 + 16) return plen; /* no keys (yet, or any more): skip it */
   /* header protection (RFC 9001 §5.4) */
-  uint8_t mask[16], hdr[64];
+  uint8_t mask[16], hdr[QUIC_MAX_UDP]; /* a long header with an Initial token can be long */
   const quic_key *k = &sp->rx;
   quic__mask(k, p + pn_off + 4, mask);
   uint8_t first = (uint8_t)(p[0] ^ (mask[0] & (p[0] & 0x80 ? 0x0f : 0x1f)));
@@ -1426,8 +1494,71 @@ static inline size_t quic_version_negotiation(uint8_t *out, size_t cap, const ui
   return (size_t)(p - out);
 }
 
-static inline int quic_accept(quic_conn *c, quic_ctx *x, uint8_t *d, size_t len, int64_t now, const quic_callbacks *cb,
-                              void *user) {
+/* Retry tokens (a server's, RFC 9000 §8.1.2): AES-128-GCM under the context's key, a random nonce, the client's
+ * original DCID and a timestamp sealed; bound to the client's address and to the Retry's SCID. 12 + 9 + 20 + 16 */
+#define QUIC_TOKEN_MAX  57
+#define QUIC_TOKEN_LIFE 10000 /* ms */
+static inline size_t quic__token_seal(quic_ctx *x, uint8_t *out, const uint8_t *odcid, size_t odl, const void *addr,
+                                      size_t alen, const uint8_t *rscid, size_t rsl, int64_t now) {
+  extern ptls_aead_algorithm_t ptls_openssl_aes128gcm;
+  uint8_t pt[29], aad[128 + 20];
+  if (alen > 128 || odl > 20) return 0;
+  for (int i = 0; i < 8; i++) pt[i] = (uint8_t)((uint64_t)now >> (56 - 8 * i));
+  pt[8] = (uint8_t)odl, memcpy(pt + 9, odcid, odl);
+  if (alen) memcpy(aad, addr, alen);
+  memcpy(aad + alen, rscid, rsl);
+  x->tls->random_bytes(out, 12);
+  ptls_aead_context_t *a = ptls_aead_new_direct(&ptls_openssl_aes128gcm, 1, x->token_key, out);
+  if (!a) return 0;
+  ptls_aead_encrypt(a, out + 12, pt, 9 + odl, 0, aad, alen + rsl);
+  ptls_aead_free(a);
+  return 12 + 9 + odl + 16;
+}
+/* 0 and the original DCID, or -1: not ours, tampered with, for another address or Retry, or expired */
+static inline int quic__token_open(quic_ctx *x, const uint8_t *tok, size_t tl, const void *addr, size_t alen,
+                                   const uint8_t *rscid, size_t rsl, int64_t now, uint8_t *odcid, uint8_t *odl) {
+  extern ptls_aead_algorithm_t ptls_openssl_aes128gcm;
+  uint8_t pt[64], aad[128 + 20];
+  if (tl < 12 + 9 + 16 || tl > QUIC_TOKEN_MAX || alen > 128) return -1;
+  if (alen) memcpy(aad, addr, alen);
+  memcpy(aad + alen, rscid, rsl);
+  ptls_aead_context_t *a = ptls_aead_new_direct(&ptls_openssl_aes128gcm, 0, x->token_key, tok);
+  if (!a) return -1;
+  size_t n = ptls_aead_decrypt(a, pt, tok + 12, tl - 12, 0, aad, alen + rsl);
+  ptls_aead_free(a);
+  if (n == SIZE_MAX || n < 9 || pt[8] > 20 || n != 9u + pt[8]) return -1;
+  int64_t ts = 0;
+  for (int i = 0; i < 8; i++) ts = ts << 8 | pt[i];
+  if (now < ts || now - ts > QUIC_TOKEN_LIFE) return -1;
+  *odl = pt[8], memcpy(odcid, pt + 9, pt[8]);
+  return 0;
+}
+/* a server's Retry for the client Initial d (from addr): its length in out, or 0 (not an Initial, or no room).
+ * Validate addresses this way when under load: answer an Initial without a token with quic_retry, accept one with
+ * a token through quic_accept_from (same addr), which checks it */
+static inline size_t quic_retry(quic_ctx *x, const uint8_t *d, size_t len, const void *addr, size_t alen, int64_t now,
+                                uint8_t *out, size_t cap) {
+  if (len < 7 || !(d[0] & 0x80) || quic__be32(d + 1) != QUIC_V1 || ((d[0] >> 4) & 3) != 0) return 0;
+  uint8_t dl = d[5];
+  if (dl < 8 || dl > 20 || len < 7u + dl) return 0;
+  uint8_t sl = d[6 + dl];
+  if (sl > 20 || len < 7u + dl + sl || cap < 7 + 20 + 20 + QUIC_TOKEN_MAX + 16) return 0;
+  uint8_t *p = out, rscid[QUIC_SCID_LEN];
+  x->tls->random_bytes(rscid, QUIC_SCID_LEN);
+  *p++ = 0xf0, p[0] = 0, p[1] = 0, p[2] = 0, p[3] = 1, p += 4;
+  *p++ = sl, memcpy(p, d + 7 + dl, sl), p += sl;                             /* to the client's SCID */
+  *p++ = QUIC_SCID_LEN, memcpy(p, rscid, QUIC_SCID_LEN), p += QUIC_SCID_LEN; /* from a new one */
+  size_t tl = quic__token_seal(x, p, d + 6, dl, addr, alen, rscid, QUIC_SCID_LEN, now);
+  if (!tl) return 0;
+  p += tl;
+  if (quic__retry_tag(d + 6, dl, out, (size_t)(p - out), p)) return 0;
+  return (size_t)(p - out) + 16;
+}
+/* a server connection from a client's first Initial d (RFC 9000 §7): QUIC_E_VN (send Version Negotiation),
+ * QUIC_E_DROP, or 0. addr (alen bytes, any form, NULL for none): the client's address, which a Retry token must
+ * have been issued to; an Initial with a token that does not check out is dropped */
+static inline int quic_accept_from(quic_conn *c, quic_ctx *x, uint8_t *d, size_t len, const void *addr, size_t alen,
+                                   int64_t now, const quic_callbacks *cb, void *user) {
   if (len < QUIC_MIN_INITIAL || !(d[0] & 0x80) || len < 7) return QUIC_E_DROP;
   if (quic__be32(d + 1) != QUIC_V1) return QUIC_E_VN;
   if (((d[0] >> 4) & 3) != 0) return QUIC_E_DROP; /* not an Initial */
@@ -1435,14 +1566,26 @@ static inline int quic_accept(quic_conn *c, quic_ctx *x, uint8_t *d, size_t len,
   if (dl < 8 || dl > 20 || len < 7u + dl) return QUIC_E_DROP;
   uint8_t sl = d[6 + dl];
   if (sl > 20 || len < 7u + dl + sl) return QUIC_E_DROP;
+  const uint8_t *q = d + 7 + dl + sl;
+  uint64_t tl;
+  if (quic__vi(&q, d + len, &tl) || tl > (uint64_t)(d + len - q)) return QUIC_E_DROP;
+  uint8_t odcid[20], odl = dl;
+  memcpy(odcid, d + 6, dl);
+  int retried = 0;
+  if (tl) { /* after our Retry: the token names the original DCID */
+    if (quic__token_open(x, q, (size_t)tl, addr, alen, d + 6, dl, now, odcid, &odl)) return QUIC_E_DROP;
+    retried = 1;
+  }
   memset(c, 0, sizeof *c);
   c->ctx = x, c->cb = *cb, c->user = user;
-  memcpy(c->odcid, d + 6, dl), c->odcid_len = dl;
+  memcpy(c->odcid, odcid, odl), c->odcid_len = odl;
+  memcpy(c->idcid, d + 6, dl), c->idcid_len = dl;
+  if (retried) c->retried = 1, memcpy(c->rscid, d + 6, dl), c->rscid_len = dl, c->addr_validated = 1;
   memcpy(c->dcid, d + 7 + dl, sl), c->dcid_len = sl;
   x->tls->random_bytes(c->scid, QUIC_SCID_LEN);
   if (!x->tls->on_client_hello) x->tls->on_client_hello = &quic__och;
   extern ptls_cipher_suite_t ptls_openssl_aes128gcmsha256;
-  if (quic__initial_keys(&c->sp[0].rx, &c->sp[0].tx, c->odcid, dl, &ptls_openssl_aes128gcmsha256)) return QUIC_E_NOMEM;
+  if (quic__initial_keys(&c->sp[0].rx, &c->sp[0].tx, c->idcid, dl, &ptls_openssl_aes128gcmsha256)) return QUIC_E_NOMEM;
   c->sp[0].have_rx = c->sp[0].have_tx = 1;
   for (int i = 0; i < QUIC_NSP; i++) {
     quic__rb_init(&c->sp[i].crypto_in);
@@ -1460,6 +1603,10 @@ static inline int quic_accept(quic_conn *c, quic_ctx *x, uint8_t *d, size_t len,
   c->pkt_thresh = 3, c->time_thresh_8 = 9; /* RFC 9002 §6.1: 3 packets, 9/8 RTT, adapted on spurious losses */
   c->idle_deadline = now + QUIC_IDLE_MS;
   return quic_recv(c, d, len, now) == QUIC_E_CLOSED && c->draining ? QUIC_E_CLOSED : 0;
+}
+static inline int quic_accept(quic_conn *c, quic_ctx *x, uint8_t *d, size_t len, int64_t now, const quic_callbacks *cb,
+                              void *user) {
+  return quic_accept_from(c, x, d, len, NULL, 0, now, cb, user);
 }
 
 /* a client connection to server_name (SNI and the certificate check; NULL for neither): Initial keys from a random
@@ -1549,6 +1696,7 @@ static inline void quic_free(quic_conn *c) {
     quic__sb_free(c->ctx, &c->sp[i].crypto_out);
   }
   quic__key_free(&c->next_rx), quic__key_free(&c->prev_rx);
+  if (c->token) c->ctx->alloc(c->token, 0), c->token = NULL;
   for (int i = 0; i < QUIC_MAX_STREAMS; i++)
     if (c->s[i].used) quic__stream_free(c, &c->s[i]);
   quic__rs_free(c->ctx, &c->closed[0]), quic__rs_free(c->ctx, &c->closed[1]);
@@ -1800,8 +1948,9 @@ static inline size_t quic_send(quic_conn *c, uint8_t *out, size_t cap, int64_t n
   for (int space = 0; space < QUIC_NSP; space++) {
     if (!quic__space_wants(c, space, now)) continue;
     quic_space *sp = &c->sp[space];
-    size_t hdr =
-        space == QUIC_SP_APP ? 1 + c->dcid_len + 2 : 1 + 4 + 1 + c->dcid_len + 1 + QUIC_SCID_LEN + (space == 0) + 2 + 2;
+    size_t hdr = space == QUIC_SP_APP ? (size_t)1 + c->dcid_len + 2
+                                      : (size_t)1 + 4 + 1 + c->dcid_len + 1 + QUIC_SCID_LEN +
+                                            (space == 0) * (quic__vi_len(c->token_len) + c->token_len) + 2 + 2;
     if (w + hdr + 16 + 24 > limit) break;
     quic__pkt *k = &pk[np];
     memset(k, 0, sizeof *k);
@@ -1857,7 +2006,9 @@ static inline size_t quic_send(quic_conn *c, uint8_t *out, size_t cap, int64_t n
       *o++ = 0, *o++ = 0, *o++ = 0, *o++ = 1;
       *o++ = c->dcid_len, memcpy(o, c->dcid, c->dcid_len), o += c->dcid_len;
       *o++ = QUIC_SCID_LEN, memcpy(o, c->scid, QUIC_SCID_LEN), o += QUIC_SCID_LEN;
-      if (k->space == QUIC_SP_INITIAL) *o++ = 0; /* token length */
+      if (k->space == QUIC_SP_INITIAL) /* a client's Retry token, else none */
+        o = quic__put_vi(o, c->token_len),
+        o = c->token_len ? (uint8_t *)memcpy(o, c->token, c->token_len) + c->token_len : o;
       o = quic__put_vi2(o, 2 + k->payload_len + 16);
     }
     k->pn_off = (size_t)(o - h);

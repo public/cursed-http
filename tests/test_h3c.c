@@ -55,7 +55,8 @@ typedef struct {
   int n;
 } wire;
 static wire TO_SRV, TO_CLI;
-static int BULK; /* every request is GET /big/1000000: slow start overfills the wire (4096 datagrams, tail drop) */
+static int RETRY; /* the server validates the client's address with a Retry first */
+static int BULK;  /* every request is GET /big/1000000: slow start overfills the wire (4096 datagrams, tail drop) */
 static int LOSS, REORDER, BLACKHOLE; /* BLACKHOLE: drop client->server after its first datagram, for 8 s */
 static uint64_t BLACKHOLE_UNTIL;
 static long SENT_DGRAMS, LOST_DGRAMS;
@@ -370,7 +371,7 @@ static int run(int nreq, int loss, int reorder) {
   cl.nreq = nreq, cl.pending_sid = -1;
   int r0 = quic_connect(&cl.q, &CQX, "localhost", now_ms(), &CQCB, &cl);
   CHECK(r0 == 0, "quic_connect %d", r0);
-  int accepted = 0;
+  int accepted = 0, retries = 0;
   long before = fails;
   uint8_t out[1500];
   uint64_t start = NOW_NS;
@@ -381,7 +382,24 @@ static int run(int nreq, int loss, int reorder) {
     dgram g;
     while (take(&TO_SRV, &g)) {
       if (!accepted) {
-        if (quic_accept(&sv.q, &QX, g.d, g.n, now_ms(), &QCB, &sv) == 0) accepted = 1;
+        static const char addr[] = "198.51.100.7:4433", other[] = "203.0.113.9:4433";
+        int has_token = g.n > 7 && g.d[5] <= 20 && g.d[6 + g.d[5]] <= 20 && g.d[7 + g.d[5] + g.d[6 + g.d[5]]] != 0;
+        if (RETRY && !has_token) { /* a Retry, after a forged one the client must ignore */
+          uint8_t rt[256];
+          size_t rn = quic_retry(&QX, g.d, g.n, addr, sizeof addr, now_ms(), rt, sizeof rt);
+          CHECK(rn > 0, "quic_retry");
+          if (!retries++) { rt[rn - 1] ^= 1, put(&TO_CLI, rt, rn), rt[rn - 1] ^= 1; /* a bad integrity tag */ }
+          put(&TO_CLI, rt, rn);
+          continue;
+        }
+        if (RETRY) { /* a token for another address, or the right one */
+          static quic_conn probe;
+          CHECK(quic_accept_from(&probe, &QX, g.d, g.n, other, sizeof other, now_ms(), &QCB, &sv) == QUIC_E_DROP,
+                "a token from another address is refused");
+        }
+        if (quic_accept_from(&sv.q, &QX, g.d, g.n, RETRY ? addr : NULL, RETRY ? sizeof addr : 0, now_ms(), &QCB, &sv) ==
+            0)
+          accepted = 1;
         continue;
       }
       quic_recv(&sv.q, g.d, g.n, now_ms());
@@ -411,6 +429,8 @@ static int run(int nreq, int loss, int reorder) {
   }
   CHECK(accepted && sv.h3_ready && cl.ready, "handshake (loss %d%%): accepted %d server h3 %d client h3 %d", loss,
         accepted, sv.h3_ready, cl.ready);
+  CHECK(!RETRY || (cl.q.retried && sv.q.retried && retries >= 1), "Retry: client %d server %d (%d sent)", cl.q.retried,
+        sv.q.retried, retries);
   CHECK(cl.q.confirmed && cl.q.sp[QUIC_SP_INITIAL].discarded && cl.q.sp[QUIC_SP_HANDSHAKE].discarded,
         "client handshake confirmed (HANDSHAKE_DONE), Initial and Handshake keys discarded");
   CHECK(!cl.failed && cl.done == nreq && cl.ok == nreq && !cl.statuses_bad,
@@ -429,10 +449,10 @@ static int run(int nreq, int loss, int reorder) {
   CHECK(sv.errors == 0 && cl.q.undecryptable == 0, "server stream errors %ld, client undecryptable %llu", sv.errors,
         (unsigned long long)cl.q.undecryptable);
   printf(
-      "  loss %2d%% reorder %d%s: %d requests, %.1f simulated s, %ld datagrams (%ld lost), client cwnd %llu srtt %lld ms, "
+      "  loss %2d%% reorder %d%s%s: %d requests, %.1f simulated s, %ld datagrams (%ld lost), client cwnd %llu srtt %lld ms, "
       "request headers %.1f%% of their fields (%.1f%% at the end)\n",
-      loss, reorder, BULK ? " bulk 1 MB, late 0.5%" : "", nreq, (NOW_NS - start) / 1e9, SENT_DGRAMS, LOST_DGRAMS,
-      (unsigned long long)cl.q.cwnd, (long long)cl.q.smoothed_rtt,
+      loss, reorder, BULK ? " bulk 1 MB, late 0.5%" : "", RETRY ? " after a Retry" : "", nreq, (NOW_NS - start) / 1e9,
+      SENT_DGRAMS, LOST_DGRAMS, (unsigned long long)cl.q.cwnd, (long long)cl.q.smoothed_rtt,
       cl.hdr_raw ? 100.0 * (double)cl.hdr_bytes / (double)cl.hdr_raw : 0.0,
       cl.tail_raw ? 100.0 * (double)cl.tail_bytes / (double)cl.tail_raw : 0.0);
   SENT_DGRAMS = LOST_DGRAMS = 0;
@@ -458,6 +478,7 @@ int main(int argc, char **argv) {
       /* far more than QUIC_SENT_MAX packets in flight, then tail drops: a full record ring once forgot packets
        * whose losses were then never repaired, and the transfer stalled */
       BULK = 1, run(40, 0, 0), BULK = 0;
+      RETRY = 1, run(50, 0, 0), run(100, 2, 1), RETRY = 0; /* address validation first */
     }
   printf("%s: %ld failures / %ld checks\n", fails ? "FAIL" : "PASS", fails, checks);
   return fails != 0;

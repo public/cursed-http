@@ -112,10 +112,10 @@ static int find(const uint8_t *d, size_t n) {
 
 int main(int argc, char **argv) {
   if (argc < 3) {
-    fprintf(stderr, "usage: %s cert.pem key.pem [port]\n", argv[0]);
+    fprintf(stderr, "usage: %s cert.pem key.pem [port] [-r]   (-r: validate addresses with a Retry first)\n", argv[0]);
     return 1;
   }
-  int port = argc > 3 ? atoi(argv[3]) : 4433;
+  int port = argc > 3 ? atoi(argv[3]) : 4433, retry = argc > 4 && !strcmp(argv[4], "-r");
   memset(BIG, 'x', sizeof BIG);
   static ptls_context_t tls;
   static ptls_openssl_sign_certificate_t sign;
@@ -166,8 +166,18 @@ int main(int argc, char **argv) {
         else {
           for (i = 0; i < MAXC && C[i]; i++) {}
           if (i < MAXC) {
+            /* -r: an Initial without a token gets a Retry (bound to the client's address); one with a token is
+             * accepted only if the token checks out */
+            size_t tl = n > 7 && buf[5] <= 20 && buf[6 + buf[5]] <= 20 ? buf[7 + buf[5] + buf[6 + buf[5]]] : 0;
+            if (retry && !tl) {
+              size_t rl = quic_retry(&qx, buf, (size_t)n, &from, fl, now, out, sizeof out);
+              if (rl) sendto(fd, out, rl, 0, (struct sockaddr *)&from, fl);
+              continue;
+            }
             conn *c = calloc(1, sizeof *c);
-            int r = c ? quic_accept(&c->q, &qx, buf, (size_t)n, now, &QCB, c) : QUIC_E_NOMEM;
+            int r = c ? quic_accept_from(&c->q, &qx, buf, (size_t)n, retry ? (const void *)&from : NULL, retry ? fl : 0,
+                                         now, &QCB, c)
+                      : QUIC_E_NOMEM;
             if (r == QUIC_E_VN) {
               size_t vl = quic_version_negotiation(out, sizeof out, buf, (size_t)n);
               if (vl) sendto(fd, out, vl, 0, (struct sockaddr *)&from, fl);
