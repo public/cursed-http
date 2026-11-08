@@ -151,7 +151,7 @@ static void s_reset(h3_conn *h, uint64_t sid, uint64_t code, void *u) {
   server *s = u;
   quic_reset_stream(&s->q, sid, code);
 }
-static const h3_callbacks H3CB = { s_request, s_data, NULL, NULL, s_close, s_reset };
+static const h3_callbacks H3CB = { s_request, s_data, NULL, NULL, s_close, s_reset, NULL };
 
 static int64_t q_on_stream(quic_conn *q, uint64_t sid, uint64_t off, const uint8_t *d, size_t len, int fin, void *u) {
   (void)q;

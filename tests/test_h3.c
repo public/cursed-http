@@ -75,7 +75,7 @@ static void s_reset(h3_conn *c, uint64_t sid, uint64_t code, void *u) {
   (void)c, (void)sid, (void)u;
   SS.resets++, SS.last_reset = code;
 }
-static const h3_callbacks SCB = { s_request, s_data, NULL, NULL, s_close, s_reset };
+static const h3_callbacks SCB = { s_request, s_data, NULL, NULL, s_close, s_reset, NULL };
 
 /* -------------------------------------- the nghttp3 client -------------------------------------- */
 typedef struct {
