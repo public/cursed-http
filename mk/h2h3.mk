@@ -56,7 +56,7 @@ $(H2B)/test_h3: tests/test_h3.c $(H2HDRS) $(H2B)/libnghttp3.a
 $(H2B)/test_h3_asan: tests/test_h3.c $(H2HDRS) $(H2B)/libnghttp3.a
 	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(N3INC) $< $(H2B)/libnghttp3.a -o $@
 
-H2TESTS := $(H2B)/test_quic $(H2B)/test_quic_interop $(H2B)/test_h3 $(H2B)/test_qpack $(H2B)/test_hpack $(H2B)/test_hpack_scalar $(H2B)/test_h2 $(H2B)/test_h2_scalar $(H2B)/test_h2c
+H2TESTS := $(H2B)/test_quic $(H2B)/test_quic_interop $(H2B)/test_h3 $(H2B)/test_qpack $(H2B)/test_hpack $(H2B)/test_hpack_scalar $(H2B)/test_h2 $(H2B)/test_h2_scalar $(H2B)/test_h2c $(H2B)/test_h3c
 test-h2h3: $(H2TESTS)
 	@for t in $(H2TESTS); do echo "== $$t"; $$t || exit 1; done
 .PHONY: test-h2h3
@@ -113,6 +113,10 @@ $(H2B)/libngtcp2.a: $(patsubst $(NT)/%.c,$(H2B)/nt/%.o,$(NT_SRC))
 	ar rcs $@ $^
 $(H2B)/test_quic_interop: tests/test_quic_interop.c $(H2HDRS) include/qhp.h $(H2B)/libngtcp2.a $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
 	$(H2CC) $(QINC) $(N3INC) $(NTINC) $< $(H2B)/libngtcp2.a $(H2B)/libnghttp3.a $(H2B)/libpicotls.a -lcrypto -o $@
+$(H2B)/test_h3c: tests/test_h3c.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
+	$(H2CC) $(QINC) $(N3INC) $< $(H2B)/libpicotls.a -lcrypto -o $@
+$(H2B)/test_h3c_asan: tests/test_h3c.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls.a
+	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(QINC) $(N3INC) $< $(H2B)/libpicotls.a -lcrypto -o $@
 $(H2B)/test_quic_interop_asan: tests/test_quic_interop.c $(H2HDRS) include/qhp.h $(H2B)/libngtcp2.a $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
 	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(QINC) $(N3INC) $(NTINC) $< $(H2B)/libngtcp2.a $(H2B)/libnghttp3.a $(H2B)/libpicotls.a -lcrypto -o $@
 
