@@ -515,6 +515,10 @@ static inline size_t hp_enc_ifield(hp_enc *e, uint8_t *dst, const uint8_t *name,
                                    size_t vl, int never) {
   int si = hp_name_index(name, nl);
   uint8_t *p = dst;
+  if (si && !never) /* a static entry with this value too (same names are adjacent in the table) */
+    for (int k = si; k <= 61 && hp_static[k].nl == nl && !memcmp(hp_static[k].n, name, nl); k++)
+      if (hp_static[k].vl == vl && !memcmp(hp_static[k].v, val, vl))
+        return (size_t)(hp__put_int(p, 0x80, 7, (uint32_t)k) - dst);
   int idx = hp__eindexing(name, nl, vl, e->cap, &never);
   uint32_t nh = e->cap ? hp__ehash(0, name, nl) : 0, fh = e->cap ? hp__ehash(nh, val, vl) : 0;
   if (e->cap && !never) { /* (a never-indexed field stays a literal, flag and all: RFC 7541 §6.2.3) */
