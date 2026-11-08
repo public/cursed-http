@@ -440,6 +440,17 @@ static inline int fbr_parse_scalar(const char *buf, size_t len, int req, fbr_res
 }
 
 // ---------------- layer 3: chunked bodies ----------------
+// hex digit values; 16 = not a hex digit
+static const uint8_t FBR_HEX[256] = {
+#define FBR_X16 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16
+  FBR_X16, FBR_X16, FBR_X16,
+  0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 16, 16, 16, 16, 16,         // '0'-'9'
+  16, 10, 11, 12, 13, 14, 15, 16, 16, 16, 16, 16, 16, 16, 16, 16, // 'A'-'F'
+  FBR_X16,
+  16, 10, 11, 12, 13, 14, 15, 16, 16, 16, 16, 16, 16, 16, 16, 16, // 'a'-'f'
+  FBR_X16, FBR_X16, FBR_X16, FBR_X16, FBR_X16, FBR_X16, FBR_X16, FBR_X16, FBR_X16 // 0x70-0xff
+#undef FBR_X16
+};
 // fbparse.h's fb_chunked_pass with two additions, kept here so the request decoder's code stays as it is:
 // tr = 1: stop after the last-chunk line and return the position of the trailer section; prog != NULL: on NEED_MORE,
 // prog[0] = the input bytes of the complete chunks before the incomplete one, prog[1] = their data bytes. The rules
@@ -454,17 +465,23 @@ static inline int fbr_chunked_pass(const char *b, int len, char *out, int max_bo
   } while (0)
   for (;;) {
     c0 = p; // this chunk's start
-    int64_t size = 0;
+    // the size: fb_decode_chunked checks the limit at every digit, but appending a digit never makes the value
+    // smaller, so "over the limit at some digit" is "over it after the last one scanned" (16 at most, no overflow in
+    // 64 bits): the same TOO_LARGE, before the 17th digit's INVALID and before NEED_MORE, as there
+    uint64_t v = 0;
     int nd = 0, h;
-    while (p < len && (h = fb_chunk_hex((unsigned char)b[p])) >= 0) {
-      if (++nd > 16) return FB_CHUNK_INVALID;
-      size = size * 16 + h;
-      if (size > (int64_t)max_body - total) return FB_CHUNK_TOO_LARGE;
+    while (p < len && (h = FBR_HEX[(unsigned char)b[p]]) < 16) {
+      if (++nd > 16) break;
+      v = v * 16 + (unsigned)h;
       p++;
     }
+    if (v > (uint64_t)((int64_t)max_body - total)) return FB_CHUNK_TOO_LARGE;
+    if (nd > 16) return FB_CHUNK_INVALID;
+    int64_t size = (int64_t)v;
     if (p >= len) FBR_MORE();
     if (nd == 0) return FB_CHUNK_INVALID;
     int q = p;
+    if (FB_LIKELY(b[q] == '\r')) goto crlf; // the usual size line: no whitespace, no extension
     while (q < len && (b[q] == ' ' || b[q] == '\t')) q++;
     if (q >= len) FBR_MORE();
     if (b[q] == ';') {
@@ -484,6 +501,7 @@ static inline int fbr_chunked_pass(const char *b, int len, char *out, int max_bo
     } else if (q != p) return FB_CHUNK_INVALID;
     if (q >= len) FBR_MORE();
     if (b[q] != '\r') return FB_CHUNK_INVALID;
+  crlf:
     if (q + 1 >= len) FBR_MORE();
     if (b[q + 1] != '\n') return FB_CHUNK_INVALID;
     p = q + 2;

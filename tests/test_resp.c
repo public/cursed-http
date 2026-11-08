@@ -314,6 +314,10 @@ static int gen_chunked(char *s, char *body, int *blen) {
 int main(int argc, char **argv) {
   int quick = argc > 1 && !strcmp(argv[1], "quick"), NGEN = quick ? 3000 : 30000;
   printf("fbresp backend: %s\n", FB_BACKEND_NAME);
+  for (int c = 0; c < 256; c++) { // fbr_chunked's hex table is fbparse.h's fb_chunk_hex
+    int want = fb_chunk_hex((unsigned char)c);
+    if ((want < 0 ? 16 : want) != FBR_HEX[c]) FAIL("FBR_HEX[0x%02x] = %d, fb_chunk_hex says %d\n", c, FBR_HEX[c], want);
+  }
   static char s[1 << 16];
   // 1. the head: edges, generated, mutated; every prefix
   for (size_t i = 0; i < sizeof EDGES / sizeof *EDGES; i++) {
