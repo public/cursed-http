@@ -563,7 +563,8 @@ static inline int h3_respond(h3_conn *c, uint64_t sid, int status, const hp_fiel
   h3__want(c, s);
   return 0;
 }
-/* client: a request on stream sid (a bidirectional stream the transport just opened) */
+/* client: a request on stream sid (a bidirectional stream the transport just opened). H3_E_AGAIN: H3_MAX_STREAMS
+ * requests are open, whatever the server's MAX_STREAMS allows; keep at most that many open (on_close frees one) */
 static inline int h3_submit(h3_conn *c, uint64_t sid, const h_request *rq, const uint8_t *body, size_t len, int end) {
   if (!c->client || c->error || c->goaway_recv || (sid & 3) != 0 || h3__find(c, sid)) return H3_E_STATE;
   h3_stream *s = NULL;

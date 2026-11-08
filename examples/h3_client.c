@@ -66,7 +66,7 @@ static void reset_stream(h3_conn *c, uint64_t sid, uint64_t code, void *u) {
 static const h3_callbacks H3CB = { NULL, on_data, on_trailers, NULL, on_close, reset_stream, on_response };
 
 static void submit_more(void) {
-  while (ready && sent < total) {
+  while (ready && sent < total && sent - ndone < H3_MAX_STREAMS) { /* h3_conn tracks at most this many */
     int64_t sid = quic_open_bidi(&Q);
     if (sid < 0) return;
     h_request rq = { 0 };
@@ -75,10 +75,12 @@ static void submit_more(void) {
     rq.scheme = (const uint8_t *)"https", rq.scheme_len = 5;
     rq.authority = (const uint8_t *)HOST, rq.authority_len = (uint32_t)strlen(HOST);
     rq.path = (const uint8_t *)path, rq.path_len = (uint32_t)strlen(path);
-    static const hp_field ua = {
-      (const uint8_t *)"user-agent", (const uint8_t *)"cursed-http-h3-client", 10, 21, 0, 0, 0, 0
-    };
-    rq.fields = &ua, rq.nfields = 1;
+    static char clen[24];
+    static hp_field fl[2] = { { (const uint8_t *)"user-agent", (const uint8_t *)"cursed-http-h3-client", 10, 21, 0, 0,
+                                0, 0 },
+                              { (const uint8_t *)"content-length", (const uint8_t *)clen, 14, 0, 0, 0, 0, 0 } };
+    fl[1].vlen = (uint32_t)snprintf(clen, sizeof clen, "%ld", upload);
+    rq.fields = fl, rq.nfields = upload ? 2 : 1;
     R_OF[(sid >> 2) % MAXR] = sent;
     if (h3_submit(&H, (uint64_t)sid, &rq, BODY, (size_t)upload, 1)) {
       fprintf(stderr, "h3_submit failed\n");
@@ -177,7 +179,8 @@ int main(int argc, char **argv) {
     fprintf(stderr, "connection closed: code 0x%llx frame 0x%llx (h3 0x%llx)\n", (unsigned long long)Q.close_code,
             (unsigned long long)Q.close_frame, (unsigned long long)h3_error(&H));
   for (int i = 0; i < total; i++)
-    printf("%d %ld %d%s\n", R[i].status, R[i].body, R[i].trailers, R[i].err ? " (reset)" : "");
+    R[i].err ? printf("%d %ld %d (reset 0x%llx)\n", R[i].status, R[i].body, R[i].trailers, (unsigned long long)R[i].err)
+             : printf("%d %ld %d\n", R[i].status, R[i].body, R[i].trailers);
   quic_close(&Q, H3_NO_ERROR);
   size_t n = quic_send(&Q, buf, sizeof buf, now_ms());
   if (n) send(fd, buf, n, 0);

@@ -86,10 +86,12 @@ int main(int argc, char **argv) {
       rq.scheme = (const uint8_t *)"http", rq.scheme_len = 4;
       rq.authority = (const uint8_t *)host, rq.authority_len = (uint32_t)strlen(host);
       rq.path = (const uint8_t *)path, rq.path_len = (uint32_t)strlen(path);
-      static const hp_field ua = {
-        (const uint8_t *)"user-agent", (const uint8_t *)"cursed-http-h2-client", 10, 21, 0, 0, 0, 0
-      };
-      rq.fields = &ua, rq.nfields = 1;
+      static char clen[24];
+      static hp_field fl[2] = { { (const uint8_t *)"user-agent", (const uint8_t *)"cursed-http-h2-client", 10, 21, 0, 0,
+                                  0, 0 },
+                                { (const uint8_t *)"content-length", (const uint8_t *)clen, 14, 0, 0, 0, 0, 0 } };
+      fl[1].vlen = (uint32_t)snprintf(clen, sizeof clen, "%ld", upload);
+      rq.fields = fl, rq.nfields = upload ? 2 : 1;
       int sid = h2_submit(&C, &rq, body, (size_t)upload, 1);
       if (sid == H2_E_AGAIN) break;
       if (sid < 0) {
@@ -136,7 +138,8 @@ int main(int argc, char **argv) {
     memmove(in, in + used, inlen - (size_t)used), inlen -= (size_t)used;
   }
   for (int i = 0; i < total; i++)
-    printf("%d %ld %d%s\n", R[i].status, R[i].body, R[i].trailers, R[i].err ? " (reset)" : "");
+    R[i].err ? printf("%d %ld %d (reset 0x%x)\n", R[i].status, R[i].body, R[i].trailers, (unsigned)R[i].err)
+             : printf("%d %ld %d\n", R[i].status, R[i].body, R[i].trailers);
   close(fd);
   return ndone == total && !nerr ? 0 : 1;
 }

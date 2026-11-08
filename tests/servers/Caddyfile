@@ -1,0 +1,27 @@
+# Caddy: h2c on PORT (cleartext), HTTP/3 (and h2 over TLS) on PORT3 with its internal CA
+{
+  admin off
+  auto_https disable_redirects
+  servers 127.0.0.1:@PORT@ {
+    protocols h1 h2c
+  }
+  servers 127.0.0.1:@PORT3@ {
+    protocols h1 h2 h3
+  }
+}
+(site) {
+  respond /204 204
+  @dyn path /echo /trailers
+  reverse_proxy @dyn 127.0.0.1:@ORIGIN@
+  root * @DOCROOT@
+  file_server
+}
+http://127.0.0.1:@PORT@ {
+  bind 127.0.0.1
+  import site
+}
+https://127.0.0.1:@PORT3@ {
+  bind 127.0.0.1
+  tls internal
+  import site
+}

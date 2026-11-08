@@ -141,6 +141,12 @@ $(H2B)/h3_server: examples/h3_server.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls
 $(H2B)/h3_client: examples/h3_client.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls.a
 	$(CC) -O2 $(WARN) $(MARCH) -Iinclude $(QINC) $< $(H2B)/libpicotls.a -lcrypto -o $@
 
+# the example clients against nginx, Apache, h2o, HAProxy, Caddy, Node (h2c) and Caddy, aioquic (h3) on
+# 127.0.0.1: SRV=<unpacked server packages> AIOQUIC_PY=<python with aioquic>, see tests/servers/run.sh
+servers-interop: $(H2B)/h2_client $(H2B)/h3_client
+	tests/servers/run.sh
+.PHONY: servers-interop
+
 $(H2B)/bench_h2h3: bench/bench_h2h3.c bench/h2_headers.h $(H2HDRS) $(H2B)/libnghttp2.a $(H2B)/libnghttp3.a
 	$(H2CC) -Ibench -DH2_MAX_STREAMS=1000 $(N2INC) $(N3INC) $< $(H2B)/libnghttp2.a $(H2B)/libnghttp3.a -o $@
 
