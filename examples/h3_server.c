@@ -47,8 +47,9 @@ static int on_request(h3_conn *h, uint64_t sid, const h_request *rq, int end, vo
   (void)u;
   static const hp_field ct = { (const uint8_t *)"content-type", (const uint8_t *)"text/plain", 12, 10, 0, 0, 0, 0 };
   size_t big = big_len(rq->path, rq->path_len);
-  if (end && big != SIZE_MAX) return h3_respond(h, sid, 200, &ct, 1, BIG, big, 1) < 0;
-  return end ? h3_respond(h, sid, 200, &ct, 1, (const uint8_t *)"hello, world\n", 13, 1) < 0 : 0;
+  int head = rq->method_len == 4 && !memcmp(rq->method, "HEAD", 4); /* a response to HEAD has no content */
+  if (end && big != SIZE_MAX) return h3_respond(h, sid, 200, &ct, 1, BIG, head ? 0 : big, 1) < 0;
+  return end ? h3_respond(h, sid, 200, &ct, 1, (const uint8_t *)"hello, world\n", head ? 0 : 13, 1) < 0 : 0;
 }
 static int on_data(h3_conn *h, uint64_t sid, const uint8_t *d, size_t n, int end, void *u) {
   (void)d, (void)n, (void)u;
@@ -61,7 +62,7 @@ static void h3_reset_cb(h3_conn *h, uint64_t sid, uint64_t code, void *u) {
   (void)h;
   quic_reset_stream(&((conn *)u)->q, sid, code);
 }
-static const h3_callbacks H3CB = { on_request, on_data, NULL, NULL, NULL, h3_reset_cb };
+static const h3_callbacks H3CB = { on_request, on_data, NULL, NULL, NULL, h3_reset_cb, NULL };
 
 static int64_t q_stream(quic_conn *q, uint64_t sid, uint64_t off, const uint8_t *d, size_t len, int fin, void *u) {
   (void)q;
@@ -138,7 +139,7 @@ int main(int argc, char **argv) {
   int fd = socket(AF_INET, SOCK_DGRAM, 0);
   struct sockaddr_in a = { .sin_family = AF_INET,
                            .sin_port = htons((uint16_t)port),
-                           .sin_addr.s_addr = htonl(INADDR_ANY) };
+                           .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
   if (fd < 0 || bind(fd, (struct sockaddr *)&a, sizeof a)) {
     perror("bind");
     return 1;

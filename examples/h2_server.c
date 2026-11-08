@@ -41,8 +41,9 @@ static int on_request(h2_conn *h, uint32_t sid, const h2_request *rq, int end, v
   static const hp_field ct = { (const uint8_t *)"content-type", (const uint8_t *)"text/plain", 12, 10, 0, 0, 0, 0 };
   c->body[(sid / 2) % 2048] = 0;
   size_t big = big_len(rq->path, rq->path_len);
-  if (end && big != SIZE_MAX) return h2_respond(h, sid, 200, &ct, 1, BIG, big, 1) < 0;
-  if (end) return h2_respond(h, sid, 200, &ct, 1, (const uint8_t *)"hello, world\n", 13, 1) < 0;
+  int head = rq->method_len == 4 && !memcmp(rq->method, "HEAD", 4); /* a response to HEAD has no content */
+  if (end && big != SIZE_MAX) return h2_respond(h, sid, 200, &ct, 1, BIG, head ? 0 : big, 1) < 0;
+  if (end) return h2_respond(h, sid, 200, &ct, 1, (const uint8_t *)"hello, world\n", head ? 0 : 13, 1) < 0;
   return 0;
 }
 static int on_data(h2_conn *h, uint32_t sid, const uint8_t *d, size_t n, int end, void *u) {
@@ -59,7 +60,7 @@ static int on_trailers(h2_conn *h, uint32_t sid, const hp_field *f, int n, void 
   (void)f, (void)n;
   return on_data(h, sid, NULL, 0, 1, u);
 }
-static const h2_callbacks CB = { on_request, on_data, on_trailers, NULL, NULL };
+static const h2_callbacks CB = { on_request, on_data, on_trailers, NULL, NULL, NULL };
 
 static void drop(int i) {
   close(C[i]->fd);
@@ -94,7 +95,7 @@ int main(int argc, char **argv) {
   setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
   struct sockaddr_in a = { .sin_family = AF_INET,
                            .sin_port = htons((uint16_t)port),
-                           .sin_addr.s_addr = htonl(INADDR_ANY) };
+                           .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
   if (bind(ls, (struct sockaddr *)&a, sizeof a) || listen(ls, 128)) {
     perror("listen");
     return 1;

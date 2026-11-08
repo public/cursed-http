@@ -80,6 +80,10 @@ mutants-h2: $(H2B)/libnghttp2.a $(H2B)/libnghttp3.a
 $(H2B)/h2_server: examples/h2_server.c $(H2HDRS)
 	@mkdir -p $(H2B)
 	$(CC) -O2 $(WARN) -Iinclude $< -o $@
+
+$(H2B)/h2_client: examples/h2_client.c $(H2HDRS)
+	@mkdir -p $(H2B)
+	$(CC) -O2 $(WARN) -Iinclude $< -o $@
 $(H2B)/h2spec:
 	cd $(TP)/h2spec && CGO_ENABLED=0 go build -o $(abspath $@) ./cmd/h2spec
 h2spec: $(H2B)/h2_server $(H2B)/h2spec
@@ -132,6 +136,9 @@ mutants-quic: $(H2B)/libngtcp2.a $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
 .PHONY: mutants-quic
 
 $(H2B)/h3_server: examples/h3_server.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls.a
+	$(CC) -O2 $(WARN) $(MARCH) -Iinclude $(QINC) $< $(H2B)/libpicotls.a -lcrypto -o $@
+
+$(H2B)/h3_client: examples/h3_client.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls.a
 	$(CC) -O2 $(WARN) $(MARCH) -Iinclude $(QINC) $< $(H2B)/libpicotls.a -lcrypto -o $@
 
 $(H2B)/bench_h2h3: bench/bench_h2h3.c bench/h2_headers.h $(H2HDRS) $(H2B)/libnghttp2.a $(H2B)/libnghttp3.a
