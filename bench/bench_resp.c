@@ -191,8 +191,7 @@ static double ck_round(char **src, char **w, int *len, char *out, int which) {
     else if (which == 1) { // in place, resumable (prog): pico's decoder is in place and resumable too
       int prog[2];
       s += fbr_chunked(w[i], len[i], w[i], 1 << 30, &bl, prog) + bl;
-    }
-    else if (which == 2) {
+    } else if (which == 2) {
       struct phr_chunked_decoder d = { 0 };
       d.consume_trailer = 1;
       size_t sz = len[i];
@@ -206,11 +205,12 @@ static void bench_chunked(int rounds) {
   static const struct {
     const char *name;
     int chunks, size, ext, trailer;
-  } S[] = { { "1 x 17 B", 1, 17, 0, 0 },      { "1 x 500 B", 1, 500, 0, 0 },  { "4 x 128 B", 4, 128, 0, 0 },
-            { "16 x 32 B", 16, 32, 0, 0 },    { "64 x 8 B", 64, 8, 0, 0 },    { "1 x 4 KB", 1, 4096, 0, 0 },
+  } S[] = { { "1 x 17 B", 1, 17, 0, 0 },        { "1 x 500 B", 1, 500, 0, 0 },         { "4 x 128 B", 4, 128, 0, 0 },
+            { "16 x 32 B", 16, 32, 0, 0 },      { "64 x 8 B", 64, 8, 0, 0 },           { "1 x 4 KB", 1, 4096, 0, 0 },
             { "8 x 500 B, ext", 8, 500, 1, 0 }, { "4 x 128 B, trailer", 4, 128, 0, 1 } };
-  printf("chunked bodies, ns per body (decode only), best of %d rounds: fbr_chunked out / in place (with prog), pico in place\n",
-         rounds);
+  printf(
+      "chunked bodies, ns per body (decode only), best of %d rounds: fbr_chunked out / in place (with prog), pico in place\n",
+      rounds);
   for (size_t k = 0; k < sizeof S / sizeof *S; k++) {
     static char *src[CKN], *w[CKN];
     static int len[CKN];
@@ -228,7 +228,8 @@ static void bench_chunked(int rounds) {
         if (t < best[x]) best[x] = t;
       }
     double fo = (best[0] - best[3]) / CKN, fi = (best[1] - best[3]) / CKN, pc = (best[2] - best[3]) / CKN;
-    printf("  %-20s fbr-out %7.1f (%.2fx)  fbr-in %7.1f (%.2fx)  pico %7.1f\n", S[k].name, fo, pc / fo, fi, pc / fi, pc);
+    printf("  %-20s fbr-out %7.1f (%.2fx)  fbr-in %7.1f (%.2fx)  pico %7.1f\n", S[k].name, fo, pc / fo, fi, pc / fi,
+           pc);
     for (int i = 0; i < CKN; i++) {
       free(src[i]);
       free(w[i]);

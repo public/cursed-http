@@ -104,8 +104,8 @@ FB_INLINE int fbr_ct(const char *b, int len, int p, fbr_scan_t *s, const int sim
 // More than FBR_FX candidates: fbr_parse looks at every field instead.
 #define FBR_FX 8
 typedef struct {
-  int n, last;      // candidates noted; the field index of the last one (or of a fold line continuing it)
-  unsigned fold;    // bit j: candidate j is continued by an obs-fold line
+  int n, last;              // candidates noted; the field index of the last one (or of a fold line continuing it)
+  unsigned fold;            // bit j: candidate j is continued by an obs-fold line
   unsigned idx[FBR_FX + 1]; // + a spare slot for the branch-free store
 } fbr_fx_t;
 #define FBR_FRAMING_LEN(nl) ((nl) <= 17 && ((1u << 10 | 1u << 14 | 1u << 17) >> (nl) & 1))
@@ -476,16 +476,18 @@ static inline int fbr_parse_scalar(const char *buf, size_t len, int req, fbr_res
 
 // ---------------- layer 3: chunked bodies ----------------
 // hex digit values; 16 = not a hex digit
-static const uint8_t FBR_HEX[256] = {
+static const uint8_t
+    FBR_HEX[256] = {
 #define FBR_X16 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16, 16
-  FBR_X16, FBR_X16, FBR_X16,
-  0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 16, 16, 16, 16, 16, 16,         // '0'-'9'
-  16, 10, 11, 12, 13, 14, 15, 16, 16, 16, 16, 16, 16, 16, 16, 16, // 'A'-'F'
-  FBR_X16,
-  16, 10, 11, 12, 13, 14, 15, 16, 16, 16, 16, 16, 16, 16, 16, 16, // 'a'-'f'
-  FBR_X16, FBR_X16, FBR_X16, FBR_X16, FBR_X16, FBR_X16, FBR_X16, FBR_X16, FBR_X16 // 0x70-0xff
+      FBR_X16, FBR_X16, FBR_X16, 0,       1,       2,       3,       4,       5,      6,
+      7,       8,       9,       16,      16,      16,      16,      16,      16, // '0'-'9'
+      16,      10,      11,      12,      13,      14,      15,      16,      16,     16,
+      16,      16,      16,      16,      16,      16, // 'A'-'F'
+      FBR_X16, 16,      10,      11,      12,      13,      14,      15,      16,     16,
+      16,      16,      16,      16,      16,      16,      16,                       // 'a'-'f'
+      FBR_X16, FBR_X16, FBR_X16, FBR_X16, FBR_X16, FBR_X16, FBR_X16, FBR_X16, FBR_X16 // 0x70-0xff
 #undef FBR_X16
-};
+    };
 // fbparse.h's fb_chunked_pass with two additions, kept here so the request decoder's code stays as it is:
 // tr = 1: stop after the last-chunk line and return the position of the trailer section; prog != NULL: on NEED_MORE,
 // prog[0] = the input bytes of the complete chunks before the incomplete one, prog[1] = their data bytes. The rules
