@@ -1,8 +1,7 @@
 // client_fixtures.c - the HTTP/2 and HTTP/3 client benchmarks of bench/codspeed: one client connection's work for
 // 256 requests of a bench/h2_headers.h set, against server bytes recorded once from this repo's own server
 // (responses of bench/h2_client_inputs.h). Built with H2_MAX_STREAMS=1000, so the HTTP/2 server's SETTINGS let all
-// 256 go out at once; the HTTP/3 client keeps 64 open, as the recording did, opening each request stream just
-// before its first response bytes.
+// 256 go out at once; the HTTP/3 client keeps 64 open, submitting where the recording did.
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -215,6 +214,14 @@ static void h3_in(cb_h3c *x, h3_conn *c, int side, int64_t sid, const uint8_t *d
     if (!r) break;
   }
 }
+static void h3_log(cb_h3c *x, int64_t sid, const uint8_t *d, size_t n, int fin) {
+  if (x->nlog == x->caplog)
+    x->caplog = x->caplog ? 2 * x->caplog : 4096,
+    x->log = (cb_chunk *)realloc(x->log, sizeof *x->log * (size_t)x->caplog);
+  cb_chunk *k = &x->log[x->nlog++];
+  k->sid = sid, k->n = n, k->fin = fin, k->p = (uint8_t *)malloc(n + 1);
+  if (n) memcpy(k->p, d, n);
+}
 // conn's output: to the peer (side), logged when log
 static void h3_out(cb_h3c *x, h3_conn *c, h3_conn *peer, int side, int log) {
   uint64_t pend[256];
@@ -225,13 +232,7 @@ static void h3_out(cb_h3c *x, h3_conn *c, h3_conn *peer, int side, int log) {
       size_t w = h3_stream_send(c, pend[i], x->out, sizeof x->out, &fin);
       if (!w && !fin) continue;
       progress = 1;
-      if (log) {
-        if (x->nlog == x->caplog)
-          x->caplog = x->caplog ? 2 * x->caplog : 4096,
-          x->log = (cb_chunk *)realloc(x->log, sizeof *x->log * (size_t)x->caplog);
-        cb_chunk *k = &x->log[x->nlog++];
-        k->sid = (int64_t)pend[i], k->n = w, k->fin = fin, k->p = (uint8_t *)malloc(w + 1), memcpy(k->p, x->out, w);
-      }
+      if (log) h3_log(x, (int64_t)pend[i], x->out, w, fin);
       if (peer) h3_in(x, peer, side, (int64_t)pend[i], x->out, w, fin);
     }
     if (!progress) break;
@@ -282,7 +283,8 @@ cb_h3c *cb_h3c_new(int set) {
   h3_init_client(&x->c, &H3C_CB, x, 2, 6, 10);
   int sent = 0;
   for (int guard = 0; x->n.done < CR && guard < 100000; guard++) {
-    while (sent < CR && sent - x->n.done < 64) h3_submit_one(x, sent++, &x->s);
+    while (sent < CR && sent - x->n.done < 64)
+      h3_log(x, -1, NULL, 0, 0), h3_submit_one(x, sent++, &x->s); /* replayed at the same point */
     h3_out(x, &x->c, &x->s, 1, 0);
     h3_out(x, &x->s, &x->c, 0, 1);
   }
@@ -295,12 +297,14 @@ long cb_h3c_run(cb_h3c *x) {
   x->gen++;
   h3_init_client(&x->c, &H3C_CB, x, 2, 6, 10);
   int opened = 0;
-  for (int i = 0; i < x->nlog; i++) {
+  for (int i = 0; i < x->nlog; i++) { /* the recording's order of submissions and server bytes: the client's QPACK
+                                       * encoder sees the same acknowledgements at the same points */
     const cb_chunk *k = &x->log[i];
-    if ((k->sid & 3) == 0 && k->sid / 4 >= opened) {
-      for (; opened <= k->sid / 4; opened++) h3_submit_one(x, opened, NULL);
-      h3_out(x, &x->c, NULL, 1, 0);
+    if (k->sid < 0) {
+      h3_submit_one(x, opened++, NULL);
+      continue;
     }
+    h3_out(x, &x->c, NULL, 1, 0);
     h3_in(x, &x->c, 0, k->sid, k->p, k->n, k->fin);
     h3_out(x, &x->c, NULL, 1, 0);
   }
