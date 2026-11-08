@@ -410,6 +410,7 @@ struct quic_conn {
                                            * Source Connection ID) */
   uint8_t retried, rscid[20], rscid_len; /* a Retry happened: the server's Retry Source Connection ID */
   uint8_t *token;                        /* a client's: the Retry token its Initials carry */
+  uint32_t vn_version;                   /* a client's: after Version Negotiation, the server's first version */
   uint16_t token_len;
   quic_space sp[QUIC_NSP];
   ptls_cipher_suite_t *cs; /* negotiated suite (for key updates) */
@@ -1301,6 +1302,30 @@ static inline uint32_t quic__be32(const uint8_t *p) {
 }
 
 
+/* ---------------------------------------- Version Negotiation ---------------------------------------- */
+#define QUIC_VERSION_NEGOTIATION_ERROR 0x11 /* RFC 9368 */
+/* a client's Version Negotiation (RFC 9000 §6.2): valid before any server packet, with our connection IDs echoed
+ * and v1 not listed, it ends the connection at once: closed (draining) with VERSION_NEGOTIATION_ERROR and the
+ * server's first version in vn_version. Anything else about it means it is ignored. Returns the bytes used */
+static inline size_t quic__on_vn(quic_conn *c, const uint8_t *p, const uint8_t *end, int64_t now) {
+  size_t n = (size_t)(end - p);
+  const uint8_t *q = p + 5;
+  if (c->got_server_cid || c->retried || c->closing || c->draining || q >= end) return n;
+  uint8_t dl = *q++;
+  if ((size_t)(end - q) < (size_t)dl + 1 || dl != QUIC_SCID_LEN || memcmp(q, c->scid, dl)) return n;
+  q += dl;
+  uint8_t sl = *q++;
+  if ((size_t)(end - q) < sl || sl != c->odcid_len || memcmp(q, c->odcid, sl)) return n;
+  q += sl;
+  if (end - q < 4 || (end - q) % 4) return n;
+  for (const uint8_t *v = q; v < end; v += 4)
+    if (quic__be32(v) == QUIC_V1) return n; /* it lists ours: not a valid one (§6.2) */
+  c->vn_version = quic__be32(q);
+  c->closing = c->draining = 1, c->close_code = QUIC_VERSION_NEGOTIATION_ERROR, c->close_frame = 0;
+  c->close_deadline = now;
+  return n;
+}
+
 /* ---------------------------------------------- Retry ---------------------------------------------- */
 /* the Retry Integrity Tag (RFC 9001 §5.8): AES-128-GCM over the Retry pseudo-packet (ODCID, then the packet
  * without its tag), with QUIC v1's fixed key and nonce; tag is 16 bytes */
@@ -1362,6 +1387,7 @@ static inline size_t quic__packet(quic_conn *c, uint8_t *p, uint8_t *end, int64_
   const uint8_t *pscid = NULL; /* a long header's SCID: a client adopts the server's from its first Initial */
   uint8_t pscid_len = 0;
   if (p[0] & 0x80) {
+    if (avail >= 7 && quic__be32(p + 1) == 0 && c->client) return quic__on_vn(c, p, end, now);
     if (avail < 7 || quic__be32(p + 1) != QUIC_V1) return 0;
     int type = (p[0] >> 4) & 3;
     const uint8_t *q = p + 5, *e = end;

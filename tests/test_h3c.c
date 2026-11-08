@@ -461,10 +461,35 @@ static int run(int nreq, int loss, int reorder) {
   return fails == before;
 }
 
+/* Version Negotiation to the client: ignored when it lists v1 or does not echo our connection IDs; otherwise the
+ * client closes at once with VERSION_NEGOTIATION_ERROR */
+static void test_vn(void) {
+  static quic_conn q;
+  static const quic_callbacks none = { 0 };
+  uint8_t init[1500], vn[256];
+  for (int k = 0; k < 4; k++) {
+    CHECK(quic_connect(&q, &CQX, "localhost", now_ms(), &none, NULL) == 0, "quic_connect");
+    size_t n = quic_send(&q, init, sizeof init, now_ms());
+    size_t vl = quic_version_negotiation(vn, sizeof vn, init, n); /* lists v1 */
+    CHECK(vl > 11, "a Version Negotiation packet");
+    if (k >= 1) memcpy(vn + vl - 4, "\x6b\x33\x43\xcf", 4);      /* v2 only */
+    if (k == 2) vn[6] ^= 1;                                      /* not our SCID */
+    if (k == 3) memcpy(vn + vl, "\x0a\x0a\x0a\x0a", 4), vl += 4; /* v2 and a reserved version */
+    quic_recv(&q, vn, vl, now_ms());
+    int closes = k == 1 || k == 3;
+    CHECK(closes == (q.draining && q.close_code == QUIC_VERSION_NEGOTIATION_ERROR && q.vn_version == 0x6b3343cf),
+          "Version Negotiation case %d: draining %d code 0x%llx", k, q.draining, (unsigned long long)q.close_code);
+    CHECK(!closes || quic_is_closed(&q, now_ms()), "closed at once");
+    quic_free(&q);
+  }
+  printf("  Version Negotiation: %s\n", fails ? "FAILED" : "ok");
+}
+
 int main(int argc, char **argv) {
   for (int i = 0; i < 1000; i++) BIG[i] = (uint8_t)i;
   server_init();
   client_tls_init();
+  test_vn();
   printf("sizeof(quic_conn) = %zu, sizeof(h3_conn) = %zu\n", sizeof(quic_conn), sizeof(h3_conn));
   if (argc > 2) BULK = 1, run(atoi(argv[2]), atoi(argv[1]), 0);
   else if (argc > 1) run(100, atoi(argv[1]), 1);
