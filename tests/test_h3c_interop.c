@@ -418,7 +418,10 @@ static int ng_write(ngsrv *s) {
       return -1;
     }
     if (ndata >= 0 && s->h3) nghttp3_conn_add_write_offset(s->h3, sid, (size_t)ndata);
-    if (!w) return 0;
+    if (!w) { /* done for now; ngtcp2 paces from here (its expiry says when it may write again) */
+      ngtcp2_conn_update_pkt_tx_time(s->conn, NOW_NS);
+      return 0;
+    }
     put(&TO_CLI, buf, (size_t)w);
   }
   return 0;
@@ -587,7 +590,12 @@ static int run(int nreq, int loss, int reorder) {
       }
     }
     if (accepted && ng_write(&sv)) srv_failed = 1;
-    while (take(&TO_CLI, &g)) quic_recv(&cl.q, g.d, g.n, now_ms());
+    int got = 0;
+    while (take(&TO_CLI, &g)) quic_recv(&cl.q, g.d, g.n, now_ms()), got = 1;
+    if (got) { /* what that lets the client send (ACKs open its window) goes before time moves on, as a real loop does */
+      if (cl.ready) submit_more(&cl);
+      while ((n = quic_send(&cl.q, out, sizeof out, now_ms())) > 0) put(&TO_SRV, out, n);
+    }
     if (srv_failed || cl.failed || cl.q.closing || cl.q.draining) break;
     if (cl.done == nreq && cl.submitted == nreq) break;
     if ((!TO_SRV.n && !TO_CLI.n) || next_arrival() > NOW_NS) {

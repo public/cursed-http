@@ -353,6 +353,11 @@ static int c_stream_close(ngtcp2_conn *c, uint32_t fl, int64_t sid, uint64_t cod
   if (cl->h3) nghttp3_conn_close_stream(cl->h3, sid, code);
   return 0;
 }
+static int c_extend_stream_data(ngtcp2_conn *conn, int64_t sid, uint64_t max, void *u, void *su) {
+  (void)conn, (void)max, (void)su;
+  client *cl = u;
+  return cl->h3 && nghttp3_conn_unblock_stream(cl->h3, sid) ? NGTCP2_ERR_CALLBACK_FAILURE : 0;
+}
 static int c_extend_bidi(ngtcp2_conn *c, uint64_t max, void *u) {
   (void)c, (void)max;
   client *cl = u;
@@ -394,6 +399,7 @@ static void client_init(client *cl) {
   cb.rand = c_rand, cb.get_new_connection_id2 = c_new_cid, cb.handshake_completed = c_handshake_done;
   cb.recv_stream_data = c_recv_stream, cb.acked_stream_data_offset = c_acked, cb.stream_close = c_stream_close;
   cb.extend_max_local_streams_bidi = c_extend_bidi, cb.stream_reset = c_stream_reset;
+  cb.extend_max_stream_data = c_extend_stream_data; /* unblock what STREAM_DATA_BLOCKED blocked */
   ngtcp2_cid dcid, scid;
   dcid.datalen = 18, scid.datalen = 8;
   c_rand(dcid.data, dcid.datalen, NULL), c_rand(scid.data, scid.datalen, NULL);
@@ -466,7 +472,10 @@ static int client_write(client *cl) {
       return -1;
     }
     if (ndata >= 0 && cl->h3) nghttp3_conn_add_write_offset(cl->h3, sid, (size_t)ndata);
-    if (!w) return 0;
+    if (!w) { /* done for now; ngtcp2 paces from here (its expiry says when it may write again) */
+      ngtcp2_conn_update_pkt_tx_time(cl->conn, NOW_NS);
+      return 0;
+    }
     put(&TO_SRV, buf, (size_t)w);
   }
   return 0;
@@ -536,6 +545,7 @@ static int run(int nreq, int loss, int reorder) {
         put(&TO_CLI, out, n);
       }
     }
+    int got = 0;
     while (take(&TO_CLI, &g)) {
       ngtcp2_pkt_info pi = { 0 };
       int r = ngtcp2_conn_read_pkt(cl.conn, &cl.ps.path, &pi, g.d, g.n, NOW_NS);
@@ -544,6 +554,13 @@ static int run(int nreq, int loss, int reorder) {
         cl.failed = 1;
         break;
       }
+      got = 1;
+    }
+    /* what that lets the client send (an ACK may have opened its window) goes now, before time moves on: ngtcp2's
+     * expiry does not cover "able to send" */
+    if (got && !cl.failed && client_write(&cl)) {
+      CHECK(0, "client write failed");
+      break;
     }
     if (cl.failed || (accepted && (sv.q.closing || sv.q.draining))) break;
     if (cl.done == nreq && cl.submitted == nreq) break;
