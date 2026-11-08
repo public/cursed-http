@@ -1691,9 +1691,11 @@ static inline uint8_t *quic__app_frames(quic_conn *c, uint8_t *p, uint8_t *e, qu
   if (c->send_max_streams_uni && e - p > 9)
     *p++ = 0x13, p = quic__put_vi(p, c->max_streams_uni_local), quic__rec(r, QF_MAX_STREAMS_UNI, 0, 0, 0, 0),
     c->send_max_streams_uni = 0;
-  for (int k = 0; k < QUIC_MAX_STREAMS && r->nf < QUIC_FREC_MAX; k++) {
+  /* two passes: our unidirectional streams first (HTTP/3's control and QPACK streams: small, and what the peer
+   * needs to read the rest), then the others round-robin */
+  for (int k = 0; k < 2 * QUIC_MAX_STREAMS && r->nf < QUIC_FREC_MAX; k++) {
     quic_stream *s = &c->s[(c->rr + (uint32_t)k) % QUIC_MAX_STREAMS];
-    if (!s->used) continue;
+    if (!s->used || ((k < QUIC_MAX_STREAMS) != ((s->id & 2) && QUIC__OURS(c, s->id)))) continue;
     if (s->send_max_stream_data && e - p > 18)
       *p++ = 0x11, p = quic__put_vi(p, s->id), p = quic__put_vi(p, s->max_recv),
       quic__rec(r, QF_MAX_STREAM_DATA, s->id, 0, 0, 0), s->send_max_stream_data = 0;
