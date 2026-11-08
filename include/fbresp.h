@@ -35,10 +35,22 @@
 #include "fbparse.h"
 
 // ---------------- layer 1: the head ----------------
-// Per predicate (nt, ct) one cached 64-byte block mask, as fbparse.h's scan; searches only move forward.
+// The ct mask (a byte that ends a value) is classified ahead in batches of FBR_CTB blocks into an array, so the search
+// for a line's end reads two cached words (a 64-byte window from any position) instead of branching where lines cross
+// 64-byte blocks: that branch is data-dependent, and it mispredicted ~20 times per 1.3 KB head. Blocks at or after len
+// are all ones, so a search always stops, at a position >= len (the caller's -2). Heads past FBR_CTMAX blocks go on with
+// fbr_next, fbparse.h's per-block cache, which also serves the (rare) names of 32+ bytes.
+#ifndef FBR_CTB
+#define FBR_CTB 4 // blocks per batch (c002: 4 and 8 tie; growing batches lose on short heads)
+#endif
+#ifndef FBR_CTMAX
+#define FBR_CTMAX 128 // 8 KB of head with the array (1 KB of stack: no stack-clash probes); longer heads use fbr_next
+#endif
 typedef struct {
   int k[2];
-  uint64_t m[2]; // [0] = nt, [1] = ct
+  uint64_t m[2]; // fbr_next's cache: [0] = nt, [1] = ct
+  int done;      // blocks classified into ct[]
+  uint64_t ct[FBR_CTMAX + FBR_CTB];
 } fbr_scan_t;
 FB_INLINE int fbr_next(const char *b, int len, int p, fbr_scan_t *s, const int which, const int simd) {
   const int i = which == FB_NT ? 0 : 1;
@@ -54,33 +66,73 @@ FB_INLINE int fbr_next(const char *b, int len, int p, fbr_scan_t *s, const int w
     p = (k + 1) << 6;
   }
 }
+FB_INLINE void fbr_fill(const char *b, int len, fbr_scan_t *s, int upto, const int simd) {
+  while (s->done <= upto) {
+    int j = s->done;
+    for (int i = 0; i < FBR_CTB; i++, j++) s->ct[j] = 64 * j < len ? fb_cls64(simd, FB_CT, b + 64 * j) : ~0ull;
+    s->done = j;
+  }
+}
+// the first ct at or after p (or some position >= len)
+FB_INLINE int fbr_ct(const char *b, int len, int p, fbr_scan_t *s, const int simd) {
+  int k = p >> 6, sh = p & 63;
+  if (FB_UNLIKELY(k + 1 >= s->done)) {
+    if (k + 1 >= FBR_CTMAX) return fbr_next(b, len, p, s, FB_CT, simd);
+    fbr_fill(b, len, s, k + 1, simd);
+  }
+  // the 57+ bytes from p: the bit array read as bytes, one unaligned load at byte p / 8 (words k and k + 1 are filled)
+  uint64_t m;
+  memcpy(&m, (const char *)s->ct + (p >> 3), 8);
+  m >>= p & 7;
+  if (FB_LIKELY(m)) return p + __builtin_ctzll(m);
+  sh = (p + 57) & 63; // positions p .. p + 56 had no ct: on from p + 57
+  k = (p + 57) >> 6;
+  // a long value: the rest of word k (positions >= p + 57), then whole words
+  uint64_t w = s->ct[k] & (~0ull << sh);
+  for (;;) {
+    if (w) return (k << 6) + __builtin_ctzll(w);
+    if (++k >= s->done) {
+      if (k >= FBR_CTMAX) return fbr_next(b, len, k << 6, s, FB_CT, simd);
+      fbr_fill(b, len, s, k, simd);
+    }
+    w = s->ct[k];
+  }
+}
 
 // the header section from p (pico's parse_headers): returns the end of the head, -1 or -2
 // (*num_headers: out only, the count so far even on an error, as pico)
 FB_INLINE int fbr_headers(const char *b, int len, int p, fbr_scan_t *sc, struct fb_header *h, size_t max,
                           size_t *num_headers, const int simd) {
   size_t n = 0;
+#define FBR_RET(x)                                                                                                     \
+  do {                                                                                                                 \
+    *num_headers = n;                                                                                                  \
+    return (x);                                                                                                        \
+  } while (0)
   for (;; n++) {
-    if (p >= len) return -2;
+    if (FB_UNLIKELY(p >= len)) FBR_RET(-2);
     unsigned char c = (unsigned char)b[p];
-    if (c == '\r') {
-      if (p + 1 >= len) return -2;
-      if (b[p + 1] != '\n') return -1;
-      p += 2;
-      break;
-    }
-    if (c == '\n') {
-      p++;
-      break;
-    }
-    if (n == max) return -1;
     const char *name;
     int nl, vs, e;
-    if (FB_UNLIKELY(n != 0 && (c == ' ' || c == '\t'))) { // obs-fold: the value keeps its leading whitespace
+    if (FB_UNLIKELY(c <= ' ')) { // the end of the head, obs-fold, or an error
+      if (c == '\r') {
+        if (p + 1 >= len) FBR_RET(-2);
+        if (b[p + 1] != '\n') FBR_RET(-1);
+        p += 2;
+        break;
+      }
+      if (c == '\n') {
+        p++;
+        break;
+      }
+      // obs-fold continues the field before it (the value keeps its leading whitespace); on the first line, and for a
+      // control byte, pico's name scan stops at once: -1 (as it is for n == max)
+      if (n == max || n == 0 || (c != ' ' && c != '\t')) FBR_RET(-1);
       name = NULL;
       nl = 0;
       vs = p;
     } else {
+      if (n == max) FBR_RET(-1);
       int ne;
 #if (FB_BACKEND == 2 || FB_BACKEND == 3) && !defined(FP_AVX512_EMU)
       // the 32 bytes at the line start (p < len: readable with the padding), as fb_core's walk
@@ -95,34 +147,38 @@ FB_INLINE int fbr_headers(const char *b, int len, int p, fbr_scan_t *sc, struct 
       } else
 #endif
         ne = fbr_next(b, len, p, sc, FB_NT, simd);
-      if (ne >= len) return -2;
-      if (b[ne] != ':' || ne == p) return -1;
+      // a ':' at ne >= len (in the padding) goes on: the value's end is then >= len too, so it is -2 below, as it
+      // must be; any other byte at ne >= len is -2, below len -1
+      if (FB_UNLIKELY(b[ne] != ':' || ne == p)) FBR_RET(ne >= len ? -2 : -1);
       name = b + p;
       nl = ne - p;
       vs = ne + 1;
     }
     // the value's end first: SP and HT are not ct, so the first ct after the colon is pico's (it skips the
     // whitespace, then looks for the first ct); whitespace running into len is -2 there as here
-    e = fbr_next(b, len, vs, sc, FB_CT, simd);
-    if (e >= len) return -2;
-    if (name) // the whitespace after the colon: before e, a byte <= ' ' can only be SP or HT (the rest are ct)
-      while (vs < e && (unsigned char)b[vs] <= ' ') vs++;
-    if (FB_LIKELY(b[e] == '\r')) {
-      if (e + 1 >= len) return -2;
-      if (b[e + 1] != '\n') return -1;
-      p = e + 2;
-    } else if (b[e] == '\n') p = e + 1;
-    else return -1;
+    e = fbr_ct(b, len, vs, sc, simd);
+    if (FB_LIKELY(e + 1 < len && (unsigned char)b[e] == '\r' && (unsigned char)b[e + 1] == '\n')) p = e + 2;
+    else { // pico's order: incomplete before the line end, then a bare LF ends it, anything else is invalid
+      if (e >= len) FBR_RET(-2);
+      if (b[e] == '\n') p = e + 1;
+      else if (b[e] != '\r') FBR_RET(-1);
+      else if (e + 1 >= len) FBR_RET(-2);
+      else FBR_RET(-1); // CR, then not LF
+    }
+    if (name) { // the whitespace after the colon: before e, a byte <= ' ' can only be SP or HT (the rest are ct)
+      vs += b[vs] == ' ';
+      if (FB_UNLIKELY(vs < e && (unsigned char)b[vs] <= ' '))
+        while (vs < e && (unsigned char)b[vs] <= ' ') vs++;
+    }
     int ve = e;
     while (FB_UNLIKELY(ve > vs && (unsigned char)b[ve - 1] <= ' ')) ve--; // SP or HT (as above)
     h[n].name = name;
     h[n].name_len = (size_t)nl;
     h[n].value = b + vs;
     h[n].value_len = (size_t)(ve - vs);
-    *num_headers = n + 1;
   }
-  *num_headers = n;
-  return p;
+  FBR_RET(p);
+#undef FBR_RET
 }
 
 FB_INLINE int fbr_core(const char *b, int len, int *minor, int *status, const char **msg, size_t *msg_len,
@@ -153,9 +209,10 @@ FB_INLINE int fbr_core(const char *b, int len, int *minor, int *status, const ch
   if (d0 > 9 || d1 > 9 || d2 > 9) return -1;
   *status = (int)(d0 * 100 + d1 * 10 + d2);
   // the reason phrase, with its leading spaces, up to the first ct (pico's get_token_to_eol)
-  fbr_scan_t sc = { { 0, 0 }, { 0, 0 } };
-  fb_ntct64(simd, b, &sc.m[0], &sc.m[1]); // block 0: the status line and the first headers
-  int rs = p + 3, e = fbr_next(b, len, rs, &sc, FB_CT, simd);
+  fbr_scan_t sc;
+  sc.k[0] = sc.k[1] = -1;
+  sc.done = 0;
+  int rs = p + 3, e = fbr_ct(b, len, rs, &sc, simd);
   if (e >= len) return -2;
   int q;
   if (FB_LIKELY(b[e] == '\r')) {
@@ -191,7 +248,9 @@ FB_INLINE int fbr_headers_core(const char *b, int len, struct fb_header *h, size
     int c = fb_is_complete(b, len, last_len);
     if (c) return c;
   }
-  fbr_scan_t sc = { { -1, -1 }, { 0, 0 } };
+  fbr_scan_t sc;
+  sc.k[0] = sc.k[1] = -1;
+  sc.done = 0;
   return fbr_headers(b, len, 0, &sc, h, max, num_headers, simd);
 }
 // phr_parse_headers: a header section on its own (chunked trailers)
