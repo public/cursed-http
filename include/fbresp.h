@@ -33,6 +33,9 @@
 // b[0..len) only. Nothing here is on the request parser's path: fbparse.h is used as it is, unchanged.
 #pragma once
 #include "fbparse.h"
+#if defined(__SSE2__)
+#include <emmintrin.h> // the chunk-extension scan (every x86-64 backend, the forced-scalar one too)
+#endif
 
 // ---------------- layer 1: the head ----------------
 // The ct mask (a byte that ends a value) is classified ahead in batches of FBR_CTB blocks into an array, so the search
@@ -42,12 +45,6 @@
 // fbr_next, fbparse.h's per-block cache, which also serves the (rare) names of 32+ bytes.
 #ifndef FBR_CTB
 #define FBR_CTB 4 // blocks per batch (c002: 4 and 8 tie; growing batches lose on short heads)
-#endif
-#ifndef FBR_WIN_LOAD
-#define FBR_WIN_LOAD 1 // 1: one unaligned load of the bit array; 0: two aligned words and a funnel shift
-#endif
-#ifndef FBR_LINE_FIRST
-#define FBR_LINE_FIRST 1 // the line's end from its start (off the name scan's latency), not from after the colon
 #endif
 #ifndef FBR_CTMAX
 #define FBR_CTMAX 128 // 8 KB of head with the array (1 KB of stack: no stack-clash probes); longer heads use fbr_next
@@ -86,20 +83,10 @@ FB_INLINE int fbr_ct(const char *b, int len, int p, fbr_scan_t *s, const int sim
     if (k + 1 >= FBR_CTMAX) return fbr_next(b, len, p, s, FB_CT, simd);
     fbr_fill(b, len, s, k + 1, simd);
   }
-#if FBR_WIN_LOAD
-  // the 57+ bytes from p: the bit array read as bytes, one unaligned load at byte p / 8 (words k and k + 1 are filled)
-  uint64_t m;
-  memcpy(&m, (const char *)s->ct + (p >> 3), 8);
-  m >>= p & 7;
-  if (FB_LIKELY(m)) return p + __builtin_ctzll(m);
-  sh = (p + 57) & 63; // positions p .. p + 56 had no ct: on from p + 57
-  k = (p + 57) >> 6;
-#else
   // the 64 bytes from p from words k and k + 1 (aligned loads: they forward from the fill's stores)
   uint64_t m = (s->ct[k] >> sh) | ((s->ct[k + 1] << 1) << (63 - sh));
   if (FB_LIKELY(m)) return p + __builtin_ctzll(m);
   k++; // positions p .. p + 63 had no ct: on from p + 64, in word k + 1
-#endif
   // a long value: the rest of word k, then whole words
   uint64_t w = s->ct[k] & (~0ull << sh);
   for (;;) {
@@ -138,12 +125,10 @@ FB_INLINE int fbr_headers(const char *b, int len, int p, fbr_scan_t *sc, struct 
     unsigned char c = (unsigned char)b[p];
     const char *name;
     int nl, vs, e;
-#if FBR_LINE_FIRST
     // the line's first ct, from its start: a name, its ':' and the whitespace after it hold no ct, so this is the
     // value's end too. Searching from the line start keeps the line-to-line chain (p -> e -> p) off the name scan,
     // so lines overlap in the CPU; the name is still checked first below, so every result is pico's.
     e = fbr_ct(b, len, p, sc, simd);
-#endif
     if (FB_UNLIKELY(c <= ' ')) { // the end of the head, obs-fold, or an error
       if (c == '\r') {
         if (p + 1 >= len) FBR_RET(-2);
@@ -195,11 +180,8 @@ FB_INLINE int fbr_headers(const char *b, int len, int p, fbr_scan_t *sc, struct 
         fx->last ^= (fx->last ^ (int)n) & -(int)cand;
       }
     }
-    // the value's end first: SP and HT are not ct, so the first ct after the colon is pico's (it skips the
-    // whitespace, then looks for the first ct); whitespace running into len is -2 there as here
-#if !FBR_LINE_FIRST
-    e = fbr_ct(b, len, vs, sc, simd);
-#endif
+    // e is the value's end: SP and HT are not ct either, so it is the first ct after the colon too, as pico's (it
+    // skips the whitespace, then looks for the first ct); whitespace running into len is -2 there as here
     if (FB_LIKELY(e + 1 < len && (unsigned char)b[e] == '\r' && (unsigned char)b[e + 1] == '\n')) p = e + 2;
     else { // pico's order: incomplete before the line end, then a bare LF ends it, anything else is invalid
       if (e >= len) FBR_RET(-2);
@@ -538,7 +520,22 @@ static inline int fbr_chunked_pass(const char *b, int len, char *out, int max_bo
     while (q < len && (b[q] == ' ' || b[q] == '\t')) q++;
     if (q >= len) FBR_MORE();
     if (b[q] == ';') {
-      for (q++; q + 8 <= len; q += 8) {
+      q++;
+#if defined(__SSE2__)
+      for (; q + 16 <= len; q += 16) { // 16 bytes at a time: the first ct must be the CR that ends the extension
+        __m128i x = _mm_loadu_si128((const __m128i *)(b + q));
+        __m128i ct = _mm_or_si128(_mm_andnot_si128(_mm_cmpeq_epi8(x, _mm_set1_epi8('\t')),
+                                                   _mm_cmpeq_epi8(_mm_min_epu8(x, _mm_set1_epi8(0x1f)), x)),
+                                  _mm_cmpeq_epi8(x, _mm_set1_epi8(0x7f)));
+        unsigned m = (unsigned)_mm_movemask_epi8(ct);
+        if (m) {
+          q += __builtin_ctz(m);
+          if (b[q] != '\r') return FB_CHUNK_INVALID;
+          goto ext_end;
+        }
+      }
+#endif
+      for (; q + 8 <= len; q += 8) {
         uint64_t w = fb_ld64(b + q),
                  m = (fb_swar_le(w, 0x1f) & ~fb_swar_eq(w, '\t' * FB_ONES)) | fb_swar_eq(w, 0x7f * FB_ONES);
         if (m) {
@@ -551,6 +548,9 @@ static inline int fbr_chunked_pass(const char *b, int len, char *out, int max_bo
         unsigned char c = (unsigned char)b[q];
         if ((c < 0x20 && c != '\t') || c == 0x7f) return FB_CHUNK_INVALID;
       }
+#if defined(__SSE2__)
+    ext_end:;
+#endif
     } else if (q != p) return FB_CHUNK_INVALID;
     if (q >= len) FBR_MORE();
     if (b[q] != '\r') return FB_CHUNK_INVALID;
@@ -591,7 +591,8 @@ static inline int fbr_chunked_pass(const char *b, int len, char *out, int max_bo
 //        (b + r, len - r, ...) ends it (> 0: the response ends at r + that; an empty section is just CRLF).
 //   FB_CHUNK_NEED_MORE (0): incomplete. prog (may be NULL): prog[0] = input bytes of the complete chunks, prog[1] =
 //        their data, already in out[0..prog[1]). A streaming client keeps that data, drops b[0..prog[0]) and calls
-//        again on the rest with more bytes; nothing is decoded twice. In place, b[prog[0]..len) is untouched.
+//        again on the rest with more bytes; nothing is decoded twice. In place, b[prog[0]..len) is untouched (and with
+//        prog the decode is one pass; without it, two: a retry on the same bytes must find them as they were).
 //   FB_CHUNK_INVALID (-2), FB_CHUNK_TOO_LARGE (-3): as fb_decode_chunked.
 static inline int fbr_chunked(const char *b, int len, char *out, int max_body, int *body_len, int *prog) {
   int n = 0, ns = 0, r;
@@ -602,7 +603,14 @@ static inline int fbr_chunked(const char *b, int len, char *out, int max_body, i
     if (r > 0) *body_len = n;
     return r;
   }
-  // in place: validate first (a NEED_MORE retry must see the original bytes), then compact the complete chunks
+  // in place, streaming (prog): one pass, compacting as it goes. The caller resumes at prog[0], and nothing at or after
+  // it is written (the data moves down to out[0..prog[1]) only)
+  if (prog) {
+    r = fbr_chunked_pass(b, len, out, max_body, &n, 1, sp, &ns, 1, prog);
+    if (r > 0) *body_len = n;
+    return r;
+  }
+  // in place without prog: validate first (a NEED_MORE retry must see the original bytes), then compact the chunks
   r = fbr_chunked_pass(b, len, out, max_body, &n, 0, sp, &ns, 1, prog);
   if (r < 0 || (r == 0 && !prog)) return r;
   if (ns <= FB_CHUNK_SPANS) {
