@@ -223,7 +223,8 @@ static quic_ctx CQX;
 typedef struct {
   quic_conn q;
   h3_conn h;
-  int ready, nreq, submitted, done, ok, failed, statuses_bad;
+  int ready, nreq, submitted, done, ok, failed, statuses_bad, spilled, spill_waits;
+  int64_t pending_sid; /* opened, h3_submit said AGAIN */
   long body, want_body;
   int kind[4096];
   long want_s[4096], got_s[4096];
@@ -270,8 +271,9 @@ static void c_reset(h3_conn *h, uint64_t sid, uint64_t code, void *u) {
 static const h3_callbacks H3CC = { NULL, c_data, NULL, NULL, c_close, c_reset, c_response };
 static void submit_more(client *cl) {
   while (cl->submitted < cl->nreq && cl->submitted - cl->done < 50) {
-    int64_t sid = quic_open_bidi(&cl->q);
+    int64_t sid = cl->pending_sid >= 0 ? cl->pending_sid : quic_open_bidi(&cl->q);
     if (sid < 0) return; /* at the server's stream limit: MAX_STREAMS will raise it */
+    cl->pending_sid = -1;
     int k = BULK ? 2 : (int)(rnd() % 5);
     char *path = (char *)UPBUF + 60000 + (cl->submitted % 64) * 64;
     const char *m = k == 1 ? "POST" : k == 3 ? "HEAD" : "GET";
@@ -289,17 +291,28 @@ static void submit_more(client *cl) {
     rq.scheme = (const uint8_t *)"https", rq.scheme_len = 5, rq.authority = (const uint8_t *)"localhost",
     rq.authority_len = 9;
     rq.path = (const uint8_t *)paths[(sid >> 2) % 4096], rq.path_len = (uint32_t)strlen(path);
+    /* every 7th request carries a 3000-byte cookie: a header frame beyond H3_HDR_MAX, from the spill area */
+    static char cookie[3001];
+    if (!cookie[0])
+      for (int i = 0; i < 3000; i++) cookie[i] = i % 50 == 49 ? ';' : (char)('a' + i % 26);
     static const hp_field ua = {
       (const uint8_t *)"user-agent", (const uint8_t *)"cursed-http-test", 10, 16, 0, 0, 0, 0
     };
-    rq.fields = &ua, rq.nfields = 1;
+    hp_field fl[2] = { ua, { (const uint8_t *)"cookie", (const uint8_t *)cookie, 6, 3000, 0, 0, 0, 1 } };
+    int big_hdr = cl->submitted % 7 == 3;
+    rq.fields = fl, rq.nfields = big_hdr ? 2 : 1;
     cl->kind[(sid >> 2) % 4096] = k;
     size_t up = k == 1 ? 1 + rnd() % 30000 : 0;
-    if (h3_submit(&cl->h, (uint64_t)sid, &rq, up ? UPBUF : NULL, up, 1)) {
+    int r = h3_submit(&cl->h, (uint64_t)sid, &rq, up ? UPBUF : NULL, up, 1);
+    if (r == H3_E_AGAIN) { /* the spill area is full of unsent headers: this sid again after quic_send */
+      cl->want_body -= w, cl->pending_sid = sid, cl->spill_waits++;
+      return;
+    }
+    if (r) {
       cl->failed = 1;
       return;
     }
-    cl->submitted++;
+    cl->spilled += big_hdr, cl->submitted++;
   }
 }
 static int64_t cq_on_stream(quic_conn *q, uint64_t sid, uint64_t off, const uint8_t *d, size_t len, int fin, void *u) {
@@ -348,7 +361,7 @@ static int run(int nreq, int loss, int reorder) {
   static server sv;
   CLI = &cl, SRV = &sv;
   memset(&cl, 0, sizeof cl), memset(&sv, 0, sizeof sv);
-  cl.nreq = nreq;
+  cl.nreq = nreq, cl.pending_sid = -1;
   int r0 = quic_connect(&cl.q, &CQX, "localhost", now_ms(), &CQCB, &cl);
   CHECK(r0 == 0, "quic_connect %d", r0);
   int accepted = 0;
@@ -396,6 +409,7 @@ static int run(int nreq, int loss, int reorder) {
         "client handshake confirmed (HANDSHAKE_DONE), Initial and Handshake keys discarded");
   CHECK(!cl.failed && cl.done == nreq && cl.ok == nreq && !cl.statuses_bad,
         "loss %d%%: %d/%d done, %d right statuses, %d wrong", loss, cl.done, nreq, cl.ok, cl.statuses_bad);
+  CHECK(nreq < 20 || cl.spilled >= nreq / 7, "requests with big header frames (spilled): %d", cl.spilled);
   CHECK(cl.body == cl.want_body, "loss %d%%: body %ld want %ld", loss, cl.body, cl.want_body);
   CHECK(!cl.q.closing && !cl.q.draining, "client closed the connection: code 0x%llx frame 0x%llx (h3 0x%llx)",
         (unsigned long long)cl.q.close_code, (unsigned long long)cl.q.close_frame, (unsigned long long)h3_error(&cl.h));

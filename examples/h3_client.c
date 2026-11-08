@@ -66,9 +66,9 @@ static void reset_stream(h3_conn *c, uint64_t sid, uint64_t code, void *u) {
 static const h3_callbacks H3CB = { NULL, on_data, on_trailers, NULL, on_close, reset_stream, on_response };
 
 static void submit_more(void) {
+  static int64_t sid = -1; /* opened, not yet submitted (h3_submit said AGAIN) */
   while (ready && sent < total && sent - ndone < H3_MAX_STREAMS) { /* h3_conn tracks at most this many */
-    int64_t sid = quic_open_bidi(&Q);
-    if (sid < 0) return;
+    if (sid < 0 && (sid = quic_open_bidi(&Q)) < 0) return;
     h_request rq = { 0 };
     const char *path = PATHS[sent % npaths];
     rq.method = (const uint8_t *)METHOD, rq.method_len = (uint32_t)strlen(METHOD);
@@ -82,11 +82,13 @@ static void submit_more(void) {
     fl[1].vlen = (uint32_t)snprintf(clen, sizeof clen, "%ld", upload);
     rq.fields = fl, rq.nfields = upload ? 2 : 1;
     R_OF[(sid >> 2) % MAXR] = sent;
-    if (h3_submit(&H, (uint64_t)sid, &rq, BODY, (size_t)upload, 1)) {
-      fprintf(stderr, "h3_submit failed\n");
+    int r = h3_submit(&H, (uint64_t)sid, &rq, BODY, (size_t)upload, 1);
+    if (r == H3_E_AGAIN) return; /* big request headers waiting to be sent: again after quic_send */
+    if (r) {
+      fprintf(stderr, "h3_submit failed: %d\n", r);
       exit(1);
     }
-    sent++;
+    sent++, sid = -1;
   }
 }
 static int64_t q_on_stream(quic_conn *q, uint64_t sid, uint64_t off, const uint8_t *d, size_t len, int fin, void *u) {
