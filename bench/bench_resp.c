@@ -168,6 +168,71 @@ static void bench(const corpus_t *c, int rounds) {
   printf("\n");
 }
 
+// ---------------- chunked bodies: fbr_chunked vs phr_decode_chunked ----------------
+// ns per body, decode only: each round decodes a fresh copy of every body (pico and in-place decoding rewrite their
+// input), and the copy, timed alone, is subtracted. Shapes as bench/bench_chunked.c, plus a trailer section.
+static int ck_build(char *b, int chunks, int size, int ext, int trailer) {
+  int n = 0;
+  for (int c = 0; c < chunks; c++) {
+    n += sprintf(b + n, ext ? "%x;name=value\r\n" : "%x\r\n", size);
+    for (int i = 0; i < size; i++) b[n++] = (char)('a' + (i + c) % 26);
+    n += sprintf(b + n, "\r\n");
+  }
+  return n + sprintf(b + n, trailer ? "0\r\nServer-Timing: app;dur=3\r\n\r\n" : "0\r\n\r\n");
+}
+enum { CKN = 128 };
+static double ck_round(char **src, char **w, int *len, char *out, int which) {
+  double t0 = now();
+  long s = 0;
+  for (int i = 0; i < CKN; i++) {
+    memcpy(w[i], src[i], len[i]);
+    int bl = 0;
+    if (which == 0) s += fbr_chunked(w[i], len[i], out, 1 << 30, &bl, NULL) + bl;
+    else if (which == 1) s += fbr_chunked(w[i], len[i], w[i], 1 << 30, &bl, NULL) + bl;
+    else if (which == 2) {
+      struct phr_chunked_decoder d = { 0 };
+      d.consume_trailer = 1;
+      size_t sz = len[i];
+      s += phr_decode_chunked(&d, w[i], &sz) + (long)sz;
+    } else s += w[i][0];
+  }
+  sink += s;
+  return now() - t0;
+}
+static void bench_chunked(int rounds) {
+  static const struct {
+    const char *name;
+    int chunks, size, ext, trailer;
+  } S[] = { { "1 x 17 B", 1, 17, 0, 0 },      { "1 x 500 B", 1, 500, 0, 0 },  { "4 x 128 B", 4, 128, 0, 0 },
+            { "16 x 32 B", 16, 32, 0, 0 },    { "64 x 8 B", 64, 8, 0, 0 },    { "1 x 4 KB", 1, 4096, 0, 0 },
+            { "8 x 500 B, ext", 8, 500, 1, 0 }, { "4 x 128 B, trailer", 4, 128, 0, 1 } };
+  printf("chunked bodies, ns per body (decode only), best of %d rounds: fbr_chunked out / in place, pico in place\n",
+         rounds);
+  for (size_t k = 0; k < sizeof S / sizeof *S; k++) {
+    static char *src[CKN], *w[CKN];
+    static int len[CKN];
+    static char out[1 << 16];
+    for (int i = 0; i < CKN; i++) {
+      src[i] = malloc(1 << 16);
+      w[i] = malloc(1 << 16);
+      len[i] = ck_build(src[i], S[k].chunks, S[k].size, S[k].ext, S[k].trailer);
+    }
+    double best[4] = { 1e30, 1e30, 1e30, 1e30 };
+    for (int r = 0; r < rounds; r++)
+      for (int j = 0; j < 4; j++) {
+        int x = (j + r) % 4;
+        double t = ck_round(src, w, len, out, x);
+        if (t < best[x]) best[x] = t;
+      }
+    double fo = (best[0] - best[3]) / CKN, fi = (best[1] - best[3]) / CKN, pc = (best[2] - best[3]) / CKN;
+    printf("  %-20s fbr-out %7.1f (%.2fx)  fbr-in %7.1f (%.2fx)  pico %7.1f\n", S[k].name, fo, pc / fo, fi, pc / fi, pc);
+    for (int i = 0; i < CKN; i++) {
+      free(src[i]);
+      free(w[i]);
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   int rounds = argc > 1 && atoi(argv[1]) > 0 ? atoi(argv[1]) : 200;
   printf("bench_resp: fbresp backend %s; ns per head, best of %d interleaved passes; (x) = pico's time / this\n",
@@ -185,5 +250,6 @@ int main(int argc, char **argv) {
     load_dir(&c, argv[a]);
     if (c.n) bench(&c, rounds);
   }
+  bench_chunked(rounds > 50 ? rounds / 10 : 5);
   return 0;
 }
