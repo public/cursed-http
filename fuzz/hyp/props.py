@@ -51,7 +51,7 @@ LIB.fz_req.argtypes = [ctypes.c_char_p, ctypes.c_size_t, ctypes.c_int, ctypes.PO
 
 NEED_MORE, FALLBACK, INVALID = 0, -1, -2
 R_NOTFOUND, R_FEED, R_HEALTH, R_GETPOST, R_CREATE, R_LIKE = range(6)
-MAXH = 40  # the reference allows 48 headers; stay below
+MAXH = 40  # the reference allows FP_REQ_MAXHDR (100) headers; stay below
 SETTINGS = settings(
     max_examples=int(os.environ.get("HYP_EXAMPLES", "300")),
     deadline=None,

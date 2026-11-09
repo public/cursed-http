@@ -5,7 +5,8 @@
 #                           into the user cache. Their system libraries: PW_WITH_DEPS=1 (CI) runs
 #                           `playwright install --with-deps` (sudo apt). BROWSERS="chromium firefox webkit" by default.
 #                           BROWSER_SAVE=1 also refreshes the committed corpus, tests/browser/captures/.
-#   make browser-replay     the committed corpus under every backend (no browser needed; part of make test)
+#   make browser-replay     the committed corpus under every backend (no browser needed; part of make test). Strict (-s):
+#                           every request answered the same by the fast path and fb_parse_req, no relaxed accepts
 BR_DEPS := tests/browser/check.h $(HDRS) $(B)/pico.o
 BR_INC := -Itests/browser
 BR_T := native scalar emu512 emuzmm
@@ -25,7 +26,7 @@ $(B)/browser_replay_sse2: tests/browser/replay.c tests/browser/check.h $(HDRS) $
 $(B)/browser_replay_%: tests/browser/replay.c $(BR_DEPS)
 	$(CC_T) $(BR_FLAGS_$*) $(BR_INC) $< $(B)/pico.o -o $@
 browser-replay: $(BR_REPLAY)
-	@set -e; for t in $(BR_REPLAY); do ./$$t $(BR_CAPTURES); done
+	@set -e; for t in $(BR_REPLAY); do ./$$t -s $(BR_CAPTURES); done
 real-browsers: $(B)/browser_server $(BR_REPLAY)
 	BROWSERS="$(BROWSERS)" BROWSER_SAVE="$(BROWSER_SAVE)" PW_WITH_DEPS="$(PW_WITH_DEPS)" bash tests/real_browsers.sh
 .PHONY: browser-replay real-browsers
@@ -39,7 +40,7 @@ TOP1K_IX := tests/top1k/index.tsv
 $(B)/top1k.dat: $(TOP1K) | $(B)
 	gzip -dc $< > $@
 top1k-replay: $(BR_REPLAY) $(B)/top1k.dat
-	@set -e; for t in $(BR_REPLAY); do ./$$t -l -c $(B)/top1k.dat $(TOP1K_IX); done
+	@set -e; for t in $(BR_REPLAY); do ./$$t -s -l -c $(B)/top1k.dat $(TOP1K_IX); done
 top1k-focused: $(BR_REPLAY) $(B)/top1k.dat
 	@set -e; for t in $(BR_REPLAY); do ./$$t -f -c $(B)/top1k.dat $(TOP1K_IX); done
 top1k-full: $(BR_REPLAY) $(B)/top1k.dat

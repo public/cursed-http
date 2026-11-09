@@ -547,7 +547,7 @@ int fb_parse_request(const char *buf, size_t len, const char **method, size_t *m
                      struct fb_header *headers, size_t *num_headers, size_t last_len);
 //   > 0 head bytes, -1 invalid, -2 incomplete; num_headers: in = capacity, out = count
 
-// adapter onto fastparse.h's req_t (routing from the same spec, 48 headers max)
+// adapter onto fastparse.h's req_t (routing from the same spec; FP_REQ_MAXHDR = 100 headers max, overridable)
 int fb_parse_req(const char *buf, int len, req_t *r);
 //   > 0 head + body bytes | FP_NEED_MORE | FP_FALLBACK | -2 invalid (send 400)
 int fb_parse_req_ex(const char *buf, int len, req_t *r, fb_info_t *info);
@@ -1169,7 +1169,7 @@ fastparse.h is deliberately partial: what it doesn't check, it either ignores sa
 - control characters in the method, path or header values;
 - header lines without a colon (ignored);
 - empty header names;
-- more than 48 headers.
+- more than `FP_REQ_MAXHDR` (100) headers.
 
 Requests pico rejects may therefore be accepted (about a third of random fuzz inputs). The values it returns are
 parsed strictly: route, id, Content-Length, and the Bearer token, which you should verify cryptographically

@@ -71,9 +71,9 @@ typedef int (*phr_fn)(const char *, size_t, const char **, size_t *, const char 
                       struct phr_header *, size_t *, size_t);
 static inline __attribute__((always_inline)) int ref_parse_with(phr_fn parse, const char *b, int len, req_t *r) {
   const char *m, *p;
-  size_t ml, pl, nh = 48;
+  size_t ml, pl, nh = FP_REQ_MAXHDR;
   int minor;
-  struct phr_header h[48];
+  struct phr_header h[FP_REQ_MAXHDR];
   int ret = parse(b, len, &m, &ml, &p, &pl, &minor, h, &nh, 0);
   if (ret == -2) return FP_NEED_MORE;
   if (ret < 0) return -2; // pico says invalid

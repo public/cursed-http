@@ -11,7 +11,7 @@
 //   HTTP/1.<digit>. Every accept/reject AND every -1 vs -2 decision is pico's; tests/test_fbparse.c checks that.
 //
 //   Adapter (include fastparse.h first): int fb_parse_req(buf, len, req_t *r) = exactly tests/testlib.h's
-//   ref_parse (pico + fastparse.h's routing and its Authorization/Content-Length rules, 48 headers max):
+//   ref_parse (pico + fastparse.h's routing and its Authorization/Content-Length rules, FP_REQ_MAXHDR headers max):
 //     > 0 head + body bytes, FP_NEED_MORE, FP_FALLBACK (HTTP/1.0 or other minor, Transfer-Encoding*,
 //     duplicate/odd Content-Length), -2 invalid (send 400). fb_parse_req_ex() also says why (fb_info_t).
 //
@@ -89,6 +89,9 @@
 #define FB_EMU_TAG ""
 #endif
 
+#ifndef FP_REQ_MAXHDR // the req_t adapter's header cap (fastparse.h defines it first when included)
+#define FP_REQ_MAXHDR 100
+#endif
 #define FB_INLINE      static inline __attribute__((always_inline))
 #define FB_LIKELY(x)   __builtin_expect(!!(x), 1)
 #define FB_UNLIKELY(x) __builtin_expect(!!(x), 0)
@@ -630,7 +633,7 @@ FB_INLINE int fb_core(const char *b, int len, const char **method, size_t *metho
                       size_t *path_len, int *minor, struct fb_header *h, size_t *num_headers, size_t last_len,
                       const int mode, fb_ax_t *ax, void (*on_reqline)(fb_ax_t *, const char *, int, const char *, int),
                       const int walk, const int simd) {
-  size_t max = mode == 0 ? *num_headers : 48;
+  size_t max = mode == 0 ? *num_headers : FP_REQ_MAXHDR;
   if (mode == 0) {
     *method = NULL;
     *method_len = 0;
