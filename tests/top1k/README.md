@@ -42,7 +42,9 @@ Letters become random letters of the same case, and digits random digits. Every 
 
 Then `top1k_post.py` does two more things:
 - **Bodies:** scrubbed the same way and cut to 1 KB, with `Content-Length` rewritten. A body matters to the parsers only through its framing, and analytics payloads describe the crawler.
-- **The crawler's IP:** sites echo it in payloads and response fields. Every occurrence is replaced by a TEST-NET-3 address of the same length (RFC 5737).
+- **The crawler's IP:** sites echo it in payloads and response fields, and not only as text. Its /24 prefix is replaced by a TEST-NET-3 one of the same length (RFC 5737) wherever it appears: as text (sites also mask the last octet), in hex (client-IP fields, IDs built from the address), and inside base64 in headers and URLs, decoded, replaced and re-encoded, including inside binary payloads.
+- **Payloads about the crawler:** a base64 payload that names the VM's host or location (a geolocation beacon) is scrubbed whole, as cookie values are.
+- **Google API keys** (`AIza…`): public browser keys, but secret scanners flag them, so they are scrubbed whole.
 
 Nothing else is changed.
 
