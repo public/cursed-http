@@ -81,7 +81,7 @@ __attribute__((noinline)) static int AX_simd(const char *b, int l, req_t *r) { r
 __attribute__((noinline)) static int AX_scalar(const char *b, int l, req_t *r) { return fb_parse_req_scalar(b, l, r); }
 
 static long st_ok, st_inval, st_part, st_ax[4], ex10; // pico results seen; adapter: >0, NEED_MORE, FALLBACK, -2
-#define MAXH 64
+#define MAXH 128                                      // > FP_REQ_MAXHDR: the header-cap tests below
 // the phr API: pico vs fb (simd on A and B, scalar on B)
 static void check_phr(int len, size_t max, size_t last_len, const char *what) {
   const char *m, *p;
@@ -235,6 +235,25 @@ int main(int argc, char **argv) {
   for (size_t i = 0; i < sizeof EDGES / sizeof *EDGES; i++)
     check_truncs(EDGES[i].req, (int)strlen(EDGES[i].req), "edge");
   printf("edge cases: %zu x every truncation, failures %d\n", sizeof EDGES / sizeof *EDGES, fails);
+
+  // 1b. the req_t header cap (FP_REQ_MAXHDR, #25): a GET with n header lines, n around the cap, every truncation.
+  //     fb_parse_req must agree with the reference (check_ax) and give > 0 up to the cap, -2 above it.
+  {
+    static char rq[16384];
+    for (int n = FP_REQ_MAXHDR - 2; n <= FP_REQ_MAXHDR + 2; n++) {
+      int l = sprintf(rq, "GET /feed HTTP/1.1\r\nHost: example.com\r\n");
+      for (int i = 1; i < n; i++) l += sprintf(rq + l, "X-H%d: v%d\r\n", i, i);
+      l += sprintf(rq + l, "\r\n");
+      check_truncs(rq, l, "header cap");
+      load(rq, l);
+      req_t r;
+      memset(&r, 0, sizeof r);
+      int want = n <= FP_REQ_MAXHDR ? l : -2, got = fb_parse_req(bufA, l, &r);
+      if (got != want)
+        FAIL("HEADER CAP FAIL: %d header lines (cap %d): fb_parse_req=%d, want %d\n", n, FP_REQ_MAXHDR, got, want);
+    }
+    printf("header cap: %d header lines accepted, %d rejected, failures %d\n", FP_REQ_MAXHDR, FP_REQ_MAXHDR + 1, fails);
+  }
 
   // 2. optional: third-party conformance cases, every truncation. FB_CASES=file of records
   //    name\0 source\0 verdict\0 <u32 little-endian length> <bytes>   (not shipped: build it from the suites you trust)
