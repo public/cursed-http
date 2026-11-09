@@ -1584,20 +1584,46 @@ __attribute__((noinline, cold)) static void fp_tm_window(fp_tmpl_t *X) {
   X->wtp = 0;
 }
 
-// the try loop: -2 = no template matched; *hit = the template that did
+#ifdef FP_TM_KEY
+// The request's header-line count, as fp_tm_shape counts a template's (T->nl): LFs up to the first one followed
+// by CR LF (the empty line), minus the request line's; -1 if the head doesn't end before lim. A request that
+// matches T has exactly T's lines, all CRLF-terminated, and no slot holds CR or LF: its count is T->nl.
+FP_INLINE int fp_tm_nlines(int simd, const char *b, int lim) {
+  for (int off = 0, cnt = 0; off < lim; off += 64) {
+    uint64_t m = fp_lf64(simd, b + off);
+    if (lim - off < 64) m &= (1ull << (lim - off)) - 1;
+    for (; m; m &= m - 1) {
+      int x = off + __builtin_ctzll(m);
+      cnt++;
+      if (b[x + 1] == '\r' && b[x + 2] == '\n') return cnt - 1; // (x + 2 <= lim + 1: within the padding)
+    }
+  }
+  return -1;
+}
+#endif
+// the try loop: -2 = no template matched; *hit = the template that did. With FP_TM_KEY (#22), after the first
+// (most hit) template fails, only templates with the request's header-line count are tried.
 FP_INLINE int fp_tm_loop(const char *b, int len, req_t *r, fp_tmpl_t *X, const int simd, fp_tm_t **hit) {
-  int me, pe, lim = len < FP_MAXHDR ? len : FP_MAXHDR;
+  int me, pe, lim = len < FP_MAXHDR ? len : FP_MAXHDR, tried = 0;
+#ifdef FP_TM_KEY
+  int nl = -1;
+#endif
   if (!fp_tm_rl(simd, b, lim, &me, &pe)) return -2;
   for (int i = 0; i < X->n; i++) {
     fp_tm_t *T = &X->t[X->ord[i]];
+#ifdef FP_TM_KEY
+    if (i == 1) nl = fp_tm_nlines(simd, b, lim);
+    if (i >= 1 && nl >= 0 && T->nl != nl) continue;
+#endif
     int c = fp_tm_try(b, len, r, T, simd, lim, me, pe);
     if (c != -2) {
       *hit = T;
-      X->tries += i;
+      X->tries += tried;
       return c;
     }
+    tried++;
   }
-  X->tries += X->n;
+  X->tries += tried;
   return -2;
 }
 FP_INLINE int fp_core_gen(const char *b, int len, req_t *r, const int simd) {
