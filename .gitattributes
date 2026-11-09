@@ -1,0 +1,2 @@
+# real browsers' requests, byte for byte (CRLF): never normalise or diff as text
+tests/browser/captures/** -text -diff

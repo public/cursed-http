@@ -89,6 +89,26 @@ BENCHMARK_CAPTURE(BM_server_path, browser, BROWSER);
 BENCHMARK_CAPTURE(BM_server_path, proxy, PROXY);
 
 // ---------------- fbparse.h ----------------
+// perf_one's corpora (testlib shapes as bench/dump_corpus writes them, 512 requests) with one out-of-line call per
+// request, as bench/perf_one makes it: the instructions per request the callgrind profiles of fbparse report
+static void run_perf(benchmark::State &state, long (*fn)(const cb_corpus *), int shape) {
+  run(state, cb_corpus_perf(shape, 512), fn);
+}
+static void BM_perf_fb_parse_request(benchmark::State &state, int shape) {
+  run_perf(state, cb_fb_parse_request_call, shape);
+}
+BENCHMARK_CAPTURE(BM_perf_fb_parse_request, k6, K6);
+BENCHMARK_CAPTURE(BM_perf_fb_parse_request, browser, BROWSER);
+BENCHMARK_CAPTURE(BM_perf_fb_parse_request, proxy, PROXY);
+static void BM_perf_fb_parse_request_scalar(benchmark::State &state, int shape) {
+  run_perf(state, cb_fb_parse_request_scalar_call, shape);
+}
+BENCHMARK_CAPTURE(BM_perf_fb_parse_request_scalar, k6, K6);
+BENCHMARK_CAPTURE(BM_perf_fb_parse_request_scalar, browser, BROWSER);
+BENCHMARK_CAPTURE(BM_perf_fb_parse_request_scalar, proxy, PROXY);
+static void BM_perf_fb_parse_req(benchmark::State &state, int shape) { run_perf(state, cb_fb_parse_req_call, shape); }
+BENCHMARK_CAPTURE(BM_perf_fb_parse_req, browser, BROWSER);
+
 static void BM_fb_parse_request(benchmark::State &state, int shape) { run_fb(state, cb_fb_parse_request, shape); }
 BENCHMARK_CAPTURE(BM_fb_parse_request, curl, CURL);
 BENCHMARK_CAPTURE(BM_fb_parse_request, chrome, CHROME);

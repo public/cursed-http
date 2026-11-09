@@ -9,6 +9,8 @@
 #   make compare-all  + uWebSockets, httparse, hparse (fetched at pinned commits; rustc / zig optional)
 #   make compare-go   + fasthttp (Go >= 1.26) on the same corpora
 #   make conformance  third-party conformance suites (fetched at pinned commits)
+#   make real-browsers Chromium, Firefox and WebKit (Playwright) against the HTTP/1.1 parsers; make browser-replay
+#                     replays their saved requests (tests/browser/captures/) under every backend (part of make test)
 #   make fuzz         libFuzzer: fbparse / fastparse / batchparse differential targets (clang with libFuzzer;
 #                     FUZZ_TIME=s per target, default 30)
 #   make hypothesis   Hypothesis properties on grammar-built requests (venv in build/; HYP_EXAMPLES, default 300)
@@ -186,7 +188,7 @@ example-check: $(B)/read_loop
 GENVECTORS ?= 200000
 FBMODE ?=
 RUN := ./scripts/run_test.sh
-test: all gencheck example-check fuzz-replay
+test: all gencheck example-check fuzz-replay browser-replay
 	@set -e; for t in $(FP_BINS); do $(RUN) 1 $$t nobench; done
 	@set -e; $(RUN) 2 $(B)/test_fbparse $(FBMODE); \
 	  for t in $(notdir $(filter-out $(B)/test_fbparse,$(FB_BINS))); do $(RUN) 1 $(B)/$$t quick; done
@@ -357,4 +359,5 @@ clean:
 	rm -rf $(B)
 .PHONY: all lib mca mca-validate gen gencheck test test-quick asan bench bench-codspeed avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check fuzz fuzz-replay hypothesis mutants-fuzz format lint hooks clean
 include mk/h2h3.mk
+include mk/browser.mk
 include mk/resp.mk

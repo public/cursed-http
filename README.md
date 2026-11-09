@@ -777,6 +777,7 @@ make conformance  # 298 third-party conformance cases x every truncation (llhttp
 make compare-all  # + uWebSockets, lightning, http-parser, pico Armv8-A forks, httparse, hparse
 make compare-go   # + fasthttp (Go >= 1.26) on the same corpora
 make extras-check # both, as quick correctness gates (CI / Docker)
+make real-browsers # headless Chromium, Firefox and WebKit (Playwright, pinned) against the HTTP/1.1 parsers
 
 # HTTP/2, HTTP/3, QUIC (after scripts/fetch-thirdparty.sh nghttp2 nghttp3 h2spec picotls ngtcp2; see H2H3.md)
 make test-h2h3    # HPACK, h2, QPACK, h3 and QUIC tests, differential against nghttp2 / nghttp3 / ngtcp2
@@ -921,6 +922,17 @@ The 7 inputs accepted against some reference's rejection don't affect framing or
   - Hypothesis shrinks a failure to a minimal request and keeps it for the next run.
   - `make mutants-fuzz` runs the planted fbparse.h bugs against these properties. `MUT_ONLY=regex` runs a
     subset, for a quick check while developing.
+
+- **Real browsers** (`make real-browsers`, [tests/browser/](tests/browser/)): Playwright drives headless Chromium,
+  Firefox and WebKit through a page whose script sends 24 kinds of request to a loopback server.
+  - The requests include cookies, JSON, urlencoded, multipart and binary bodies, and PUT, PATCH, DELETE, OPTIONS, HEAD
+    and an extension method. There are also a 6 KB header, a 7 KB URL, 40 and 60 custom headers, tabs and Latin-1
+    bytes in values, XHR, sendBeacon, keepalive, Range, a WebSocket upgrade, 20 parallel fetches and a form
+    navigation.
+  - Each request is checked as it arrives. fbparse.h must equal pico on every length (with header arrays of 128 and
+    48, and with `last_len`), and the `req_t` adapters must equal the reference or fall back.
+  - The saved requests (156 from Chromium 156, Firefox 157 and WebKit 27.2) are in `tests/browser/captures/`.
+    `make test` replays them under every backend (`make browser-replay`), so no browser is needed for that.
 
 **Platforms run:**
 
