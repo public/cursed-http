@@ -525,8 +525,9 @@ static inline size_t qp_enc_bound(size_t nlen, size_t vlen) { return nlen + vlen
 #endif
 typedef struct {
   hp_enc t;
-  uint32_t max_entries, blocked_max; /* the peer's MaxEntries (its max capacity / 32), blocked streams */
-  uint32_t krc;                      /* Known Received Count */
+  uint64_t max_entries; /* the peer's MaxEntries: its max capacity / 32 (a 62-bit setting, so 64-bit arithmetic) */
+  uint32_t blocked_max; /* the peer's blocked streams */
+  uint32_t krc;         /* Known Received Count */
   struct {
     uint64_t sid;
     uint32_t ric, min; /* Required Insert Count; the smallest entry referenced */
@@ -553,7 +554,7 @@ static inline uint8_t *qp__ebuf(qp_enc *e, size_t need) { /* room for an instruc
 }
 static inline void qp_enc_settings(qp_enc *e, uint64_t max_cap, uint64_t blocked) {
   uint32_t cap = max_cap < HP_ENC_TABLE ? (uint32_t)max_cap : HP_ENC_TABLE;
-  e->max_entries = (uint32_t)(max_cap / 32 < 0xffffffffu ? max_cap / 32 : 0xffffffffu);
+  e->max_entries = max_cap / 32;
   e->blocked_max = blocked < 0xffff ? (uint32_t)blocked : 0xffff;
   if (!cap) return;
   uint8_t *p = qp__ebuf(e, 8);
