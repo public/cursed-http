@@ -299,12 +299,88 @@ static void test_check_bits(void) {
   if (fails == before) printf("hh_decode_f check bits: ok\n");
 }
 
+/* hp_enc (the indexing encoder) against nghttp2's inflater and ours: request-like streams of blocks drawn from a
+ * pool of fields (most repeat, some get fresh values, some are too big to index or must never be), with the
+ * peer's table size changing between blocks (lowered, raised, lowered and raised again before a block). Every
+ * block must decode to its fields, and both decoders' tables must have the encoder's size */
+static void test_enc_table(void) {
+  long before = fails, blocks = 0, hits = 0;
+  static uint8_t blk[1 << 16];
+  static hp_enc E;
+  static const char *names[] = { "user-agent",    "accept",     "accept-language", "cookie",   "referer", "x-trace-id",
+                                 "authorization", ":authority", "sec-fetch-mode",  "priority", "etag",    "x-big" };
+  for (long c = 0; c < 200 * scale(); c++) {
+    uint32_t peer = rnd() % 4 == 0 ? (uint32_t)(rnd() % 4097) : 4096;
+    nghttp2_hd_inflater *inf;
+    nghttp2_hd_inflate_new(&inf);
+    nghttp2_hd_inflate_change_table_size(inf, peer);
+    hp_dec_init(&D, peer);
+    hp_enc_init(&E, 4096), hp_enc_resize(&E, peer);
+    tf pool[40];
+    for (int i = 0; i < 40; i++) {
+      const char *n = names[rnd() % (sizeof names / sizeof names[0])];
+      pool[i].nl = strlen(n), memcpy(pool[i].n, n, pool[i].nl);
+      if (!strcmp(n, "x-big")) pool[i].vl = 400 + rnd() % 190; /* over 3/4 of the smaller tables: not indexed */
+      else pool[i].vl = rnd() % 4 ? 1 + rnd() % 120 : rnd() % 25;
+      for (size_t k = 0; k < pool[i].vl; k++) pool[i].v[k] = (char)(' ' + 1 + rnd() % 94);
+      pool[i].flags = rnd() % 12 == 0;
+    }
+    for (int r = 0; r < 60; r++) {
+      if (rnd() % 10 == 0) { /* SETTINGS_HEADER_TABLE_SIZE: once or twice before the next block */
+        for (int t = (int)(rnd() % 2); t >= 0; t--) {
+          peer = rnd() % 3 ? (uint32_t)(rnd() % 4097) : 4096;
+          nghttp2_hd_inflate_change_table_size(inf, peer);
+          hp_enc_resize(&E, peer);
+        }
+        D.limit = peer; /* ours, as h2.h would on sending the SETTINGS: a lower limit wants a size update */
+        if (peer < D.max) D.need_update = 1;
+      }
+      tf t[16];
+      int k = 1 + (int)(rnd() % 14);
+      uint8_t *p = blk;
+      p += hp_enc_begin(&E, p);
+      for (int i = 0; i < k; i++) {
+        t[i] = pool[rnd() % 40];
+        if (rnd() % 8 == 0) /* a fresh value */
+          for (size_t q = 0; q < t[i].vl; q++) t[i].v[q] = (char)(' ' + 1 + rnd() % 94);
+        size_t w = hp_enc_ifield(&E, p, (uint8_t *)t[i].n, t[i].nl, (uint8_t *)t[i].v, t[i].vl, t[i].flags);
+        CHECK(w <= hp_enc_bound(t[i].nl, t[i].vl), "field longer than hp_enc_bound: %zu", w);
+        hits += w <= 3;
+        p += w;
+      }
+      int n = n2_inflate(inf, blk, (size_t)(p - blk));
+      int ok = n == k;
+      for (int i = 0; ok && i < k; i++)
+        ok = RF[i].nl == t[i].nl && !memcmp(RF[i].n, t[i].n, t[i].nl) && RF[i].vl == t[i].vl &&
+             !memcmp(RF[i].v, t[i].v, t[i].vl) && (!t[i].flags || RF[i].never);
+      CHECK(ok, "conn %ld block %d: nghttp2 got %d of %d fields", c, r, n, k);
+      CHECK(nghttp2_hd_inflate_get_dynamic_table_size(inf) == E.size, "conn %ld block %d: table %zu, encoder %u", c, r,
+            nghttp2_hd_inflate_get_dynamic_table_size(inf), E.size);
+      {
+        int fl, m = hp_decode_block(&D, blk, (size_t)(p - blk), F, 256, ARENA, sizeof ARENA, 1 << 20, &fl);
+        int ok2 = m == k;
+        for (int i = 0; ok2 && i < k; i++)
+          ok2 = F[i].nlen == t[i].nl && !memcmp(F[i].name, t[i].n, t[i].nl) && F[i].vlen == t[i].vl &&
+                !memcmp(F[i].value, t[i].v, t[i].vl);
+        CHECK(ok2 && D.size == E.size, "conn %ld block %d: hp_decode_block got %d of %d, table %u vs %u", c, r, m, k,
+              D.size, E.size);
+      }
+      blocks++;
+      if (fails > before + 5) break;
+    }
+    nghttp2_hd_inflate_del(inf);
+  }
+  printf("indexing encoder vs nghttp2 inflate and hp_decode_block: %s (%ld blocks, %ld fields in 3 bytes or less)\n",
+         fails == before ? "ok" : "FAILED", blocks, hits);
+}
+
 int main(void) {
   printf("hv backend %s\n", hv_backend());
   test_check_bits();
   test_rfc();
   test_diff();
   test_encode();
+  test_enc_table();
   printf("%s: %ld failures / %ld checks\n", fails ? "FAILED" : "PASS", fails, checks);
   return fails != 0;
 }

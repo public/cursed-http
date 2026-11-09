@@ -1,4 +1,4 @@
-/* quic.h: a QUIC v1 server transport (RFC 9000, 9001, 9002), sans-IO and header-only.
+/* quic.h: a QUIC v1 transport (RFC 9000, 9001, 9002), server and client, sans-IO and header-only.
  *
  * Datagrams in (quic_recv), datagrams out (quic_send), one timer (quic_timeout / quic_on_timeout).
  * The TLS 1.3 handshake is picotls's (MIT, linked: third_party/picotls lib/picotls.c + lib/openssl.c,
@@ -11,12 +11,15 @@
  * default realloc) and grow only up to the flow-control windows we advertise. picotls allocates
  * its own handshake state.
  *
- * Scope (server): QUIC v1 only (other versions get Version Negotiation), no 0-RTT, no Retry,
- * no connection migration (PATH_CHALLENGE is answered on the current path), one connection ID per
- * side, no ECN, no pacing.
+ * Scope: QUIC v1 only (other versions get Version Negotiation), no 0-RTT, no Retry, no connection
+ * migration (PATH_CHALLENGE is answered on the current path), one connection ID per side, no ECN, no pacing.
  *
- *   quic_ctx_init(&ctx, tls_ctx)                      tls_ctx: a ptls_context_t with certificates
- *   quic_accept(&c, &ctx, dgram, len, now_ms, &cb, user)   from a client Initial; 0 or QUIC_E_*
+ *   quic_ctx_init(&ctx, tls_ctx)                      tls_ctx: a ptls_context_t (a server's with certificates,
+ *                                                     a client's with its certificate verifier)
+ *   quic_accept(&c, &ctx, dgram, len, now_ms, &cb, user)   server: from a client Initial; 0 or QUIC_E_*
+ *   quic_connect(&c, &ctx, server_name, now_ms, &cb, user) client: the ClientHello is queued (ALPN "h3");
+ *                                                     quic_send the first datagram, then as above
+ *   quic_open_bidi(&c)                                client: a new request stream (or -1 at the peer's limit)
  *   quic_recv(&c, dgram, len, now_ms)                 every later datagram for this connection
  *   n = quic_send(&c, out, cap, now_ms)               one datagram to send, 0 when idle
  *   quic_timeout(&c) / quic_on_timeout(&c, now_ms)    the next deadline and its handler
@@ -87,7 +90,7 @@ typedef struct {
   /* nonzero if sid has data to give stream_send */
   int (*stream_wants)(quic_conn *c, uint64_t sid, void *user);
   void (*on_stream_reset)(quic_conn *c, uint64_t sid, uint64_t code, void *user); /* RESET_STREAM or STOP_SENDING */
-  void (*on_established)(quic_conn *c, void *user);                               /* handshake complete */
+  void (*on_established)(quic_conn *c, void *user); /* handshake complete (a client may send 1-RTT data now) */
 } quic_callbacks;
 
 typedef struct {
@@ -171,8 +174,8 @@ static inline void quic__mask(const quic_key *k, const uint8_t *sample, uint8_t 
   else qhp_aes_masks(&k->hp, s, mask, 1);
 }
 /* Initial keys from the client's Destination Connection ID (RFC 9001 §5.2) */
-static inline int quic__initial_keys(quic_key *rx, quic_key *tx, const uint8_t *dcid, size_t len,
-                                     ptls_cipher_suite_t *aes128) {
+static inline int quic__initial_keys_role(quic_key *rx, quic_key *tx, const uint8_t *dcid, size_t len,
+                                          ptls_cipher_suite_t *aes128, int client) {
   uint8_t isec[32], csec[32], ssec[32];
   ptls_hash_algorithm_t *h = aes128->hash;
   ptls_iovec_t none = ptls_iovec_init(NULL, 0);
@@ -180,7 +183,14 @@ static inline int quic__initial_keys(quic_key *rx, quic_key *tx, const uint8_t *
       ptls_hkdf_expand_label(h, csec, 32, ptls_iovec_init(isec, 32), "client in", none, NULL) ||
       ptls_hkdf_expand_label(h, ssec, 32, ptls_iovec_init(isec, 32), "server in", none, NULL))
     return -1;
+  if (client) /* a client reads the server's Initial packets and writes its own */
+    return quic__key_setup(rx, aes128, 0, ssec) || quic__key_setup(tx, aes128, 1, csec) ? -1 : 0;
   return quic__key_setup(rx, aes128, 0, csec) || quic__key_setup(tx, aes128, 1, ssec) ? -1 : 0;
+}
+
+static inline int quic__initial_keys(quic_key *rx, quic_key *tx, const uint8_t *dcid, size_t len,
+                                     ptls_cipher_suite_t *aes128) {
+  return quic__initial_keys_role(rx, tx, dcid, len, aes128, 0);
 }
 
 /* ------------------------------------------ range sets ------------------------------------------ */
@@ -405,6 +415,7 @@ struct quic_conn {
   int64_t prev_rx_until;
   /* state */
   uint8_t established, confirmed, handshake_done_pending, addr_validated, peer_tp_ok;
+  uint8_t client, got_server_cid; /* quic_connect; a client adopts the server's SCID from its first Initial */
   uint8_t closing, draining, close_sent_once, close_app;
   uint64_t close_code, close_frame;
   int64_t idle_deadline, close_deadline;
@@ -415,7 +426,8 @@ struct quic_conn {
   quic_rset closed[2]; /* indices of finished client streams (bidi, uni): opening stream N
                                  * implicitly opens all lower ones, which may still arrive later */
   uint64_t peer_max_streams_uni, peer_init_stream_data_uni, peer_bidi_local, peer_max_ack_delay, peer_ack_delay_exp;
-  uint64_t next_uni_id;
+  uint64_t next_uni_id, next_bidi_id;
+  uint64_t peer_bidi_remote, peer_max_streams_bidi; /* a client: limits on the bidi streams it opens */
   /* path */
   uint8_t path_response[8], path_response_pending;
   /* recovery (RFC 9002) */
@@ -438,10 +450,14 @@ struct quic_conn {
   int64_t pace_at;
   int64_t recovery_start;
   uint64_t bytes_recv, bytes_sent; /* before address validation: 3x limit */
+  int64_t last_send_at;            /* a client's anti-deadlock probe before the handshake is confirmed */
   uint64_t undecryptable;          /* packets dropped because they failed to decrypt */
   quic_stream s[QUIC_MAX_STREAMS];
   uint32_t rr;
 };
+
+/* stream ids: bit 0 is the initiator (0 client, 1 server), bit 1 uni. "ours": we opened it */
+#define QUIC__OURS(c, sid) ((((sid) & 1) != 0) != ((c)->client != 0))
 
 static inline void *quic__default_alloc(void *p, size_t n) {
   if (!n) {
@@ -475,9 +491,10 @@ static inline quic_stream *quic__stream_new(quic_conn *c, uint64_t sid) {
       memset(s, 0, sizeof *s);
       s->used = 1, s->id = sid;
       quic__rb_init(&s->in);
-      int uni = (sid & 2) != 0, ours = (sid & 1) != 0;
+      int uni = (sid & 2) != 0, ours = QUIC__OURS(c, sid);
       s->max_recv = ours && uni ? 0 : QUIC_STREAM_WIN;
-      s->max_send = uni ? (ours ? c->peer_init_stream_data_uni : 0) : c->peer_bidi_local; /* our sending limit */
+      /* our sending limit: the peer's initial_max_stream_data for its uni / its own bidi / our bidi */
+      s->max_send = uni ? (ours ? c->peer_init_stream_data_uni : 0) : ours ? c->peer_bidi_remote : c->peer_bidi_local;
       return s;
     }
   return NULL;
@@ -710,8 +727,8 @@ static inline uint8_t *quic__tp_int(uint8_t *p, uint64_t id, uint64_t v) {
   return quic__put_vi(p, v);
 }
 static inline int quic__decode_tp(quic_conn *c, const uint8_t *p, const uint8_t *end) {
-  uint64_t seen = 0;
-  int have_iscid = 0;
+  uint64_t seen = 0, bidi_remote = 0;
+  int have_iscid = 0, have_odcid = 0;
   c->peer_max_ack_delay = 25, c->peer_ack_delay_exp = 3;
   uint64_t bidi_local = 0;
   while (p < end) {
@@ -725,9 +742,17 @@ static inline int quic__decode_tp(quic_conn *c, const uint8_t *p, const uint8_t 
     int is_int = id == 0x01 || id == 0x03 || (id >= 0x04 && id <= 0x0b) || id == 0x0e;
     if (is_int && (quic__vi(&q, qe, &v) || q != qe)) return -1;
     switch (id) {
-      case 0x00:
-      case 0x02:
-      case 0x10: return -1; /* server-only parameters from a client */
+      case 0x00: /* original_destination_connection_id: a server's, the DCID of the client's first Initial */
+        if (!c->client || len != c->odcid_len || memcmp(p, c->odcid, len)) return -1;
+        have_odcid = 1;
+        break;
+      case 0x02: /* stateless_reset_token: kept for nothing (no stateless reset detection) */
+        if (!c->client || len != 16) return -1;
+        break;
+      case 0x10: /* preferred_address: we stay on the first path */
+        if (!c->client) return -1;
+        break;
+      case 0x06: bidi_remote = v; break;
       case 0x03:
         if (v < 1200) return -1;
         break;
@@ -740,6 +765,7 @@ static inline int quic__decode_tp(quic_conn *c, const uint8_t *p, const uint8_t 
         break;
       case 0x08:
         if (v > (1ull << 60)) return -1;
+        c->peer_max_streams_bidi = v;
         break;
       case 0x0a:
         if (v > 20) return -1;
@@ -752,7 +778,7 @@ static inline int quic__decode_tp(quic_conn *c, const uint8_t *p, const uint8_t 
       case 0x0e:
         if (v < 2) return -1;
         break;
-      case 0x0f: /* initial_source_connection_id must equal the client's SCID */
+      case 0x0f: /* initial_source_connection_id must equal the SCID of the peer's first Initial (our DCID) */
         if (len != c->dcid_len || memcmp(p, c->dcid, len)) return -1;
         have_iscid = 1;
         break;
@@ -760,10 +786,10 @@ static inline int quic__decode_tp(quic_conn *c, const uint8_t *p, const uint8_t 
     }
     p += len;
   }
-  if (!have_iscid) return -1;
-  c->peer_bidi_local = bidi_local;
+  if (!have_iscid || (c->client && !have_odcid)) return -1;
+  c->peer_bidi_local = bidi_local, c->peer_bidi_remote = bidi_remote;
   for (int i = 0; i < QUIC_MAX_STREAMS; i++)
-    if (c->s[i].used && !(c->s[i].id & 2)) c->s[i].max_send = bidi_local;
+    if (c->s[i].used && !(c->s[i].id & 2)) c->s[i].max_send = QUIC__OURS(c, c->s[i].id) ? bidi_remote : bidi_local;
   c->peer_tp_ok = 1;
   return 0;
 }
@@ -792,6 +818,7 @@ static inline int quic__collected_ext(ptls_t *tls, ptls_handshake_properties_t *
     quic__error(c, QUIC_TRANSPORT_PARAMETER_ERROR, 0x06);
     return PTLS_ALERT_ILLEGAL_PARAMETER;
   }
+  if (c->client) return 0; /* a client's own went out with its ClientHello */
   /* ours, sent in EncryptedExtensions */
   uint8_t tp[160], *p = tp;
   p = quic__put_vi(p, 0x00), p = quic__put_vi(p, c->odcid_len), memcpy(p, c->odcid, c->odcid_len), p += c->odcid_len;
@@ -841,9 +868,18 @@ static inline void quic__crypto_feed(quic_conn *c, int space) {
   }
   ptls_buffer_dispose(&out);
   if (r == 0 && !c->established && ptls_handshake_is_complete(c->tls)) { /* 0 also means "flight sent, waiting" */
-    c->established = c->confirmed = 1; /* the server's handshake is confirmed when it completes (RFC 9001 §4.1.2) */
-    c->handshake_done_pending = 1;
-    quic__discard_space(c, QUIC_SP_HANDSHAKE);
+    if (c->client) { /* "h3" or nothing; confirmed later, by HANDSHAKE_DONE (RFC 9001 §4.1.2) */
+      const char *alpn = ptls_get_negotiated_protocol(c->tls);
+      if (!alpn || strcmp(alpn, "h3")) {
+        quic__error(c, 0x100 | PTLS_ALERT_NO_APPLICATION_PROTOCOL, 0x06);
+        return;
+      }
+      c->established = 1;
+    } else {
+      c->established = c->confirmed = 1; /* the server's handshake is confirmed when it completes (§4.1.2) */
+      c->handshake_done_pending = 1;
+      quic__discard_space(c, QUIC_SP_HANDSHAKE);
+    }
     if (c->cs && !quic__next_secret(c->cs, c->app_secret_rx) &&
         !quic__key_update(&c->next_rx, &c->sp[QUIC_SP_APP].rx, c->cs, 0, c->app_secret_rx))
       c->have_next_rx = 1;
@@ -879,15 +915,17 @@ static inline int quic__stream_deliver(quic_conn *c, quic_stream *s) {
   }
 }
 
-/* a client stream id we have not seen: check limits and open it */
+/* a stream id from a frame: ours (it must exist), or the peer's (check limits, open it if new) */
 static inline quic_stream *quic__peer_stream(quic_conn *c, uint64_t sid, int *err) {
   *err = 0;
-  int uni = (sid & 2) != 0;
+  int uni = (sid & 2) != 0, ours = QUIC__OURS(c, sid);
   uint64_t idx = sid >> 2, *opened = uni ? &c->opened_uni : &c->opened_bidi;
-  quic_stream *s = (sid & 1) || idx < *opened ? quic__stream(c, sid) : NULL; /* beyond opened: new, no lookup */
+  quic_stream *s = ours || idx < *opened ? quic__stream(c, sid) : NULL; /* beyond opened: new, no lookup */
   if (s) return s;
-  /* server-initiated: only ours, and we keep those */
-  if (sid & 1) {
+  /* ours: one we opened and have since finished is gone, and late frames for it are ignored; one we never
+   * opened is an error (RFC 9000 §19.8) */
+  if (ours) {
+    if (sid < (uni ? c->next_uni_id : c->next_bidi_id)) return NULL;
     *err = QUIC_STREAM_STATE_ERROR;
     return NULL;
   }
@@ -904,7 +942,7 @@ static inline quic_stream *quic__peer_stream(quic_conn *c, uint64_t sid, int *er
 }
 static inline void quic__stream_maybe_free(quic_conn *c, quic_stream *s) {
   if (!s->recv_done || !s->send_done) return;
-  int peer = !(s->id & 1), uni = (s->id & 2) != 0;
+  int peer = !QUIC__OURS(c, s->id), uni = (s->id & 2) != 0;
   if (peer) quic__rs_add(c->ctx, &c->closed[uni], s->id >> 2, (s->id >> 2) + 1);
   quic__stream_free(c, s);
   if (peer) { /* grant a new stream in place of this one */
@@ -1008,7 +1046,7 @@ static inline int quic__frames(quic_conn *c, int space, const uint8_t *p, const 
       case 0x04: { /* RESET_STREAM */
         QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b) || quic__vi(&p, end, &d));
         /* our uni stream: send-only */
-        if ((a & 3) == 3) {
+        if ((a & 2) && QUIC__OURS(c, a)) {
           quic__error(c, QUIC_STREAM_STATE_ERROR, type);
           return -1;
         }
@@ -1035,13 +1073,12 @@ static inline int quic__frames(quic_conn *c, int space, const uint8_t *p, const 
       case 0x05: { /* STOP_SENDING */
         QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b));
         /* the peer's uni stream: we never send on it */
-        if ((a & 3) == 2) {
+        if ((a & 2) && !QUIC__OURS(c, a)) {
           quic__error(c, QUIC_STREAM_STATE_ERROR, type);
           return -1;
         }
-        quic_stream *s = (a & 1) ? quic__stream(c, a) : NULL;
-        int err = 0;
-        if (!(a & 1)) s = quic__peer_stream(c, a, &err);
+        int err = 0; /* ours: a lookup (one already finished is ignored); the peer's: check it, open it */
+        quic_stream *s = QUIC__OURS(c, a) ? quic__stream(c, a) : quic__peer_stream(c, a, &err);
         if (err) {
           quic__error(c, (uint64_t)err, type);
           return -1;
@@ -1064,7 +1101,14 @@ static inline int quic__frames(quic_conn *c, int space, const uint8_t *p, const 
         if (c->closing) return -1;
         break;
       }
-      case 0x07: quic__error(c, QUIC_PROTOCOL_VIOLATION, type); return -1; /* NEW_TOKEN from a client */
+      case 0x07: /* NEW_TOKEN: a client keeps none (no 0-RTT, no resumption); from a client, an error */
+        if (!c->client) {
+          quic__error(c, QUIC_PROTOCOL_VIOLATION, type);
+          return -1;
+        }
+        QUIC__NEED(quic__vi(&p, end, &a) || !a || (uint64_t)(end - p) < a);
+        p += a;
+        break;
       case 0x08:
       case 0x09:
       case 0x0a:
@@ -1084,7 +1128,7 @@ static inline int quic__frames(quic_conn *c, int space, const uint8_t *p, const 
           return -1;
         }
         /* data on our send-only stream */
-        if ((a & 3) == 3) {
+        if ((a & 2) && QUIC__OURS(c, a)) {
           quic__error(c, QUIC_STREAM_STATE_ERROR, type);
           return -1;
         }
@@ -1127,8 +1171,8 @@ static inline int quic__frames(quic_conn *c, int space, const uint8_t *p, const 
         break;
       case 0x11: { /* MAX_STREAM_DATA */
         QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b));
-        /* receive-only for us */
-        if ((a & 3) == 2) {
+        /* receive-only for us: the peer's uni stream */
+        if ((a & 2) && !QUIC__OURS(c, a)) {
           quic__error(c, QUIC_STREAM_STATE_ERROR, type);
           return -1;
         }
@@ -1144,6 +1188,7 @@ static inline int quic__frames(quic_conn *c, int space, const uint8_t *p, const 
           return -1;
         }
         if (type == 0x13 && a > c->peer_max_streams_uni) c->peer_max_streams_uni = a;
+        if (type == 0x12 && a > c->peer_max_streams_bidi) c->peer_max_streams_bidi = a;
         break;
       case 0x14: QUIC__NEED(quic__vi(&p, end, &a)); break;                          /* DATA_BLOCKED */
       case 0x15: QUIC__NEED(quic__vi(&p, end, &a) || quic__vi(&p, end, &b)); break; /* STREAM_DATA_BLOCKED */
@@ -1184,7 +1229,13 @@ static inline int quic__frames(quic_conn *c, int space, const uint8_t *p, const 
         c->draining = 1, c->close_deadline = now + 3 * quic__pto(c, QUIC_SP_APP);
         return -1;
       }
-      case 0x1e: quic__error(c, QUIC_PROTOCOL_VIOLATION, type); return -1; /* HANDSHAKE_DONE from a client */
+      case 0x1e: /* HANDSHAKE_DONE: the client's handshake is confirmed (RFC 9001 §4.1.2); from a client, an error */
+        if (!c->client) {
+          quic__error(c, QUIC_PROTOCOL_VIOLATION, type);
+          return -1;
+        }
+        if (!c->confirmed) c->confirmed = 1, quic__discard_space(c, QUIC_SP_HANDSHAKE);
+        break;
       default: quic__error(c, QUIC_FRAME_ENCODING_ERROR, type); return -1;
     }
   }
@@ -1241,6 +1292,8 @@ static inline size_t quic__packet(quic_conn *c, uint8_t *p, uint8_t *end, int64_
   size_t avail = (size_t)(end - p), pn_off;
   uint8_t *pkt_end;
   int space;
+  const uint8_t *pscid = NULL; /* a long header's SCID: a client adopts the server's from its first Initial */
+  uint8_t pscid_len = 0;
   if (p[0] & 0x80) {
     if (avail < 7 || quic__be32(p + 1) != QUIC_V1) return 0;
     int type = (p[0] >> 4) & 3;
@@ -1248,11 +1301,12 @@ static inline size_t quic__packet(quic_conn *c, uint8_t *p, uint8_t *end, int64_
     uint8_t dl = *q++;
     if (dl > 20 || (size_t)(e - q) < (size_t)dl + 1) return 0;
     int ours = dl == QUIC_SCID_LEN && !memcmp(q, c->scid, QUIC_SCID_LEN);
-    int odcid = dl == c->odcid_len && !memcmp(q, c->odcid, dl);
+    int odcid = !c->client && dl == c->odcid_len && !memcmp(q, c->odcid, dl);
     if (!ours && !(type == 0 && odcid)) return 0;
     q += dl;
     uint8_t sl = *q++;
     if (sl > 20 || (size_t)(e - q) < sl) return 0;
+    pscid = q, pscid_len = sl;
     q += sl;
     if (type == 0) { /* Initial: token */
       uint64_t tl;
@@ -1307,6 +1361,10 @@ static inline size_t quic__packet(quic_conn *c, uint8_t *p, uint8_t *end, int64_
   if ((p[0] & 0x80 ? first & 0x0c : first & 0x18)) {
     quic__error(c, QUIC_PROTOCOL_VIOLATION, 0);
     return 0;
+  }
+  /* the server's connection ID, from the first Initial that decrypts (RFC 9000 §7.2) */
+  if (c->client && !c->got_server_cid && space == QUIC_SP_INITIAL && pscid) {
+    memcpy(c->dcid, pscid, pscid_len), c->dcid_len = pscid_len, c->got_server_cid = 1;
   }
   if (phase_flip && !late) { /* the peer updated keys: rotate ours (RFC 9001 §6) */
     quic__key_free(&c->prev_rx);
@@ -1404,6 +1462,84 @@ static inline int quic_accept(quic_conn *c, quic_ctx *x, uint8_t *d, size_t len,
   return quic_recv(c, d, len, now) == QUIC_E_CLOSED && c->draining ? QUIC_E_CLOSED : 0;
 }
 
+/* a client connection to server_name (SNI and the certificate check; NULL for neither): Initial keys from a random
+ * Destination Connection ID, the ClientHello (ALPN "h3", our transport parameters) queued for quic_send */
+static inline int quic_connect(quic_conn *c, quic_ctx *x, const char *server_name, int64_t now,
+                               const quic_callbacks *cb, void *user) {
+  memset(c, 0, sizeof *c);
+  c->ctx = x, c->cb = *cb, c->user = user;
+  c->client = 1, c->addr_validated = 1; /* a client has no anti-amplification limit */
+  c->odcid_len = 16, x->tls->random_bytes(c->odcid, 16);
+  memcpy(c->dcid, c->odcid, 16), c->dcid_len = 16;
+  x->tls->random_bytes(c->scid, QUIC_SCID_LEN);
+  extern ptls_cipher_suite_t ptls_openssl_aes128gcmsha256;
+  if (quic__initial_keys_role(&c->sp[0].rx, &c->sp[0].tx, c->odcid, 16, &ptls_openssl_aes128gcmsha256, 1))
+    return QUIC_E_NOMEM;
+  c->sp[0].have_rx = c->sp[0].have_tx = 1;
+  for (int i = 0; i < QUIC_NSP; i++) {
+    quic__rb_init(&c->sp[i].crypto_in);
+    c->sp[i].sent = x->alloc(NULL, sizeof(quic_sent) * QUIC_SENT_MAX);
+    if (!c->sp[i].sent) return QUIC_E_NOMEM;
+  }
+  if (!(c->tls = ptls_new(x->tls, 0))) return QUIC_E_NOMEM;
+  *ptls_get_data_ptr(c->tls) = c;
+  if (server_name && ptls_set_server_name(c->tls, server_name, 0)) return QUIC_E_NOMEM;
+  /* our transport parameters, in the ClientHello */
+  uint8_t tp[96], *p = tp;
+  p = quic__tp_int(p, 0x01, QUIC_IDLE_MS);
+  p = quic__tp_int(p, 0x03, QUIC_MAX_UDP);
+  p = quic__tp_int(p, 0x04, QUIC_CONN_WIN);
+  p = quic__tp_int(p, 0x05, QUIC_STREAM_WIN); /* bidi_local: the response side of our request streams */
+  p = quic__tp_int(p, 0x07, QUIC_STREAM_WIN);
+  p = quic__tp_int(p, 0x08, 0); /* the server opens no bidi streams to us */
+  p = quic__tp_int(p, 0x09, QUIC_MAX_UNI);
+  p = quic__put_vi(p, 0x0c), p = quic__put_vi(p, 0); /* disable_active_migration */
+  p = quic__put_vi(p, 0x0f), p = quic__put_vi(p, QUIC_SCID_LEN), memcpy(p, c->scid, QUIC_SCID_LEN), p += QUIC_SCID_LEN;
+  ptls_buffer_init(&c->tpbuf, "", 0);
+  if (ptls_buffer_reserve(&c->tpbuf, (size_t)(p - tp))) return QUIC_E_NOMEM;
+  memcpy(c->tpbuf.base, tp, (size_t)(p - tp)), c->tpbuf.off = (size_t)(p - tp);
+  c->tpext[0] = (ptls_raw_extension_t){ 0x39, { c->tpbuf.base, c->tpbuf.off } };
+  c->tpext[1] = (ptls_raw_extension_t){ UINT16_MAX, { NULL, 0 } };
+  static const ptls_iovec_t h3 = { (uint8_t *)"h3", 2 };
+  c->props.client.negotiated_protocols.list = &h3, c->props.client.negotiated_protocols.count = 1;
+  c->props.additional_extensions = c->tpext;
+  c->props.collect_extension = quic__collect_ext;
+  c->props.collected_extensions = quic__collected_ext;
+  c->max_data_local = QUIC_CONN_WIN, c->max_streams_bidi_local = 0, c->max_streams_uni_local = QUIC_MAX_UNI;
+  c->peer_max_ack_delay = 25, c->peer_ack_delay_exp = 3;
+  c->next_uni_id = 2, c->next_bidi_id = 0;
+  c->cwnd = 10 * QUIC_SEND_MAX, c->ssthresh = UINT64_MAX, c->recovery_start = INT64_MIN;
+  c->pkt_thresh = 3, c->time_thresh_8 = 9;
+  c->idle_deadline = now + QUIC_IDLE_MS;
+  /* the ClientHello: TLS's first flight, into the Initial space's crypto stream */
+  ptls_buffer_t out;
+  size_t eo[5] = { 0 };
+  ptls_buffer_init(&out, "", 0);
+  int r = ptls_handle_message(c->tls, &out, eo, 0, NULL, 0, &c->props);
+  if (r != PTLS_ERROR_IN_PROGRESS || eo[1] == 0) {
+    ptls_buffer_dispose(&out);
+    return QUIC_E_NOMEM;
+  }
+  uint8_t *w = quic__sb_reserve(x, &c->sp[QUIC_SP_INITIAL].crypto_out, eo[1]);
+  if (!w) {
+    ptls_buffer_dispose(&out);
+    return QUIC_E_NOMEM;
+  }
+  memcpy(w, out.base, eo[1]), c->sp[QUIC_SP_INITIAL].crypto_out.len += eo[1];
+  ptls_buffer_dispose(&out);
+  return 0;
+}
+
+/* client: a new bidirectional (request) stream, or -1 at the server's initial_max_streams_bidi / MAX_STREAMS */
+static inline int64_t quic_open_bidi(quic_conn *c) {
+  if (!c->client || !c->established || c->closing || c->draining) return -1;
+  if ((c->next_bidi_id >> 2) >= c->peer_max_streams_bidi) return -1;
+  quic_stream *s = quic__stream_new(c, c->next_bidi_id);
+  if (!s) return -1;
+  c->next_bidi_id += 4;
+  return (int64_t)s->id;
+}
+
 static inline void quic_free(quic_conn *c) {
   for (int i = 0; i < QUIC_NSP; i++) {
     quic__key_free(&c->sp[i].rx), quic__key_free(&c->sp[i].tx);
@@ -1436,7 +1572,7 @@ static inline void quic_reset_stream(quic_conn *c, uint64_t sid, uint64_t code) 
   quic_stream *s = quic__stream(c, sid);
   if (!s) return;
   if (!s->send_done && !s->reset_sent) s->send_reset = 1, s->reset_code = code;
-  if (!s->recv_done && !(sid & 1)) s->send_stop = 1, s->stop_code = code;
+  if (!s->recv_done) s->send_stop = 1, s->stop_code = code; /* our send-only uni streams are recv_done */
 }
 
 /* ---------------------------------------------- send ---------------------------------------------- */
@@ -1555,9 +1691,11 @@ static inline uint8_t *quic__app_frames(quic_conn *c, uint8_t *p, uint8_t *e, qu
   if (c->send_max_streams_uni && e - p > 9)
     *p++ = 0x13, p = quic__put_vi(p, c->max_streams_uni_local), quic__rec(r, QF_MAX_STREAMS_UNI, 0, 0, 0, 0),
     c->send_max_streams_uni = 0;
-  for (int k = 0; k < QUIC_MAX_STREAMS && r->nf < QUIC_FREC_MAX; k++) {
+  /* two passes: our unidirectional streams first (HTTP/3's control and QPACK streams: small, and what the peer
+   * needs to read the rest), then the others round-robin */
+  for (int k = 0; k < 2 * QUIC_MAX_STREAMS && r->nf < QUIC_FREC_MAX; k++) {
     quic_stream *s = &c->s[(c->rr + (uint32_t)k) % QUIC_MAX_STREAMS];
-    if (!s->used) continue;
+    if (!s->used || ((k < QUIC_MAX_STREAMS) != ((s->id & 2) && QUIC__OURS(c, s->id)))) continue;
     if (s->send_max_stream_data && e - p > 18)
       *p++ = 0x11, p = quic__put_vi(p, s->id), p = quic__put_vi(p, s->max_recv),
       quic__rec(r, QF_MAX_STREAM_DATA, s->id, 0, 0, 0), s->send_max_stream_data = 0;
@@ -1676,11 +1814,14 @@ static inline size_t quic_send(quic_conn *c, uint8_t *out, size_t cap, int64_t n
     if (ack_due) p = quic__ack_frame(c, sp, space, p, e, now, &largest);
     if (p != before_ack) quic__rec(&k->rec, QF_ACK, largest, 0, 0, 0), k->rec.largest_ack = largest;
     uint8_t *after_ack = p;
-    if (cc_ok || sp->crypto_out.lost.n || space != QUIC_SP_APP) {
+    /* a full record ring would forget this packet, and what it carries would never be resent if it were
+     * lost: only an ACK or a probe goes out until acks (or losses) free records */
+    int rec_ok = sp->nsent < QUIC_SENT_MAX;
+    if (rec_ok && (cc_ok || sp->crypto_out.lost.n || space != QUIC_SP_APP)) {
       uint64_t nb;
       p = quic__sb_emit(&sp->crypto_out, 1, 0, p, e, &k->rec, UINT64_MAX, &nb);
     }
-    if (space == QUIC_SP_APP && c->established) p = quic__app_frames(c, p, e, &k->rec, cc_ok);
+    if (rec_ok && space == QUIC_SP_APP && c->established) p = quic__app_frames(c, p, e, &k->rec, cc_ok);
     if (c->probes_due && p == after_ack && e - p > 1) *p++ = 0x01, quic__rec(&k->rec, QF_PING, 0, 0, 0, 0); /* probe */
     if (p == plain + poff) continue; /* nothing after all */
     k->ack_eliciting = p != after_ack;
@@ -1736,7 +1877,14 @@ static inline size_t quic_send(quic_conn *c, uint8_t *out, size_t cap, int64_t n
       if (k->ack_eliciting) c->bytes_in_flight += k->rec.size, sp->last_ack_eliciting_at = now;
     }
   }
-  c->bytes_sent += (uint64_t)(o - out);
+  c->bytes_sent += (uint64_t)(o - out), c->last_send_at = now;
+  /* a client discards its Initial keys once it sends a Handshake packet (RFC 9001 §4.9.1) */
+  if (c->client && !c->sp[QUIC_SP_INITIAL].discarded)
+    for (int i = 0; i < np; i++)
+      if (pk[i].space == QUIC_SP_HANDSHAKE) {
+        quic__discard_space(c, QUIC_SP_INITIAL);
+        break;
+      }
   return (size_t)(o - out);
 }
 
@@ -1755,6 +1903,12 @@ static inline int64_t quic_timeout(const quic_conn *c) {
       int64_t pto = sp->last_ack_eliciting_at + quic__pto(c, i);
       if (pto < t) t = pto;
     }
+  }
+  /* a client before confirmation probes even with nothing in flight: the server may be blocked by its
+   * anti-amplification limit until it hears from us (RFC 9002 §6.2.2.1) */
+  if (c->client && !c->confirmed && !c->bytes_in_flight && c->last_send_at) {
+    int64_t pto = c->last_send_at + quic__pto(c, QUIC_SP_HANDSHAKE);
+    if (pto < t) t = pto;
   }
   return t;
 }
@@ -1778,6 +1932,7 @@ static inline void quic_on_timeout(quic_conn *c, int64_t now) {
     for (uint32_t k = 0; k < sp->nsent && !inflight; k++)
       inflight = quic__sent_at(sp, k)->ack_eliciting && !quic__sent_at(sp, k)->acked;
     if (inflight && sp->last_ack_eliciting_at + quic__pto(c, i) <= now) {
+      fired = 1;
       c->pto_count++, c->probes_due = 2;
       /* resend what is outstanding in that space as the probe's payload */
       for (uint32_t k = 0; k < sp->nsent; k++) {
@@ -1788,5 +1943,8 @@ static inline void quic_on_timeout(quic_conn *c, int64_t now) {
       break;
     }
   }
+  if (!fired && c->client && !c->confirmed && !c->bytes_in_flight && c->last_send_at &&
+      c->last_send_at + quic__pto(c, QUIC_SP_HANDSHAKE) <= now)
+    c->pto_count++, c->probes_due = 1; /* a PING (padded in an Initial) in the spaces we have keys for */
 }
 #endif

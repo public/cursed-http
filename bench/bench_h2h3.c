@@ -11,6 +11,11 @@
  *   4. HTTP/3 server CPU per request above QUIC: an nghttp3 client's stream bytes (its QPACK
  *      encoder with a 4096-byte dynamic table) replayed into h3.h and into an nghttp3 server; both
  *      answer 200 + 13-byte body; only the server's work is timed
+ *   5. HTTP/2 client CPU per request: h2.h's client and an nghttp2 client session send the same R
+ *      requests and read the same recorded nghttp2 server bytes (responses per set: a CDN's static file
+ *      headers, gRPC with trailers, a minimal server), every field, body byte and trailer delivered
+ *   6. HTTP/3 client CPU per request above QUIC: the same with h3.h's client and an nghttp3 client, reading
+ *      an nghttp3 server's recorded stream bytes (QPACK dynamic table)
  * ns per request, best of PASSES. Header sets: bench/h2_headers.h (browser, gRPC, h2load).
  *   ./bench_h2h3 [passes] */
 #define _GNU_SOURCE
@@ -22,6 +27,7 @@
 #include "qpack.h"
 #include "h3.h"
 #include "h2_headers.h"
+#include "h2_client_inputs.h"
 #include <nghttp2/nghttp2.h>
 #include <nghttp3/nghttp3.h>
 #ifdef RIVALS
@@ -320,7 +326,7 @@ static int o_req(h2_conn *c, uint32_t sid, const h2_request *rq, int end, void *
   OUR_DONE++;
   return end ? h2_respond(c, sid, 200, &ct, 1, (const uint8_t *)BODY, 13, 1) < 0 : 0;
 }
-static const h2_callbacks OCB = { o_req, NULL, NULL, NULL, NULL };
+static const h2_callbacks OCB = { o_req, NULL, NULL, NULL, NULL, NULL };
 static h2_conn OC;
 static h2_scratch OSC;
 static double h2_ours(int s) {
@@ -615,7 +621,7 @@ static void h3o_close(h3_conn *c, uint64_t sid, uint64_t err, void *u) {
   (void)c, (void)sid, (void)u;
   if (!err) H3_DONE++;
 }
-static const h3_callbacks H3CB = { h3o_req, NULL, NULL, NULL, h3o_close, NULL };
+static const h3_callbacks H3CB = { h3o_req, NULL, NULL, NULL, h3o_close, NULL, NULL };
 /* our server: per-stream bytes in, as a transport would deliver them; returns 0 or -1 */
 static int h3o_feed(h3_conn *c, sbuf *b) {
   while (b->n || b->fin == 1) {
@@ -793,6 +799,456 @@ static double h3_n3(int s) {
   return best;
 }
 
+/* ------------------------------------- 5. HTTP/2 client ------------------------------------- */
+/* the responses (bench/h2_client_inputs.h) and requests as h_request, per set */
+static rs_set RS[3][R];
+static long RS_FIELDS[3], RS_TRAILERS[3]; /* totals over a set, for the gates */
+static void build_responses(void) {
+  for (int s = 0; s < 3; s++)
+    for (int i = 0; i < R; i++) rs_build(&RS[s][i], s, i), RS_FIELDS[s] += RS[s][i].n, RS_TRAILERS[s] += RS[s][i].nt;
+}
+static h_request RQ[3][R];
+static hp_field RQF[3][R][24];
+static void build_requests(void) {
+  for (int s = 0; s < 3; s++)
+    for (int i = 0; i < R; i++) rq_build(&SETS[s][i], &RQ[s][i], RQF[s][i]);
+}
+/* the server's bytes for one connection, recorded from an nghttp2 server answering an nghttp2 client's R requests
+ * (MAX_CONCURRENT_STREAMS 1000, so all go out at once); its first frame, SETTINGS, is fed before the requests */
+static bytes SRV2[3];
+static size_t SRV2_FIRST[3];
+static int REC_SET;
+static nghttp2_ssize rec2_body(nghttp2_session *s, int32_t id, uint8_t *buf, size_t len, uint32_t *fl,
+                               nghttp2_data_source *src, void *u) {
+  (void)len, (void)src, (void)u;
+  memcpy(buf, BODY, 13);
+  *fl |= NGHTTP2_DATA_FLAG_EOF;
+  const rs_set *r = &RS[REC_SET][(id - 1) / 2];
+  if (r->nt) {
+    nghttp2_nv nv[2];
+    for (int k = 0; k < r->nt; k++)
+      nv[k] = (nghttp2_nv){ (uint8_t *)r->t[k].n, (uint8_t *)r->t[k].v, strlen(r->t[k].n), strlen(r->t[k].v), 0 };
+    *fl |= NGHTTP2_DATA_FLAG_NO_END_STREAM;
+    nghttp2_submit_trailer(s, id, nv, (size_t)r->nt);
+  }
+  return 13;
+}
+static int rec2_frame(nghttp2_session *s, const nghttp2_frame *f, void *u) {
+  (void)u;
+  if (f->hd.type == NGHTTP2_HEADERS && (f->hd.flags & NGHTTP2_FLAG_END_STREAM)) {
+    const rs_set *r = &RS[REC_SET][(f->hd.stream_id - 1) / 2];
+    nghttp2_nv nv[16];
+    for (int k = 0; k < r->n; k++)
+      nv[k] = (nghttp2_nv){ (uint8_t *)r->f[k].n, (uint8_t *)r->f[k].v, strlen(r->f[k].n), strlen(r->f[k].v), 0 };
+    nghttp2_data_provider2 dp = { { 0 }, rec2_body };
+    nghttp2_submit_response2(s, f->hd.stream_id, nv, (size_t)r->n, &dp);
+  }
+  return 0;
+}
+static void record_server2(int s) {
+  nghttp2_session_callbacks *cb;
+  nghttp2_session *cli, *srv;
+  nghttp2_session_callbacks_new(&cb);
+  nghttp2_session_client_new(&cli, cb, NULL);
+  nghttp2_session_callbacks_set_on_frame_recv_callback(cb, rec2_frame);
+  nghttp2_session_server_new(&srv, cb, NULL);
+  nghttp2_session_callbacks_del(cb);
+  REC_SET = s;
+  nghttp2_settings_entry st[] = { { NGHTTP2_SETTINGS_MAX_CONCURRENT_STREAMS, 1000 } };
+  nghttp2_submit_settings(srv, NGHTTP2_FLAG_NONE, st, 1);
+  nghttp2_submit_settings(cli, NGHTTP2_FLAG_NONE, NULL, 0);
+  const uint8_t *d;
+  nghttp2_ssize n;
+  while ((n = nghttp2_session_mem_send2(srv, &d)) > 0) put(&SRV2[s], d, (size_t)n);
+  SRV2_FIRST[s] = SRV2[s].n;
+  if (nghttp2_session_mem_recv2(cli, SRV2[s].p, SRV2[s].n) < 0) exit(40);
+  for (int i = 0; i < R; i++) {
+    nghttp2_nv nv[24];
+    int k = nv2(&SETS[s][i], nv);
+    nghttp2_submit_request2(cli, NULL, nv, (size_t)k, NULL, NULL);
+  }
+  for (int round = 0; round < 64; round++) {
+    int moved = 0;
+    while ((n = nghttp2_session_mem_send2(cli, &d)) > 0) {
+      if (nghttp2_session_mem_recv2(srv, d, (size_t)n) < 0) exit(41);
+      moved = 1;
+    }
+    size_t from = SRV2[s].n;
+    while ((n = nghttp2_session_mem_send2(srv, &d)) > 0) put(&SRV2[s], d, (size_t)n), moved = 1;
+    if (SRV2[s].n > from && nghttp2_session_mem_recv2(cli, SRV2[s].p + from, SRV2[s].n - from) < 0) exit(42);
+    if (!moved) break;
+  }
+  nghttp2_session_del(cli), nghttp2_session_del(srv);
+  if (SRV2[s].p[3] != NGHTTP2_SETTINGS) exit(43);
+  SRV2_FIRST[s] = 9 + ((size_t)SRV2[s].p[0] << 16 | (size_t)SRV2[s].p[1] << 8 | SRV2[s].p[2]);
+}
+/* client CPU per request: R requests encoded and sent, then the recorded server bytes in 16 KiB reads
+ * (output drained after each), every response's fields, body and trailers delivered to callbacks */
+static long CL_DONE, CL_BODY, CL_FIELDS, CL_TR;
+static void cl_reset(void) { CL_DONE = CL_BODY = CL_FIELDS = CL_TR = 0; }
+static void cl_gate(const char *who, int s) {
+  long want_f = RS_FIELDS[s] + (strcmp(who, "nghttp2") && strcmp(who, "nghttp3") ? 0 : RS_TRAILERS[s]);
+  if (CL_DONE != R || CL_BODY != 13L * R || CL_FIELDS != want_f ||
+      (CL_TR != RS_TRAILERS[s] && strcmp(who, "nghttp2") && strcmp(who, "nghttp3"))) {
+    printf("%s (set %d): %ld of %d done, body %ld, fields %ld (want %ld), trailers %ld (want %ld)\n", who, s, CL_DONE,
+           R, CL_BODY, CL_FIELDS, want_f, CL_TR, RS_TRAILERS[s]);
+    GATE_BAD++;
+  }
+}
+static int c2_resp(h2_conn *c, uint32_t sid, const h2_response *rs, int end, void *u) {
+  (void)c, (void)sid, (void)end, (void)u;
+  CL_FIELDS += rs->nfields + 1;
+  for (int k = 0; k < rs->nfields; k++) sink += rs->fields[k].vlen; /* touch them, as a caller would */
+  return 0;
+}
+static int c2_data(h2_conn *c, uint32_t sid, const uint8_t *d, size_t n, int end, void *u) {
+  (void)c, (void)sid, (void)d, (void)end, (void)u;
+  CL_BODY += (long)n;
+  return 0;
+}
+static int c2_tr(h2_conn *c, uint32_t sid, const hp_field *f, int n, void *u) {
+  (void)c, (void)sid, (void)u;
+  CL_TR += n;
+  for (int k = 0; k < n; k++) sink += f[k].vlen;
+  return 0;
+}
+static void c2_close(h2_conn *c, uint32_t sid, uint32_t err, void *u) {
+  (void)c, (void)sid, (void)u;
+  if (!err) CL_DONE++;
+}
+static const h2_callbacks C2CB = { NULL, c2_data, c2_tr, NULL, c2_close, c2_resp };
+static int c2_feed(h2_conn *c, h2_scratch *sc, uint8_t *in, size_t *have, uint8_t *out, size_t cap) {
+  for (;;) {
+    int r = h2_recv(c, sc, in, *have);
+    if (r < 0) return -1;
+    size_t w;
+    while ((w = h2_send(c, out, cap)) > 0) sink += out[0];
+    memmove(in, in + r, *have - (size_t)r), *have -= (size_t)r;
+    if (!r || !*have) return 0;
+  }
+}
+static double h2c_ours(int s) {
+  static h2_conn C;
+  static h2_scratch SC;
+  static uint8_t out[1 << 16], in[1 << 17];
+  double best = 1e18;
+  for (int p = 0; p < PASSES / 4 + 1; p++) {
+    cl_reset();
+    double t0 = now_ns();
+    h2_init_client(&C, &C2CB, NULL);
+    size_t have = SRV2_FIRST[s];
+    memcpy(in, SRV2[s].p, have);
+    if (c2_feed(&C, &SC, in, &have, out, sizeof out)) exit(44);
+    for (int i = 0; i < R; i++)
+      for (int r; (r = h2_submit(&C, &RQ[s][i], NULL, 0, 1)) != 2 * i + 1;) { /* AGAIN: our output is backed up */
+        size_t w = h2_send(&C, out, sizeof out);
+        if (r != H2_E_AGAIN || !w) exit(45);
+        sink += out[0];
+      }
+    size_t w;
+    while ((w = h2_send(&C, out, sizeof out)) > 0) sink += out[0];
+    for (size_t off = SRV2_FIRST[s]; off < SRV2[s].n;) {
+      size_t m = SRV2[s].n - off < 16384 ? SRV2[s].n - off : 16384;
+      memcpy(in + have, SRV2[s].p + off, m), have += m, off += m;
+      if (c2_feed(&C, &SC, in, &have, out, sizeof out)) exit(46);
+    }
+    double t = (now_ns() - t0) / R;
+    if (!p) cl_gate("h2.h", s);
+    if (t < best) best = t;
+  }
+  return best;
+}
+static int n2c_header(nghttp2_session *s, const nghttp2_frame *f, nghttp2_rcbuf *n, nghttp2_rcbuf *v, uint8_t fl,
+                      void *u) {
+  (void)s, (void)f, (void)n, (void)fl, (void)u;
+  CL_FIELDS++, sink += nghttp2_rcbuf_get_buf(v).len;
+  return 0;
+}
+static int n2c_data(nghttp2_session *s, uint8_t fl, int32_t sid, const uint8_t *d, size_t n, void *u) {
+  (void)s, (void)fl, (void)sid, (void)d, (void)u;
+  CL_BODY += (long)n;
+  return 0;
+}
+static int n2c_close(nghttp2_session *s, int32_t sid, uint32_t err, void *u) {
+  (void)s, (void)sid, (void)u;
+  if (!err) CL_DONE++;
+  return 0;
+}
+static double h2c_n2(int s) {
+  double best = 1e18;
+  static uint8_t sinkbuf[1 << 16];
+  for (int p = 0; p < PASSES / 4 + 1; p++) {
+    nghttp2_session_callbacks *cb;
+    nghttp2_session *cli;
+    nghttp2_session_callbacks_new(&cb);
+    nghttp2_session_callbacks_set_on_header_callback2(cb, n2c_header);
+    nghttp2_session_callbacks_set_on_data_chunk_recv_callback(cb, n2c_data);
+    nghttp2_session_callbacks_set_on_stream_close_callback(cb, n2c_close);
+    cl_reset();
+    double t0 = now_ns();
+    nghttp2_session_client_new(&cli, cb, NULL);
+    nghttp2_submit_settings(cli, NGHTTP2_FLAG_NONE, NULL, 0);
+    if (nghttp2_session_mem_recv2(cli, SRV2[s].p, SRV2_FIRST[s]) < 0) exit(47);
+    for (int i = 0; i < R; i++) {
+      nghttp2_nv nv[24];
+      int k = nv2(&SETS[s][i], nv);
+      if (nghttp2_submit_request2(cli, NULL, nv, (size_t)k, NULL, NULL) != 2 * i + 1) exit(48);
+    }
+    const uint8_t *d;
+    nghttp2_ssize n;
+    while ((n = nghttp2_session_mem_send2(cli, &d)) > 0)
+      memcpy(sinkbuf, d, (size_t)n < sizeof sinkbuf ? (size_t)n : sizeof sinkbuf);
+    for (size_t off = SRV2_FIRST[s]; off < SRV2[s].n;) {
+      size_t m = SRV2[s].n - off < 16384 ? SRV2[s].n - off : 16384;
+      if (nghttp2_session_mem_recv2(cli, SRV2[s].p + off, m) < 0) exit(49);
+      off += m;
+      while ((n = nghttp2_session_mem_send2(cli, &d)) > 0)
+        memcpy(sinkbuf, d, (size_t)n < sizeof sinkbuf ? (size_t)n : sizeof sinkbuf);
+    }
+    nghttp2_session_del(cli);
+    double t = (now_ns() - t0) / R;
+    nghttp2_session_callbacks_del(cb);
+    if (!p) cl_gate("nghttp2", s);
+    if (t < best) best = t;
+  }
+  return best;
+}
+
+/* ------------------------------------- 6. HTTP/3 client ------------------------------------- */
+/* the server's stream bytes, recorded from an nghttp3 server (QPACK encoder with a 4096-byte dynamic table,
+ * as both clients allow, 0 blocked streams; no dynamic table for requests) answering an nghttp3 client that keeps 64 requests open: every chunk
+ * it writes, in order. A replayed client opens each request stream just before its first response bytes */
+static chunk *H3CLOG[3];
+static int H3CN[3];
+static nghttp3_ssize rec3_body(nghttp3_conn *c, int64_t sid, nghttp3_vec *vec, size_t veccnt, uint32_t *fl, void *u,
+                               void *su) {
+  (void)veccnt, (void)u, (void)su;
+  vec[0].base = (uint8_t *)BODY, vec[0].len = 13;
+  *fl |= NGHTTP3_DATA_FLAG_EOF;
+  const rs_set *r = &RS[REC_SET][sid / 4];
+  if (r->nt) {
+    nghttp3_nv nv[2];
+    for (int k = 0; k < r->nt; k++)
+      nv[k] = (nghttp3_nv){ (uint8_t *)r->t[k].n, (uint8_t *)r->t[k].v, strlen(r->t[k].n), strlen(r->t[k].v), 0 };
+    *fl |= NGHTTP3_DATA_FLAG_NO_END_STREAM;
+    if (nghttp3_conn_submit_trailers(c, sid, nv, (size_t)r->nt)) exit(50);
+  }
+  return 1;
+}
+static int rec3_srv_end(nghttp3_conn *c, int64_t sid, void *u, void *su) {
+  (void)u, (void)su;
+  const rs_set *r = &RS[REC_SET][sid / 4];
+  nghttp3_nv nv[16];
+  for (int k = 0; k < r->n; k++)
+    nv[k] = (nghttp3_nv){ (uint8_t *)r->f[k].n, (uint8_t *)r->f[k].v, strlen(r->f[k].n), strlen(r->f[k].v), 0 };
+  nghttp3_data_reader dr = { rec3_body };
+  return nghttp3_conn_submit_response(c, sid, nv, (size_t)r->n, &dr);
+}
+static long REC3_ENDED;
+static int rec3_cli_end(nghttp3_conn *c, int64_t sid, void *u, void *su) {
+  (void)c, (void)sid, (void)u, (void)su;
+  REC3_ENDED++;
+  return 0;
+}
+/* write everything conn has, feeding it to peer; log: record it as set s's server bytes */
+static void rec3_pump(nghttp3_conn *conn, nghttp3_conn *peer, int s, int log, int64_t *closed_upto) {
+  static int caps[3];
+  for (;;) {
+    int64_t sid;
+    int fin;
+    nghttp3_vec vec[16];
+    nghttp3_ssize nv = nghttp3_conn_writev_stream(conn, &sid, &fin, vec, 16);
+    if (nv < 0) exit(51);
+    if (sid < 0) break;
+    size_t tot = 0;
+    for (int i = 0; i < nv; i++) tot += vec[i].len;
+    uint8_t *p = malloc(tot + 1);
+    for (size_t i = 0, o = 0; i < (size_t)nv; o += vec[i].len, i++) memcpy(p + o, vec[i].base, vec[i].len);
+    nghttp3_conn_add_write_offset(conn, sid, tot);
+    nghttp3_conn_add_ack_offset(conn, sid, tot);
+    if (nghttp3_conn_read_stream(peer, sid, p, tot, fin) < 0) exit(52);
+    if (log) {
+      if (H3CN[s] == caps[s])
+        caps[s] = caps[s] ? 2 * caps[s] : 4096, H3CLOG[s] = realloc(H3CLOG[s], sizeof(chunk) * (size_t)caps[s]);
+      H3CLOG[s][H3CN[s]++] = (chunk){ sid, p, tot, fin };
+    } else free(p);
+    if (log && fin && (sid & 3) == 0) { /* the response is done: both ends close the stream, as a transport would */
+      nghttp3_conn_close_stream(conn, sid, 0), nghttp3_conn_close_stream(peer, sid, 0);
+      if (sid > *closed_upto) *closed_upto = sid;
+    }
+    if (!tot && !fin) break;
+  }
+}
+static void record_server3(int s) {
+  nghttp3_callbacks ccb = { 0 }, scb = { 0 };
+  ccb.end_stream = rec3_cli_end, scb.end_stream = rec3_srv_end;
+  nghttp3_settings st, sst;
+  nghttp3_settings_default(&st);
+  st.qpack_max_dtable_capacity = 4096, st.qpack_blocked_streams = 0;
+  /* the server's decoder takes no dynamic table: the clients encode requests as h3.h's does (static table and
+   * literals), and the server's decoder stream carries nothing a replayed client did not cause */
+  sst = st, sst.qpack_max_dtable_capacity = 0;
+  nghttp3_conn *cli, *srv;
+  nghttp3_conn_client_new(&cli, &ccb, &st, nghttp3_mem_default(), NULL);
+  nghttp3_conn_server_new(&srv, &scb, &sst, nghttp3_mem_default(), NULL);
+  nghttp3_conn_bind_control_stream(cli, 2), nghttp3_conn_bind_qpack_streams(cli, 6, 10);
+  nghttp3_conn_bind_control_stream(srv, 3), nghttp3_conn_bind_qpack_streams(srv, 7, 11);
+  REC_SET = s, REC3_ENDED = 0, H3CN[s] = 0;
+  int sent = 0;
+  int64_t closed = -1;
+  for (int guard = 0; REC3_ENDED < R && guard < 100000; guard++) {
+    while (sent < R && sent - REC3_ENDED < 64) {
+      nghttp3_nv nv[24];
+      hs_set *h = &SETS[s][sent];
+      for (int k = 0; k < h->n; k++)
+        nv[k] = (nghttp3_nv){ (uint8_t *)h->f[k].name, (uint8_t *)h->f[k].value, strlen(h->f[k].name),
+                              strlen(h->f[k].value), 0 };
+      if (nghttp3_conn_submit_request(cli, 4 * (int64_t)sent, nv, (size_t)h->n, NULL, NULL)) exit(53);
+      sent++;
+    }
+    rec3_pump(cli, srv, s, 0, &closed);
+    rec3_pump(srv, cli, s, 1, &closed);
+  }
+  if (REC3_ENDED != R) printf("h3 client recording: %ld of %d answered\n", REC3_ENDED, R), exit(54);
+  nghttp3_conn_del(cli), nghttp3_conn_del(srv);
+}
+static int c3_resp(h3_conn *c, uint64_t sid, const h_response *rs, int end, void *u) {
+  (void)c, (void)sid, (void)end, (void)u;
+  CL_FIELDS += rs->nfields + 1;
+  for (int k = 0; k < rs->nfields; k++) sink += rs->fields[k].vlen;
+  return 0;
+}
+static int c3_data(h3_conn *c, uint64_t sid, const uint8_t *d, size_t n, int end, void *u) {
+  (void)c, (void)sid, (void)d, (void)end, (void)u;
+  CL_BODY += (long)n;
+  return 0;
+}
+static int c3_tr(h3_conn *c, uint64_t sid, const hp_field *f, int n, void *u) {
+  (void)c, (void)sid, (void)u;
+  CL_TR += n;
+  for (int k = 0; k < n; k++) sink += f[k].vlen;
+  return 0;
+}
+static void c3_close(h3_conn *c, uint64_t sid, uint64_t err, void *u) {
+  (void)c, (void)sid, (void)u;
+  if (!err) CL_DONE++;
+}
+static const h3_callbacks C3CB = { NULL, c3_data, c3_tr, NULL, c3_close, NULL, c3_resp };
+static void c3_drain(h3_conn *c) {
+  static uint8_t out[1 << 16];
+  uint64_t pend[256];
+  for (int np; (np = h3_pending(c, pend, 256)) > 0;) {
+    int progress = 0;
+    for (int i = 0; i < np; i++) {
+      int fin;
+      size_t w = h3_stream_send(c, pend[i], out, sizeof out, &fin);
+      if (w || fin) progress = 1, sink += out[0];
+    }
+    if (!progress) break;
+  }
+}
+static double h3c_ours(int s) {
+  static h3_conn C;
+  double best = 1e18;
+  for (int p = 0; p < PASSES / 4 + 1; p++) {
+    cl_reset(), NSB++;
+    int opened = 0;
+    double t0 = now_ns();
+    h3_init_client(&C, &C3CB, NULL, 2, 6, 10);
+    for (int i = 0; i < H3CN[s]; i++) {
+      chunk *ch = &H3CLOG[s][i];
+      if ((ch->sid & 3) == 0 && ch->sid / 4 >= opened) {
+        for (; opened <= ch->sid / 4; opened++)
+          for (int r; (r = h3_submit(&C, 4 * (uint64_t)opened, &RQ[s][opened], NULL, 0, 1));) {
+            if (r != H3_E_AGAIN) exit(55);
+            c3_drain(&C); /* the spill area is full of unsent request headers */
+          }
+        c3_drain(&C);
+      }
+      sbuf *b = sb_get(ch->sid);
+      sb_put(b, ch->p, ch->n);
+      if (ch->fin) b->fin = 1;
+      if (h3o_feed(&C, b))
+        printf("h3c set %d chunk %d sid %lld: h3 error 0x%llx\n", s, i, (long long)ch->sid,
+               (unsigned long long)h3_error(&C)),
+            exit(56);
+      c3_drain(&C);
+    }
+    double t = (now_ns() - t0) / R;
+    if (!p) cl_gate("h3.h", s);
+    if (t < best) best = t;
+  }
+  return best;
+}
+static int n3c_header(nghttp3_conn *c, int64_t sid, int32_t tok, nghttp3_rcbuf *n, nghttp3_rcbuf *v, uint8_t fl,
+                      void *u, void *su) {
+  (void)c, (void)sid, (void)tok, (void)n, (void)fl, (void)u, (void)su;
+  CL_FIELDS++, sink += nghttp3_rcbuf_get_buf(v).len;
+  return 0;
+}
+static int n3c_data(nghttp3_conn *c, int64_t sid, const uint8_t *d, size_t n, void *u, void *su) {
+  (void)c, (void)sid, (void)d, (void)u, (void)su;
+  CL_BODY += (long)n;
+  return 0;
+}
+static int n3c_end(nghttp3_conn *c, int64_t sid, void *u, void *su) {
+  (void)c, (void)sid, (void)u, (void)su;
+  CL_DONE++;
+  return 0;
+}
+static double h3c_n3(int s) {
+  double best = 1e18;
+  static uint8_t sinkbuf[1 << 16];
+  for (int p = 0; p < PASSES / 4 + 1; p++) {
+    nghttp3_callbacks cb = { 0 };
+    cb.recv_header = n3c_header, cb.recv_trailer = n3c_header, cb.recv_data = n3c_data, cb.end_stream = n3c_end;
+    nghttp3_settings st;
+    nghttp3_settings_default(&st);
+    st.qpack_max_dtable_capacity = 4096, st.qpack_blocked_streams = 0;
+    cl_reset();
+    int opened = 0;
+    double t0 = now_ns();
+    nghttp3_conn *cli;
+    nghttp3_conn_client_new(&cli, &cb, &st, nghttp3_mem_default(), NULL);
+    nghttp3_conn_bind_control_stream(cli, 2), nghttp3_conn_bind_qpack_streams(cli, 6, 10);
+    for (int i = 0; i < H3CN[s]; i++) {
+      chunk *ch = &H3CLOG[s][i];
+      if ((ch->sid & 3) == 0 && ch->sid / 4 >= opened)
+        for (; opened <= ch->sid / 4; opened++) {
+          nghttp3_nv nv[24];
+          hs_set *h = &SETS[s][opened];
+          for (int k = 0; k < h->n; k++)
+            nv[k] = (nghttp3_nv){ (uint8_t *)h->f[k].name, (uint8_t *)h->f[k].value, strlen(h->f[k].name),
+                                  strlen(h->f[k].value), 0 };
+          if (nghttp3_conn_submit_request(cli, 4 * (int64_t)opened, nv, (size_t)h->n, NULL, NULL)) exit(57);
+        }
+      for (;;) { /* drain, acknowledging at once */
+        int64_t sid;
+        int fin;
+        nghttp3_vec vec[16];
+        nghttp3_ssize nv = nghttp3_conn_writev_stream(cli, &sid, &fin, vec, 16);
+        if (nv < 0) exit(58);
+        if (sid < 0) break;
+        size_t tot = 0;
+        for (int k = 0; k < nv; k++) {
+          size_t m = vec[k].len < sizeof sinkbuf ? vec[k].len : sizeof sinkbuf;
+          memcpy(sinkbuf, vec[k].base, m), tot += vec[k].len;
+        }
+        nghttp3_conn_add_write_offset(cli, sid, tot);
+        nghttp3_conn_add_ack_offset(cli, sid, tot);
+        if (!tot && !fin) break;
+      }
+      if (nghttp3_conn_read_stream(cli, ch->sid, ch->p, ch->n, ch->fin) < 0) exit(59);
+      if (ch->fin && (ch->sid & 3) == 0) nghttp3_conn_close_stream(cli, ch->sid, 0);
+    }
+    nghttp3_conn_del(cli);
+    double t = (now_ns() - t0) / R;
+    if (!p) cl_gate("nghttp3", s);
+    if (t < best) best = t;
+  }
+  return best;
+}
+
 /* --dump DIR: the same inputs for the Go and Rust harnesses. Each file is a sequence of records,
  * each a u32 little-endian length and that many bytes */
 static void wr(FILE *f, const void *p, size_t n) {
@@ -848,13 +1304,19 @@ int main(int argc, char **argv) {
     return 0;
   }
   if (argc > 1) PASSES = atoi(argv[1]);
-  if (argc > 2) { /* profile one piece: ./bench_h2h3 passes h2|n2|h3|n3 [set] */
-    int set = argc > 3 ? atoi(argv[3]) : 0, h3 = argv[2][1] == '3';
-    build_sets(), h3 ? record_h3(set) : record_client(set);
-    double t = !strcmp(argv[2], "h2")   ? h2_ours(set)
-               : !strcmp(argv[2], "n2") ? h2_n2(set)
-               : !strcmp(argv[2], "h3") ? h3_ours(set)
-                                        : h3_n3(set);
+  if (argc > 2) { /* profile one piece: ./bench_h2h3 passes h2|n2|h3|n3|h2c|n2c|h3c|n3c [set] */
+    int set = argc > 3 ? atoi(argv[3]) : 0, h3 = argv[2][1] == '3', cl = argv[2][2] == 'c';
+    build_sets(), build_responses(), build_requests();
+    if (cl) h3 ? record_server3(set) : record_server2(set);
+    else h3 ? record_h3(set) : record_client(set);
+    double t = !strcmp(argv[2], "h2")    ? h2_ours(set)
+               : !strcmp(argv[2], "n2")  ? h2_n2(set)
+               : !strcmp(argv[2], "h3")  ? h3_ours(set)
+               : !strcmp(argv[2], "n3")  ? h3_n3(set)
+               : !strcmp(argv[2], "h2c") ? h2c_ours(set)
+               : !strcmp(argv[2], "n2c") ? h2c_n2(set)
+               : !strcmp(argv[2], "h3c") ? h3c_ours(set)
+                                         : h3c_n3(set);
     printf("%s %s: %.0f ns/request\n", argv[2], L[set], t);
     return 0;
   }
@@ -881,6 +1343,18 @@ int main(int argc, char **argv) {
     double o = h3_ours(s);
     res("h3server", L[s], "h3.h", o, o);
     res("h3server", L[s], "nghttp3", h3_n3(s), o);
+  }
+  build_responses(), build_requests();
+  for (int s = 0; s < 3; s++) record_server2(s), record_server3(s);
+  for (int s = 0; s < 3; s++) {
+    double o = h2c_ours(s);
+    res("h2client", L[s], "h2.h", o, o);
+    res("h2client", L[s], "nghttp2", h2c_n2(s), o);
+  }
+  for (int s = 0; s < 3; s++) {
+    double o = h3c_ours(s);
+    res("h3client", L[s], "h3.h", o, o);
+    res("h3client", L[s], "nghttp3", h3c_n3(s), o);
   }
   for (int dyn = 0; dyn < 2; dyn++)
     for (int s = 0; s < 3; s++) {

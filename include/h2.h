@@ -1,7 +1,8 @@
-/* h2.h: an HTTP/2 server connection (RFC 9113), sans-IO and header-only. Never allocates: the
+/* h2.h: an HTTP/2 connection (RFC 9113), server or client, sans-IO and header-only. Never allocates: the
  * caller owns the h2_conn (sizeof ~ 26 KiB with the defaults below) and one h2_scratch per thread.
  *
- *   h2_init(&c, &callbacks, user)                       before the client preface arrives
+ *   h2_init(&c, &callbacks, user)                       a server, before the client preface arrives
+ *   h2_init_client(&c, &callbacks, user)                a client: the preface and SETTINGS are staged
  *   n = h2_recv(&c, &scratch, buf, len)                 bytes consumed (only whole frames), or
  *                                                       H2_E_CLOSED once the connection has failed
  *       Keep the unconsumed tail and call again with more bytes. h2_recv also stops early while
@@ -24,6 +25,19 @@
  * Requests reach on_request already decoded and validated (RFC 9113 §8.1-8.3): a malformed request
  * gets RST_STREAM(PROTOCOL_ERROR) and is never shown to the application. Header validation uses
  * hpack.h's cached verdicts, so indexed fields are not re-scanned.
+ *
+ * Client side (h2_init_client): the same frame layer, flow control and send queue, with
+ *   sid = h2_submit(&c, &rq, body, len, end)            a new stream: rq's method, scheme, authority, path
+ *                                                       and regular fields (hreq.h's h_request), then DATA
+ *                                                       from body (zero copy, as h2_respond). Returns the
+ *                                                       stream id, or H2_E_AGAIN at the peer's
+ *                                                       MAX_CONCURRENT_STREAMS, or H2_E_STATE (GOAWAY)
+ *   h2_data / h2_trailers / h2_reset                    as on a server (h2_respond is a server call)
+ * Responses reach on_response decoded and validated (§8.3.2): an informational (1xx) response first if
+ * any, then the final one; then on_data and on_trailers as on a server. A malformed response resets the
+ * stream with PROTOCOL_ERROR, and on_close reports it. The body of a response to HEAD, of a 204 and of a
+ * 304 must be empty. Push is refused (SETTINGS_ENABLE_PUSH = 0). After the server's GOAWAY, the streams
+ * above its last stream id close with REFUSED_STREAM (safe to retry) and h2_submit returns H2_E_STATE.
  */
 #ifndef H2_H
 #define H2_H
@@ -48,8 +62,14 @@
 #ifndef H2_TRAILER_MAX
 #define H2_TRAILER_MAX 128 /* encoded trailer block per stream */
 #endif
-#define H2_MAX_FIELDS  256
-#define H2_FRAME_MAX   16384       /* SETTINGS_MAX_FRAME_SIZE we keep (the default) */
+#define H2_MAX_FIELDS 256
+#define H2_FRAME_MAX  16384 /* SETTINGS_MAX_FRAME_SIZE we keep (the default) */
+#ifndef H2_CLIENT_MAX_LIST
+#define H2_CLIENT_MAX_LIST H2_MAX_BLOCK /* a client's SETTINGS_MAX_HEADER_LIST_SIZE: responses carry big fields */
+#endif
+#ifndef H2_CLIENT_WINDOW
+#define H2_CLIENT_WINDOW (1u << 20) /* a client's SETTINGS_INITIAL_WINDOW_SIZE: downloads need more than 64 KiB */
+#endif
 #define H2_CONN_WINDOW (16u << 20) /* raised once at start (HAProxy raises it to 2 GB) */
 
 enum { H2_E_CLOSED = -1, H2_E_AGAIN = -2, H2_E_STATE = -3, H2_E_TOO_BIG = -4 };
@@ -90,6 +110,7 @@ enum {
 typedef struct h2_conn h2_conn;
 
 typedef h_request h2_request;
+typedef h_response h2_response;
 
 typedef struct {
   /* return nonzero to reset the stream with INTERNAL_ERROR */
@@ -98,6 +119,8 @@ typedef struct {
   int (*on_trailers)(h2_conn *c, uint32_t sid, const hp_field *f, int n, void *user);
   void (*on_sent)(h2_conn *c, uint32_t sid, void *user);                  /* the body passed last is out */
   void (*on_close)(h2_conn *c, uint32_t sid, uint32_t error, void *user); /* the stream is gone */
+  /* a client's: a response's header section (informational ones too, status < 200); nonzero resets the stream */
+  int (*on_response)(h2_conn *c, uint32_t sid, const h2_response *rs, int end_stream, void *user);
 } h2_callbacks;
 
 /* per-thread scratch: header block reassembly and the decoded fields */
@@ -115,10 +138,14 @@ enum { H2S_FREE, H2S_ACTIVE };
 #define H2_ST_LOCAL_END  32u /* we sent END_STREAM (half-closed local) */
 #define H2_ST_QUEUED     64u /* in the send queue */
 
+#define H2_CS_HEAD  1u /* client: the request was HEAD (the response has no body) */
+#define H2_CS_FINAL 2u /* client: the final (non-1xx) response is in */
+
 typedef struct {
   uint32_t id;
   uint8_t state, flags;
   uint16_t trailer_len;
+  uint8_t cflags; /* H2_CS_* */
   int32_t send_win;
   uint32_t recv_unacked;
   int64_t content_length, data_seen;
@@ -131,14 +158,18 @@ struct h2_conn {
   h2_callbacks cb;
   void *user;
   uint32_t preface_left; /* client preface bytes still expected */
-  uint8_t got_settings, closed, goaway_sent, goaway_recv, sent_size_update;
-  uint32_t last_sid; /* highest client stream id seen */
+  uint8_t got_settings, closed, goaway_sent, goaway_recv;
+  uint8_t client;       /* h2_init_client */
+  uint32_t last_sid;    /* highest client stream id seen (a client: the last one it opened) */
+  uint32_t next_sid;    /* a client's next stream id */
+  uint32_t recv_window; /* the stream receive window we advertise: 65535 (server), H2_CLIENT_WINDOW (client) */
   uint32_t peer_max_frame, peer_max_concurrent, peer_initial_window, peer_header_table;
   int64_t conn_send_win;
   uint32_t conn_recv_unacked;
   int nactive;
   uint32_t qh, qn; /* send queue: ring of stream slots with a body or trailers pending */
   uint16_t q[H2_MAX_STREAMS];
+  hp_enc enc; /* a client indexes its requests' fields; a server's table is 0 (one size update) */
   hp_dec dec;
   size_t stage_len, stage_off;
   uint8_t stage[H2_STAGE];
@@ -168,6 +199,9 @@ static inline uint8_t *h2__stage(h2_conn *c, size_t n) {
   uint8_t *p = c->stage + c->stage_len;
   c->stage_len += n;
   return p;
+}
+static inline int h2__stage_room(const h2_conn *c, size_t n) {
+  return c->stage_len - c->stage_off + n <= sizeof c->stage;
 }
 static inline void h2__ctrl(h2_conn *c, uint8_t type, uint8_t flags, uint32_t sid, const uint8_t *payload, uint32_t n) {
   uint8_t *p = h2__stage(c, 9 + n);
@@ -208,7 +242,7 @@ static inline void h2_reset(h2_conn *c, uint32_t sid, uint32_t code) {
 static inline void h2_goaway(h2_conn *c, uint32_t code) {
   if (c->goaway_sent) return;
   uint8_t b[8];
-  h2__put32(b, c->last_sid), h2__put32(b + 4, code);
+  h2__put32(b, c->client ? 0 : c->last_sid), h2__put32(b + 4, code); /* a client processed no pushed streams */
   h2__ctrl(c, H2F_GOAWAY, 0, 0, b, 8);
   c->goaway_sent = 1;
 }
@@ -239,9 +273,11 @@ static inline void h2_init(h2_conn *c, const h2_callbacks *cb, void *user) {
   c->peer_max_frame = 16384, c->peer_max_concurrent = 0xffffffff, c->peer_initial_window = 65535,
   c->peer_header_table = 4096;
   c->conn_send_win = 65535;
+  c->recv_window = 65535;
   c->stage_len = c->stage_off = 0;
   for (int i = 0; i < H2_MAX_STREAMS; i++) c->s[i].state = H2S_FREE;
   hp_dec_init(&c->dec, 4096);
+  hp_enc_init(&c->enc, 4096), hp_enc_resize(&c->enc, 0); /* responses never index */
   /* server preface: SETTINGS, then the connection window raised once */
   uint8_t st[18];
   const uint16_t id[3] = { 0x3 /* MAX_CONCURRENT_STREAMS */, 0x6 /* MAX_HEADER_LIST_SIZE */, 0x2 /* ENABLE_PUSH */ };
@@ -252,9 +288,91 @@ static inline void h2_init(h2_conn *c, const h2_callbacks *cb, void *user) {
   h2__window_update(c, 0, H2_CONN_WINDOW - 65535);
 }
 
+/* a client connection: the connection preface (RFC 9113 §3.4), SETTINGS (no push, a larger stream window, the
+ * header list size we accept), and the connection window raised once */
+static inline void h2_init_client(h2_conn *c, const h2_callbacks *cb, void *user) {
+  memset(c, 0, offsetof(h2_conn, dec));
+  c->cb = *cb, c->user = user;
+  c->client = 1, c->next_sid = 1;
+  /* until the server's SETTINGS arrive, assume 100 concurrent streams (its likely minimum, RFC 9113 §6.5.2);
+   * a lower limit there means a few REFUSED_STREAM, which are safe to retry */
+  c->peer_max_frame = 16384, c->peer_max_concurrent = 100, c->peer_initial_window = 65535, c->peer_header_table = 4096;
+  c->conn_send_win = 65535;
+  c->recv_window = H2_CLIENT_WINDOW;
+  c->stage_len = c->stage_off = 0;
+  for (int i = 0; i < H2_MAX_STREAMS; i++) c->s[i].state = H2S_FREE;
+  hp_dec_init(&c->dec, 4096);
+  hp_enc_init(&c->enc, 4096); /* the peer's default SETTINGS_HEADER_TABLE_SIZE */
+  uint8_t *p = h2__stage(c, 24);
+  memcpy(p, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 24);
+  uint8_t st[18];
+  const uint16_t id[3] = { 0x2 /* ENABLE_PUSH */, 0x4 /* INITIAL_WINDOW_SIZE */, 0x6 /* MAX_HEADER_LIST_SIZE */ };
+  const uint32_t v[3] = { 0, H2_CLIENT_WINDOW, H2_CLIENT_MAX_LIST };
+  for (int i = 0; i < 3; i++)
+    st[6 * i] = (uint8_t)(id[i] >> 8), st[6 * i + 1] = (uint8_t)id[i], h2__put32(st + 6 * i + 2, v[i]);
+  h2__ctrl(c, H2F_SETTINGS, 0, 0, st, 18);
+  h2__window_update(c, 0, H2_CONN_WINDOW - 65535);
+}
+
 /* ------------------------------------------ receive ------------------------------------------ */
+/* a client's header block: a response (1xx first, then the final one) or trailers, on a stream it opened */
+static inline int h2__response_block(h2_conn *c, h2_scratch *sc, uint32_t sid, uint8_t flags, const uint8_t *blk,
+                                     size_t blen, int self_dep) {
+  int hfl;
+  int n = hp_decode_block(&c->dec, blk, blen, sc->f, H2_MAX_FIELDS / 2, sc->arena, sizeof sc->arena, H2_CLIENT_MAX_LIST,
+                          &hfl);
+  if (n == HP_E_COMPRESSION) return h2__fail(c, H2_COMPRESSION_ERROR);
+  if (n < 0) return h2__fail(c, H2_ENHANCE_YOUR_CALM);
+  if (sid > c->last_sid) return h2__fail(c, H2_PROTOCOL_ERROR); /* a stream we never opened (§5.1) */
+  h2_stream *s = h2__find(c, sid);
+  if (!s) return 0; /* closed (we reset it, say): the block was decoded, so the table is in sync */
+  int end = flags & H2_FL_END_STREAM;
+  if ((s->flags & H2_ST_REMOTE_END) || self_dep) {
+    h2_reset(c, sid, s->flags & H2_ST_REMOTE_END ? H2_STREAM_CLOSED : H2_PROTOCOL_ERROR);
+    return 0;
+  }
+  if (s->cflags & H2_CS_FINAL) { /* trailers: END_STREAM, regular fields only, and the body had its length */
+    if (!end || !h_check_trailers(sc->f, n) || (s->content_length >= 0 && s->data_seen != s->content_length)) {
+      h2_reset(c, sid, H2_PROTOCOL_ERROR);
+      return 0;
+    }
+    int r = c->cb.on_trailers ? c->cb.on_trailers(c, sid, sc->f, n, c->user) : 0;
+    if ((s = h2__find(c, sid))) {
+      if (r) h2_reset(c, sid, H2_INTERNAL_ERROR);
+      else h2__end(c, s, H2_ST_REMOTE_END);
+    }
+    return 0;
+  }
+  h2_response rs;
+  if (!h_build_response(sc->f, n, &rs, sc->f + H2_MAX_FIELDS / 2) || (hfl & HP_F_LIST_TOO_BIG)) {
+    h2_reset(c, sid, H2_PROTOCOL_ERROR);
+    return 0;
+  }
+  if (rs.status < 200) { /* informational: never the end of the stream (§8.1) */
+    if (end) {
+      h2_reset(c, sid, H2_PROTOCOL_ERROR);
+      return 0;
+    }
+  } else {
+    s->cflags |= H2_CS_FINAL;
+    /* the body's length: none after HEAD, 204 or 304 (RFC 9110 §6.4.1), else the content-length if any */
+    s->content_length = (s->cflags & H2_CS_HEAD) || rs.status == 204 || rs.status == 304 ? 0 : rs.content_length;
+    if (end && s->content_length > 0) {
+      h2_reset(c, sid, H2_PROTOCOL_ERROR);
+      return 0;
+    }
+  }
+  int r = c->cb.on_response ? c->cb.on_response(c, sid, &rs, end, c->user) : 0;
+  if ((s = h2__find(c, sid))) {
+    if (r) h2_reset(c, sid, H2_INTERNAL_ERROR);
+    else if (end) h2__end(c, s, H2_ST_REMOTE_END);
+  }
+  return 0;
+}
+
 static inline int h2__header_block(h2_conn *c, h2_scratch *sc, uint32_t sid, uint8_t flags, const uint8_t *blk,
                                    size_t blen, int self_dep) {
+  if (c->client) return h2__response_block(c, sc, sid, flags, blk, blen, self_dep);
   int hfl;
   int n = hp_decode_block(&c->dec, blk, blen, sc->f, H2_MAX_FIELDS / 2, sc->arena, sizeof sc->arena, H2_MAX_LIST, &hfl);
   if (n == HP_E_COMPRESSION) return h2__fail(c, H2_COMPRESSION_ERROR);
@@ -393,8 +511,12 @@ static inline int h2__frame(h2_conn *c, h2_scratch *sc, const uint8_t *p, size_t
         }
         return (int)(9 + len);
       }
+      if (c->client && !(s->cflags & H2_CS_FINAL)) { /* DATA before the response's header section */
+        h2_reset(c, sid, H2_PROTOCOL_ERROR);
+        return (int)(9 + len);
+      }
       s->recv_unacked += len;
-      if (s->recv_unacked > 65535) {
+      if (s->recv_unacked > c->recv_window) {
         h2_reset(c, sid, H2_FLOW_CONTROL_ERROR);
         return (int)(9 + len);
       }
@@ -411,7 +533,7 @@ static inline int h2__frame(h2_conn *c, h2_scratch *sc, const uint8_t *p, size_t
       if (!(s = h2__find(c, sid))) return (int)(9 + len); /* the application reset it */
       if (end) h2__end(c, s, H2_ST_REMOTE_END);
       /* the application consumed it: reopen the window once half of it is used */
-      else if (s->recv_unacked >= 32768) h2__window_update(c, sid, s->recv_unacked), s->recv_unacked = 0;
+      else if (s->recv_unacked >= c->recv_window / 2) h2__window_update(c, sid, s->recv_unacked), s->recv_unacked = 0;
       return (int)(9 + len);
     }
     case H2F_HEADERS: {
@@ -463,9 +585,12 @@ static inline int h2__frame(h2_conn *c, h2_scratch *sc, const uint8_t *p, size_t
         uint16_t id = (uint16_t)(pl[i] << 8 | pl[i + 1]);
         uint32_t v = h2__be32(pl + i + 2);
         switch (id) {
-          case 1: c->peer_header_table = v; break;
-          case 2:
-            if (v > 1) return h2__fail(c, H2_PROTOCOL_ERROR);
+          case 1:
+            c->peer_header_table = v;
+            if (c->client) hp_enc_resize(&c->enc, v);
+            break;
+          case 2: /* a server may only send 0 (§6.5.2) */
+            if (v > 1 || (c->client && v)) return h2__fail(c, H2_PROTOCOL_ERROR);
             break;
           case 3: c->peer_max_concurrent = v; break;
           case 4: {
@@ -500,6 +625,11 @@ static inline int h2__frame(h2_conn *c, h2_scratch *sc, const uint8_t *p, size_t
       if (sid) return h2__fail(c, H2_PROTOCOL_ERROR);
       if (len < 8) return h2__fail(c, H2_FRAME_SIZE_ERROR);
       c->goaway_recv = 1;
+      if (c->client) { /* the streams above the server's last stream id were never processed: retry-safe */
+        uint32_t last = h2__be32(pl) & 0x7fffffff;
+        for (int k = 0; k < H2_MAX_STREAMS; k++)
+          if (c->s[k].state != H2S_FREE && c->s[k].id > last) h2__close_stream(c, &c->s[k], H2_REFUSED_STREAM);
+      }
       return (int)(9 + len);
     case H2F_WINDOW_UPDATE: {
       if (len != 4) return h2__fail(c, H2_FRAME_SIZE_ERROR);
@@ -550,9 +680,13 @@ static inline int h2_recv(h2_conn *c, h2_scratch *sc, const uint8_t *buf, size_t
 }
 
 /* ------------------------------------------- send ------------------------------------------- */
-static inline size_t h2__enc_block(h2_conn *c, uint8_t *dst, size_t cap, int status, const hp_field *f, int n) {
+/* staged: the block goes to the stage now, so it may carry the table size updates due (a server's one, to 0);
+ * trailers wait in their stream and may reach the wire after later blocks, so they carry none */
+static inline size_t h2__enc_block(h2_conn *c, uint8_t *dst, size_t cap, int staged, int status, const hp_field *f,
+                                   int n) {
   uint8_t *p = dst, *e = dst + cap;
-  if (!c->sent_size_update) p += hp_enc_size_update(p, 0), c->sent_size_update = 1; /* we never index */
+  if (cap < 32) return 0;
+  if (staged) p += hp_enc_begin(&c->enc, p);
   if (status) p += hp_enc_status(p, status);
   for (int i = 0; i < n; i++) {
     if ((size_t)(e - p) < hp_enc_bound(f[i].nlen, f[i].vlen)) return 0;
@@ -579,9 +713,9 @@ static inline int h2__stage_block(h2_conn *c, uint32_t sid, const uint8_t *blk, 
 static inline int h2_respond(h2_conn *c, uint32_t sid, int status, const hp_field *f, int n, const uint8_t *body,
                              size_t len, int end) {
   h2_stream *s = h2__find(c, sid);
-  if (!s || (s->flags & H2_ST_RESPONDED)) return H2_E_STATE;
+  if (c->client || !s || (s->flags & H2_ST_RESPONDED)) return H2_E_STATE;
   uint8_t blk[H2_STAGE];
-  size_t bl = h2__enc_block(c, blk, sizeof blk, status, f, n);
+  size_t bl = h2__enc_block(c, blk, sizeof blk, 1, status, f, n);
   if (!bl) return H2_E_TOO_BIG;
   int headers_end = end && !body;
   int r = h2__stage_block(c, sid, blk, bl, headers_end ? H2_FL_END_STREAM : 0);
@@ -596,6 +730,62 @@ static inline int h2_respond(h2_conn *c, uint32_t sid, int status, const hp_fiel
   h2__enqueue(c, s);
   return 0;
 }
+/* a request's pseudo-header: indexed when (name, value) is in the static table (GET, POST, http, https, "/",
+ * "/index.html"), else a literal with the static name */
+static inline uint8_t *h2__pseudo(uint8_t *p, int first, int last, const char *name, const uint8_t *v, uint32_t vl) {
+  for (int i = first; i <= last; i++)
+    if (hp_static[i].vl == vl && !memcmp(hp_static[i].v, v, vl)) {
+      *p++ = (uint8_t)(0x80 | i);
+      return p;
+    }
+  return p + hp_enc_field(p, (const uint8_t *)name, strlen(name), v, vl, 0);
+}
+/* client: open a stream with rq's request (see the top of the file). Returns the stream id or H2_E_* */
+static inline int h2_submit(h2_conn *c, const h2_request *rq, const uint8_t *body, size_t len, int end) {
+  if (!c->client || c->closed || c->goaway_recv || c->goaway_sent || c->next_sid > 0x7fffffff) return H2_E_STATE;
+  if (c->nactive >= H2_MAX_STREAMS || (uint32_t)c->nactive >= c->peer_max_concurrent) return H2_E_AGAIN;
+  uint32_t sid = c->next_sid;
+  h2_stream *s = NULL;
+  for (uint32_t k = 0, i = (sid >> 1) % H2_MAX_STREAMS; k < H2_MAX_STREAMS; k++, i = (i + 1) % H2_MAX_STREAMS)
+    if (c->s[i].state == H2S_FREE) {
+      s = &c->s[i];
+      break;
+    }
+  if (!s) return H2_E_AGAIN;
+  uint8_t blk[H2_STAGE];
+  uint8_t *p = blk, *e = blk + sizeof blk;
+  size_t need = 32 + rq->method_len + rq->scheme_len + rq->authority_len + rq->path_len;
+  for (int i = 0; i < rq->nfields; i++) need += hp_enc_bound(rq->fields[i].nlen, rq->fields[i].vlen);
+  if (need > sizeof blk) return H2_E_TOO_BIG;
+  /* the encoder's table changes as the block is encoded: it must reach the stage, so check for room first */
+  if (!h2__stage_room(c, need + 9 * ((need + c->peer_max_frame - 1) / c->peer_max_frame))) return H2_E_AGAIN;
+  p += hp_enc_begin(&c->enc, p);
+  p = h2__pseudo(p, 2, 3, ":method", rq->method, rq->method_len);
+  if (rq->scheme) p = h2__pseudo(p, 6, 7, ":scheme", rq->scheme, rq->scheme_len);
+  if (rq->authority)
+    p += hp_enc_ifield(&c->enc, p, (const uint8_t *)":authority", 10, rq->authority, rq->authority_len, 0);
+  if (rq->path) p = h2__pseudo(p, 4, 5, ":path", rq->path, rq->path_len);
+  for (int i = 0; i < rq->nfields; i++) {
+    const hp_field *f = &rq->fields[i];
+    p += hp_enc_ifield(&c->enc, p, f->name, f->nlen, f->value, f->vlen, f->never);
+  }
+  (void)e;
+  int headers_end = end && !body;
+  int r = h2__stage_block(c, sid, blk, (size_t)(p - blk), headers_end ? H2_FL_END_STREAM : 0);
+  if (r) return r;
+  memset(s, 0, offsetof(h2_stream, trailer));
+  s->id = sid, s->state = H2S_ACTIVE, s->flags = H2_ST_RESPONDED; /* our header section is out */
+  s->send_win = (int32_t)c->peer_initial_window, s->content_length = -1;
+  if (h_eq(rq->method, rq->method_len, "HEAD")) s->cflags |= H2_CS_HEAD;
+  c->nactive++, c->last_sid = sid, c->next_sid += 2;
+  if (headers_end) h2__end(c, s, H2_ST_LOCAL_END);
+  else {
+    s->body = body ? body : (const uint8_t *)"", s->body_len = len, s->body_off = 0;
+    if (end) s->flags |= H2_ST_BODY_END;
+    h2__enqueue(c, s);
+  }
+  return (int)sid;
+}
 static inline int h2_data(h2_conn *c, uint32_t sid, const uint8_t *body, size_t len, int end) {
   h2_stream *s = h2__find(c, sid);
   if (!s || !(s->flags & H2_ST_RESPONDED) || (s->body && s->body_off < s->body_len) ||
@@ -609,7 +799,7 @@ static inline int h2_data(h2_conn *c, uint32_t sid, const uint8_t *body, size_t 
 static inline int h2_trailers(h2_conn *c, uint32_t sid, const hp_field *f, int n) {
   h2_stream *s = h2__find(c, sid);
   if (!s || !(s->flags & H2_ST_RESPONDED) || (s->flags & (H2_ST_BODY_END | H2_ST_TRAILERS))) return H2_E_STATE;
-  size_t bl = h2__enc_block(c, s->trailer, sizeof s->trailer, 0, f, n);
+  size_t bl = h2__enc_block(c, s->trailer, sizeof s->trailer, 0, 0, f, n);
   if (!bl) return H2_E_TOO_BIG;
   s->trailer_len = (uint16_t)bl, s->flags |= H2_ST_TRAILERS;
   if (!s->body) s->body = (const uint8_t *)"", s->body_len = s->body_off = 0;

@@ -54,6 +54,19 @@ long cb_hpack_decode(cb_hpack *h);
 long cb_huffman_decode(cb_hpack *h); // Huffman decode alone (hfield.h hh_decode) of the same header values
 void cb_hpack_free(cb_hpack *h);
 
+// HTTP/2 and HTTP/3 clients (client_fixtures.c): one connection's 256 requests of a set (0 browser, 1 grpc,
+// 2 h2load) sent and their responses read, against server bytes recorded from this repo's own server. *_run
+// returns the responses completed (256); cb_hpack_encode encodes the requests with hp_enc (one table).
+typedef struct cb_h2c cb_h2c;
+cb_h2c *cb_h2c_new(int set);
+long cb_h2c_run(cb_h2c *c);
+long cb_hpack_encode(cb_h2c *c);
+void cb_h2c_free(cb_h2c *c);
+typedef struct cb_h3c cb_h3c;
+cb_h3c *cb_h3c_new(int set);
+long cb_h3c_run(cb_h3c *c);
+void cb_h3c_free(cb_h3c *c);
+
 const char *cb_backend_name(void);
 
 #ifdef __cplusplus

@@ -1,9 +1,10 @@
-/* h3.h: an HTTP/3 server (RFC 9114) over abstract QUIC streams, sans-IO and header-only. Never
- * allocates: the caller owns the h3_conn and one h3_scratch per thread. The QUIC layer (any QUIC
- * stack) hands in stream bytes in order and pulls per-stream output.
+/* h3.h: an HTTP/3 connection (RFC 9114), server or client, over abstract QUIC streams, sans-IO and
+ * header-only. Never allocates: the caller owns the h3_conn and one h3_scratch per thread. The QUIC layer
+ * (any QUIC stack) hands in stream bytes in order and pulls per-stream output.
  *
- *   h3_init(&c, &cb, user, ctrl_id, enc_id, dec_id)   ids of the three server unidirectional
+ *   h3_init(&c, &cb, user, ctrl_id, enc_id, dec_id)   a server: ids of the three server unidirectional
  *                                                     streams the transport opened (3, 7, 11, ...)
+ *   h3_init_client(&c, &cb, user, ctrl_id, enc_id, dec_id)   a client: its three (2, 6, 10, ...)
  *   n = h3_recv(&c, &sc, stream_id, offset, buf, len, fin)
  *       bytes consumed (whole frames, except DATA payloads, which stream through); keep the tail
  *       and call again with more. offset is the stream offset of buf[0]. Returns H3_E_CLOSED once
@@ -18,6 +19,14 @@
  * Requests are validated as in h2.h (hreq.h); a malformed one gets H3_MESSAGE_ERROR through the
  * reset_stream callback and is never shown to the application. QPACK: we advertise a 4096-byte
  * dynamic table and 0 blocked streams; our own encoder never uses its table.
+ *
+ * Client side: h3_submit(&c, sid, &rq, body, len, end) queues a request (hreq.h's h_request: method, scheme,
+ * authority, path, regular fields) on a bidirectional stream the transport opened, then DATA from body (zero
+ * copy) and the fin. Responses reach on_response validated (RFC 9114 §4.3.2, as h2.h): informational ones
+ * (1xx) first if any, then the final one, then on_data and on_trailers. A malformed response resets the
+ * stream with H3_MESSAGE_ERROR. HEAD, 204 and 304 have no body. Push is refused (no MAX_PUSH_ID). The server's
+ * GOAWAY closes the requests at or above its stream id with H3_REQUEST_REJECTED (safe to retry), and
+ * h3_submit then returns H3_E_STATE.
  */
 #ifndef H3_H
 #define H3_H
@@ -32,6 +41,10 @@
 #endif
 #ifndef H3_HDR_MAX
 #define H3_HDR_MAX 640 /* encoded response HEADERS frame per stream */
+#endif
+#ifndef H3_CLIENT_SPILL
+#define H3_CLIENT_SPILL                                                                                                \
+  16384 /* a client's request header frames too big for H3_HDR_MAX wait here until sent (0: none) */
 #endif
 #ifndef H3_TRAILER_MAX
 #define H3_TRAILER_MAX 128
@@ -85,6 +98,8 @@ typedef struct {
   void (*on_close)(h3_conn *c, uint64_t sid, uint64_t error, void *user);
   /* to the transport: reset this request stream (RESET_STREAM + STOP_SENDING) with code */
   void (*reset_stream)(h3_conn *c, uint64_t sid, uint64_t code, void *user);
+  /* a client's: a response's header section (informational ones too); nonzero resets the stream */
+  int (*on_response)(h3_conn *c, uint64_t sid, const h_response *rs, int end_stream, void *user);
 } h3_callbacks;
 
 typedef struct {
@@ -99,6 +114,7 @@ typedef struct {
 #define H3_ST_RESPONDED    16u
 #define H3_ST_BODY_END     32u
 #define H3_ST_TRAILERS     64u
+#define H3_ST_HEAD         128u /* client: the request was HEAD */
 
 typedef struct {
   uint64_t id;
@@ -106,6 +122,8 @@ typedef struct {
   uint64_t data_left, skip_left; /* rest of the DATA / unknown frame being received */
   int64_t content_length, data_seen;
   uint16_t hdr_len, hdr_off, trl_len, trl_off;
+  uint8_t spill; /* the header frame is in the connection's spill area, at spill_at */
+  uint32_t spill_at;
   const uint8_t *body;
   size_t body_len, body_off;
   uint8_t hdr[H3_HDR_MAX], trl[H3_TRAILER_MAX];
@@ -121,13 +139,20 @@ struct h3_conn {
   int64_t in_id[3];                          /* the peer's control / encoder / decoder streams, -1 if none */
   uint64_t ctrl_skip;                        /* rest of an unknown frame on the peer's control stream */
   uint8_t got_settings, goaway_sent;
-  uint64_t max_sid; /* highest request stream seen + 4 (GOAWAY's id) */
+  uint8_t client, goaway_recv; /* h3_init_client; the server's GOAWAY arrived */
+  uint64_t goaway_id;          /* its stream id: requests at or above it were not processed */
+  uint64_t max_sid;            /* highest request stream seen + 4 (GOAWAY's id) */
   uint32_t rr;
   /* slots that may have output (set when a response, body or trailers is queued, cleared by
    * h3_pending when it finds nothing): h3_pending visits these instead of every slot */
   uint64_t outq[(H3_MAX_STREAMS + 63) / 64];
+  uint32_t spill_used, spill_users; /* bytes allocated in spill (reset once no stream holds any), holders */
   qp_dec qd;
   h3_stream s[H3_MAX_STREAMS];
+  qp_enc qe; /* a client's request encoder (a server's has no table: responses use the static table) */
+#if H3_CLIENT_SPILL
+  uint8_t spill[H3_CLIENT_SPILL];
+#endif
 };
 
 static inline uint64_t h3_error(const h3_conn *c) { return c->error; }
@@ -163,8 +188,12 @@ static inline h3_stream *h3__find(h3_conn *c, uint64_t sid) {
     if (c->s[i].active && c->s[i].id == sid) return &c->s[i];
   return NULL;
 }
+static inline void h3__unspill(h3_conn *c, h3_stream *s) {
+  if (s->spill && (s->spill = 0, !--c->spill_users)) c->spill_used = 0;
+}
 static inline void h3__close(h3_conn *c, h3_stream *s, uint64_t err) {
   uint64_t id = s->id;
+  h3__unspill(c, s);
   s->active = 0, s->body = NULL;
   if (c->cb.on_close) c->cb.on_close(c, id, err, c->user);
 }
@@ -185,6 +214,7 @@ static inline void h3_init(h3_conn *c, const h3_callbacks *cb, void *user, uint6
   c->out_id[0] = ctrl_id, c->out_id[1] = enc_id, c->out_id[2] = dec_id;
   c->in_id[0] = c->in_id[1] = c->in_id[2] = -1;
   qp_dec_init(&c->qd, H3_QPACK_CAP);
+  qp_enc_init(&c->qe);
   for (int i = 0; i < H3_MAX_STREAMS; i++) c->s[i].active = 0;
   /* control stream: type 0x00, then SETTINGS */
   uint8_t st[32], *q = st;
@@ -198,6 +228,12 @@ static inline void h3_init(h3_conn *c, const h3_callbacks *cb, void *user, uint6
   c->ctrl_len = (uint16_t)(p - c->ctrl);
 }
 
+static inline void h3_init_client(h3_conn *c, const h3_callbacks *cb, void *user, uint64_t ctrl_id, uint64_t enc_id,
+                                  uint64_t dec_id) {
+  h3_init(c, cb, user, ctrl_id, enc_id, dec_id); /* the same SETTINGS; a client sends no MAX_PUSH_ID: no push */
+  c->client = 1;
+}
+
 /* a varint at p..end: 0 if incomplete */
 static inline int h3__vi(const uint8_t *p, const uint8_t *end, uint64_t *v) {
   const uint8_t *q = qv_get_safe(v, p, end);
@@ -206,6 +242,41 @@ static inline int h3__vi(const uint8_t *p, const uint8_t *end, uint64_t *v) {
 static inline int h3__reserved_h2(uint64_t t) { return t == 0x2 || t == 0x6 || t == 0x8 || t == 0x9; }
 
 /* --------------------------------------- request streams --------------------------------------- */
+/* a client's header section: a response (1xx first, then the final one), or trailers after the final one */
+static inline int h3__response(h3_conn *c, h3_scratch *sc, h3_stream *s, uint64_t sid, int k, int hfl, int end) {
+  if (s->flags & H3_ST_GOT_HEADERS) { /* trailers */
+    s->flags |= H3_ST_GOT_TRAILERS;
+    if (!h_check_trailers(sc->f, k)) {
+      h3__reset(c, s, sid, H3_MESSAGE_ERROR);
+      return 0;
+    }
+    if (c->cb.on_trailers && c->cb.on_trailers(c, sid, sc->f, k, c->user) && h3__find(c, sid))
+      h3__reset(c, s, sid, H3_INTERNAL_ERROR);
+    return 0;
+  }
+  h_response rs;
+  if (!h_build_response(sc->f, k, &rs, sc->f + H3_MAX_FIELDS / 2) || (hfl & HP_F_LIST_TOO_BIG) ||
+      (rs.status < 200 && end)) {
+    h3__reset(c, s, sid, H3_MESSAGE_ERROR);
+    return 0;
+  }
+  if (rs.status >= 200) {
+    s->flags |= H3_ST_GOT_HEADERS;
+    s->content_length = (s->flags & H3_ST_HEAD) || rs.status == 204 || rs.status == 304 ? 0 : rs.content_length;
+    if (end && s->content_length > 0) {
+      h3__reset(c, s, sid, H3_MESSAGE_ERROR);
+      return 0;
+    }
+    if (end) s->flags |= H3_ST_REMOTE_END;
+  }
+  if (c->cb.on_response && c->cb.on_response(c, sid, &rs, end, c->user) && h3__find(c, sid)) {
+    h3__reset(c, s, sid, H3_INTERNAL_ERROR);
+    return 0;
+  }
+  if (end && (s = h3__find(c, sid))) h3__end(c, s, H3_ST_REMOTE_END);
+  return 0;
+}
+
 static inline int h3__headers(h3_conn *c, h3_scratch *sc, h3_stream *s, uint64_t sid, const uint8_t *pl, size_t n,
                               int end) {
   int hfl;
@@ -213,6 +284,7 @@ static inline int h3__headers(h3_conn *c, h3_scratch *sc, h3_stream *s, uint64_t
       qp_decode_section(&c->qd, sid, pl, n, sc->f, H3_MAX_FIELDS / 2, sc->arena, sizeof sc->arena, H3_MAX_LIST, &hfl);
   if (k == QP_E_DECOMPRESSION) return h3__fail(c, QPACK_DECOMPRESSION_FAILED);
   if (k < 0) return h3__fail(c, H3_EXCESSIVE_LOAD);
+  if (c->client) return h3__response(c, sc, s, sid, k, hfl, end);
   if (s->flags & H3_ST_GOT_HEADERS) { /* trailers */
     s->flags |= H3_ST_GOT_TRAILERS;
     for (int i = 0; i < k; i++)
@@ -244,8 +316,8 @@ static inline int h3__headers(h3_conn *c, h3_scratch *sc, h3_stream *s, uint64_t
 /* the stream ended (QUIC fin) with everything consumed */
 static inline int h3__req_fin(h3_conn *c, h3_stream *s, uint64_t sid) {
   if (s->data_left || s->skip_left) return h3__fail(c, H3_FRAME_ERROR); /* truncated frame */
-  if (!(s->flags & H3_ST_GOT_HEADERS)) {
-    h3__reset(c, s, sid, H3_REQUEST_INCOMPLETE);
+  if (!(s->flags & H3_ST_GOT_HEADERS)) {                                /* no (final) header section before the fin */
+    h3__reset(c, s, sid, c->client ? H3_MESSAGE_ERROR : H3_REQUEST_INCOMPLETE);
     return 0;
   }
   if (s->flags & H3_ST_REMOTE_END) return 0;
@@ -267,6 +339,7 @@ static inline int h3__req_fin(h3_conn *c, h3_stream *s, uint64_t sid) {
 static inline int h3__request_stream(h3_conn *c, h3_scratch *sc, uint64_t sid, uint64_t offset, const uint8_t *buf,
                                      size_t len, int fin) {
   h3_stream *s = h3__find(c, sid);
+  if (!s && c->client) return (int)len; /* a request we finished or reset: discard */
   if (!s) {
     /* QUIC opens streams in any order, so only the offset tells a new stream from one we already
      * finished or reset: a new one starts at 0 */
@@ -333,7 +406,7 @@ static inline int h3__request_stream(h3_conn *c, h3_scratch *sc, uint64_t sid, u
       int r = h3__headers(c, sc, s, sid, buf + pos + hl, (size_t)flen, end && !(s->flags & H3_ST_GOT_HEADERS));
       if (r < 0) return r;
       pos += hl + (size_t)flen;
-      if (!(s = h3__find(c, sid))) return (int)len; /* reset */
+      if (!(s = h3__find(c, sid))) return (int)len; /* reset, or (a client's) ended */
       if (end && (s->flags & H3_ST_GOT_TRAILERS)) {
         if (s->content_length >= 0 && s->data_seen != s->content_length) {
           h3__reset(c, s, sid, H3_MESSAGE_ERROR);
@@ -380,7 +453,7 @@ static inline int h3__control(h3_conn *c, const uint8_t *buf, size_t len) {
       const uint8_t *p = buf + pos + hl, *e = p + flen;
       if (type == H3F_SETTINGS) {
         if (c->got_settings) return h3__fail(c, H3_FRAME_UNEXPECTED);
-        uint64_t seen[16];
+        uint64_t seen[16], qcap = 0, qblocked = 0;
         int nseen = 0;
         while (p < e) {
           uint64_t id, v;
@@ -391,14 +464,26 @@ static inline int h3__control(h3_conn *c, const uint8_t *buf, size_t len) {
           for (int k = 0; k < nseen; k++)
             if (seen[k] == id) return h3__fail(c, H3_SETTINGS_ERROR);
           if (nseen < 16) seen[nseen++] = id;
-          p += x + y; /* the peer's QPACK limits only matter to our encoder, which never indexes */
+          if (id == 0x01) qcap = v; /* QPACK_MAX_TABLE_CAPACITY */
+          if (id == 0x07) qblocked = v;
+          p += x + y;
         }
         c->got_settings = 1;
+        if (c->client) qp_enc_settings(&c->qe, qcap, qblocked); /* a server's encoder keeps to the static table */
       } else {
         uint64_t v;
         int x = h3__vi(p, e, &v);
         if (!x || p + x != e) return h3__fail(c, H3_FRAME_ERROR);
-        /* GOAWAY from the client (a push id), MAX_PUSH_ID, CANCEL_PUSH: we never push */
+        if (c->client) {
+          if (type == H3F_MAX_PUSH_ID) return h3__fail(c, H3_FRAME_UNEXPECTED); /* a client's frame (§7.2.7) */
+          if (type == H3F_CANCEL_PUSH) return h3__fail(c, H3_ID_ERROR);         /* we allowed no pushes */
+          /* GOAWAY: a stream id; it may only go down (§5.2). Requests at or above it were not processed */
+          if ((v & 3) != 0 || (c->goaway_recv && v > c->goaway_id)) return h3__fail(c, H3_ID_ERROR);
+          c->goaway_recv = 1, c->goaway_id = v;
+          for (int i = 0; i < H3_MAX_STREAMS; i++)
+            if (c->s[i].active && c->s[i].id >= v) h3__close(c, &c->s[i], H3_REQUEST_REJECTED);
+        }
+        /* a server: GOAWAY from the client (a push id), MAX_PUSH_ID, CANCEL_PUSH: we never push */
       }
       pos += hl + (size_t)flen;
       continue;
@@ -408,23 +493,16 @@ static inline int h3__control(h3_conn *c, const uint8_t *buf, size_t len) {
   return (int)pos;
 }
 static inline int h3__decoder_stream(h3_conn *c, const uint8_t *buf, size_t len) {
-  size_t pos = 0;
-  while (pos < len) { /* our encoder never inserts: only Stream Cancellation is acceptable */
-    uint8_t b = buf[pos];
-    const uint8_t *p = buf + pos;
-    uint32_t v;
-    if ((b & 0xc0) != 0x40) return h3__fail(c, QPACK_DECODER_STREAM_ERROR);
-    if (qp__int(&p, buf + len, 6, &v)) break;
-    pos = (size_t)(p - buf);
-  }
-  return (int)pos;
+  int r = qp_enc_feedback(&c->qe, buf, len); /* (a server's encoder has no table: only cancellations are valid) */
+  return r < 0 ? h3__fail(c, QPACK_DECODER_STREAM_ERROR) : r;
 }
 
 static inline int h3_recv(h3_conn *c, h3_scratch *sc, uint64_t sid, uint64_t offset, const uint8_t *buf, size_t len,
                           int fin) {
   if (c->error) return H3_E_CLOSED;
   if ((sid & 3) == 0) return h3__request_stream(c, sc, sid, offset, buf, len, fin);
-  if ((sid & 3) != 2) return h3__fail(c, H3_STREAM_CREATION_ERROR); /* server-initiated ids are ours */
+  /* the peer's unidirectional streams: client-initiated (2) to a server, server-initiated (3) to a client */
+  if ((sid & 3) != (c->client ? 3u : 2u)) return h3__fail(c, H3_STREAM_CREATION_ERROR);
   int which = sid == (uint64_t)c->in_id[0]   ? 0
               : sid == (uint64_t)c->in_id[1] ? 1
               : sid == (uint64_t)c->in_id[2] ? 2
@@ -440,8 +518,8 @@ static inline int h3_recv(h3_conn *c, h3_scratch *sc, uint64_t sid, uint64_t off
       which = type == 0 ? 0 : (int)type - 1;
       if (c->in_id[which] >= 0) return h3__fail(c, H3_STREAM_CREATION_ERROR);
       c->in_id[which] = (int64_t)sid;
-    } else if (type == 0x01) {
-      return h3__fail(c, H3_STREAM_CREATION_ERROR); /* clients cannot push */
+    } else if (type == 0x01) { /* push: a client never pushes; a server may only after MAX_PUSH_ID, never sent */
+      return h3__fail(c, c->client ? H3_ID_ERROR : H3_STREAM_CREATION_ERROR);
     } else {
       return (int)len; /* unknown/grease types: read and discard (§6.2.3) */
     }
@@ -487,10 +565,70 @@ static inline void h3__want(h3_conn *c, const h3_stream *s) {
 static inline int h3_respond(h3_conn *c, uint64_t sid, int status, const hp_field *f, int n, const uint8_t *body,
                              size_t len, int end) {
   h3_stream *s = h3__find(c, sid);
-  if (!s || (s->flags & H3_ST_RESPONDED)) return H3_E_STATE;
+  if (c->client || !s || (s->flags & H3_ST_RESPONDED)) return H3_E_STATE;
   size_t fl = h3__enc_frame(s->hdr, sizeof s->hdr, status, f, n);
   if (!fl) return H3_E_TOO_BIG;
   s->hdr_len = (uint16_t)fl, s->hdr_off = 0, s->flags |= H3_ST_RESPONDED;
+  s->body = body ? body : (const uint8_t *)"", s->body_len = body ? len : 0, s->body_off = 0;
+  if (end) s->flags |= H3_ST_BODY_END;
+  h3__want(c, s);
+  return 0;
+}
+/* client: a request on stream sid (a bidirectional stream the transport just opened). H3_E_AGAIN: H3_MAX_STREAMS
+ * requests are open, whatever the server's MAX_STREAMS allows (keep at most that many: on_close frees one), or
+ * this request's header frame is larger than H3_HDR_MAX and the spill area (H3_CLIENT_SPILL) is full of earlier
+ * ones still unsent: send, then submit it again on the same sid */
+static inline int h3_submit(h3_conn *c, uint64_t sid, const h_request *rq, const uint8_t *body, size_t len, int end) {
+  if (!c->client || c->error || c->goaway_recv || (sid & 3) != 0 || h3__find(c, sid)) return H3_E_STATE;
+  h3_stream *s = NULL;
+  for (uint32_t k = 0, i = (uint32_t)((sid >> 2) % H3_MAX_STREAMS); k < H3_MAX_STREAMS;
+       k++, i = (i + 1) % H3_MAX_STREAMS)
+    if (!c->s[i].active) {
+      s = &c->s[i];
+      break;
+    }
+  if (!s) return H3_E_AGAIN;
+  size_t need = 16 + rq->method_len + rq->scheme_len + rq->authority_len + rq->path_len + 4 * 16;
+  for (int i = 0; i < rq->nfields; i++) need += qp_enc_bound(rq->fields[i].nlen, rq->fields[i].vlen);
+  /* the field section goes to blk, 16 bytes in (room for the frame header in front of it): on the stack when it
+   * fits the stream's hdr, else straight into the spill area */
+  uint8_t small[H3_HDR_MAX + 16], *blk = small;
+  uint32_t at = 0;
+  if (need + 16 > sizeof small) {
+#if H3_CLIENT_SPILL
+    if (need + 16 > H3_CLIENT_SPILL) return H3_E_TOO_BIG;
+    if (c->spill_used + need + 16 > H3_CLIENT_SPILL) return H3_E_AGAIN; /* until earlier ones are sent */
+    at = c->spill_used, blk = c->spill + at;
+#else
+    return H3_E_TOO_BIG;
+#endif
+  }
+  /* the field lines 4 bytes further in, so the prefix (known once they are) goes in front of them */
+  uint8_t *lines = blk + 20, *p = lines;
+  qp_esec es;
+  qp_enc_begin(&c->qe, &es, sid);
+  p += qp_enc_ifield(&c->qe, &es, p, (const uint8_t *)":method", 7, rq->method, rq->method_len, 0);
+  if (rq->scheme) p += qp_enc_ifield(&c->qe, &es, p, (const uint8_t *)":scheme", 7, rq->scheme, rq->scheme_len, 0);
+  if (rq->authority)
+    p += qp_enc_ifield(&c->qe, &es, p, (const uint8_t *)":authority", 10, rq->authority, rq->authority_len, 0);
+  if (rq->path) p += qp_enc_ifield(&c->qe, &es, p, (const uint8_t *)":path", 5, rq->path, rq->path_len, 0);
+  for (int i = 0; i < rq->nfields; i++) {
+    const hp_field *f = &rq->fields[i];
+    p += qp_enc_ifield(&c->qe, &es, p, f->name, f->nlen, f->value, f->vlen, f->never);
+  }
+  size_t bl = qp_enc_end(&c->qe, &es, lines, p, blk + 16);
+  uint8_t hdr[16], *q = h3__put_vi(h3__put_vi(hdr, H3F_HEADERS), bl);
+  size_t hl = (size_t)(q - hdr);
+  if (blk == small && hl + bl > sizeof s->hdr) return H3_E_TOO_BIG; /* (need bounds it: not reached) */
+  memset(s, 0, offsetof(h3_stream, hdr));
+  s->id = sid, s->active = 1, s->content_length = -1;
+  memcpy(blk + 16 - hl, hdr, hl);
+  if (blk == small) memcpy(s->hdr, blk + 16 - hl, hl + bl);
+#if H3_CLIENT_SPILL
+  else s->spill = 1, s->spill_at = at + 16 - (uint32_t)hl, c->spill_used = at + 16 + (uint32_t)bl, c->spill_users++;
+#endif
+  s->hdr_len = (uint16_t)(hl + bl), s->flags = H3_ST_RESPONDED; /* our header section is queued */
+  if (h_eq(rq->method, rq->method_len, "HEAD")) s->flags |= H3_ST_HEAD;
   s->body = body ? body : (const uint8_t *)"", s->body_len = body ? len : 0, s->body_off = 0;
   if (end) s->flags |= H3_ST_BODY_END;
   h3__want(c, s);
@@ -533,7 +671,7 @@ static inline int h3__has_out(const h3_conn *c, const h3_stream *s) {
 /* does stream sid have output? (O(1) on average, for a transport's per-stream check) */
 static inline int h3_stream_wants(h3_conn *c, uint64_t sid) {
   if (sid == c->out_id[0]) return c->ctrl_off < c->ctrl_len;
-  if (sid == c->out_id[1]) return !c->type_sent[0];
+  if (sid == c->out_id[1]) return !c->type_sent[0] || qp_enc_pending(&c->qe);
   if (sid == c->out_id[2]) return !c->type_sent[1] || c->qd.fb_len || c->qd.inserted > c->qd.known;
   h3_stream *s = h3__find(c, sid);
   return s && h3__has_out(c, s);
@@ -541,7 +679,7 @@ static inline int h3_stream_wants(h3_conn *c, uint64_t sid) {
 static inline int h3_pending(h3_conn *c, uint64_t *sids, int max) {
   int n = 0;
   if (c->ctrl_off < c->ctrl_len && n < max) sids[n++] = c->out_id[0];
-  if (!c->type_sent[0] && n < max) sids[n++] = c->out_id[1];
+  if ((!c->type_sent[0] || qp_enc_pending(&c->qe)) && n < max) sids[n++] = c->out_id[1];
   if ((!c->type_sent[1] || c->qd.fb_len || c->qd.inserted > c->qd.known) && n < max) sids[n++] = c->out_id[2];
   /* the queued slots, round-robin from rr: those at or after it, then those before it */
   uint32_t start = c->rr % H3_MAX_STREAMS;
@@ -567,9 +705,9 @@ static inline size_t h3_stream_send(h3_conn *c, uint64_t sid, uint8_t *out, size
     return m;
   }
   if (sid == c->out_id[1]) {
-    if (c->type_sent[0] || !cap) return 0;
-    out[0] = 0x02, c->type_sent[0] = 1;
-    return 1;
+    size_t w = 0;
+    if (!c->type_sent[0] && cap) out[w++] = 0x02, c->type_sent[0] = 1;
+    return w + qp_enc_take(&c->qe, out + w, cap - w); /* inserts */
   }
   if (sid == c->out_id[2]) {
     size_t w = 0;
@@ -581,8 +719,14 @@ static inline size_t h3_stream_send(h3_conn *c, uint64_t sid, uint8_t *out, size
   size_t w = 0;
   if (s->hdr_off < s->hdr_len) {
     size_t m = (size_t)(s->hdr_len - s->hdr_off) < cap ? (size_t)(s->hdr_len - s->hdr_off) : cap;
-    memcpy(out, s->hdr + s->hdr_off, m), s->hdr_off = (uint16_t)(s->hdr_off + m), w += m;
+#if H3_CLIENT_SPILL
+    const uint8_t *hb = s->spill ? c->spill + s->spill_at : s->hdr;
+#else
+    const uint8_t *hb = s->hdr;
+#endif
+    memcpy(out, hb + s->hdr_off, m), s->hdr_off = (uint16_t)(s->hdr_off + m), w += m;
     if (s->hdr_off < s->hdr_len) return w;
+    h3__unspill(c, s);
   }
   size_t left = s->body ? s->body_len - s->body_off : 0;
   if (left && cap - w > 3) { /* one DATA frame: type, length, as much body as fits */
