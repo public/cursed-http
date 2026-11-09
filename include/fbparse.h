@@ -519,6 +519,49 @@ FB_INLINE int fb_line(const char *b, int len, int p, fb_scan_t *s, const int sim
   }
 }
 
+#ifndef FB_NO_CTW
+// The walk's ct mask, classified ahead in batches of FB_CTB blocks into an array (as fbresp.h, c002): the search for a
+// line's end reads two words (a 64-byte window from any position) instead of branching where a line crosses a 64-byte
+// block, a data-dependent branch. Blocks at or after len are all ones, so a search stops at a position >= len (-2).
+// Heads past FB_CTMAX blocks go on with fb_line (its skip windows for very long values). -DFB_NO_CTW: fb_line only.
+#ifndef FB_CTB
+#define FB_CTB 4
+#endif
+#ifndef FB_CTMAX
+#define FB_CTMAX 128 // 8 KB of head (1 KB of stack)
+#endif
+typedef struct {
+  int done; // blocks classified into ct[]
+  uint64_t ct[FB_CTMAX + FB_CTB];
+} fb_ctw_t;
+FB_INLINE void fb_ctw_fill(const char *b, int len, fb_ctw_t *w, int upto, const int simd) {
+  while (w->done <= upto) {
+    int j = w->done;
+    for (int i = 0; i < FB_CTB; i++, j++) w->ct[j] = 64 * j < len ? fb_cls64(simd, FB_CT, b + 64 * j) : ~0ull;
+    w->done = j;
+  }
+}
+// the first ct at or after p (or some position >= len)
+FB_INLINE int fb_ctw(const char *b, int len, int p, fb_ctw_t *w, fb_scan_t *s, const int simd) {
+  int k = p >> 6, sh = p & 63;
+  if (FB_UNLIKELY(k + 1 >= w->done)) {
+    if (k + 1 >= FB_CTMAX) return fb_line(b, len, p, s, simd);
+    fb_ctw_fill(b, len, w, k + 1, simd);
+  }
+  uint64_t m = (w->ct[k] >> sh) | ((w->ct[k + 1] << 1) << (63 - sh)); // (<< 1 << 63 - sh: 0 when sh == 0)
+  if (FB_LIKELY(m)) return p + __builtin_ctzll(m);
+  uint64_t x = w->ct[++k] & (~0ull << sh); // p .. p + 63 had none: on from p + 64, in word k + 1
+  for (;;) {
+    if (x) return (k << 6) + __builtin_ctzll(x);
+    if (++k >= w->done) {
+      if (k >= FB_CTMAX) return fb_line(b, len, k << 6, s, simd);
+      fb_ctw_fill(b, len, w, k, simd);
+    }
+    x = w->ct[k];
+  }
+}
+#endif
+
 // pico's is_complete() (the last_len slowloris check), verbatim semantics
 static inline int fb_is_complete(const char *b, int len, size_t last_len) {
   int p = last_len < 3 ? 0 : (int)last_len - 3, cnt = 0;
@@ -574,6 +617,11 @@ FB_INLINE int fb_core(const char *b, int len, const char **method, size_t *metho
   if (len <= 0) return -2;
   fb_scan_t sc = { { 0, 0, 0 }, { 0, 0, 0 } }; // cached block masks, block 0 for everything
   fb_all64(simd, b, sc.m);
+#ifndef FB_NO_CTW
+  fb_ctw_t cw;
+  cw.done = 1;
+  cw.ct[0] = sc.m[FB_CT]; // block 0 is classified already
+#endif
   // skip one empty line (pico: "some clients add CRLF after POST content")
   int p = 0;
   if (b[0] == '\r') {
@@ -638,7 +686,11 @@ FB_INLINE int fb_core(const char *b, int len, const char **method, size_t *metho
       // The line's first ct (>= p + 1: b[p] is not CR or LF here) decides it: CR LF or LF ends it; anything else is
       // invalid (pico's get_token_to_eol; a ct in the name fails its ':' check first, also -1). Decided here only if
       // the byte after it is before len; otherwise the sequential code finds pico's exact -1 or -2.
+#ifndef FB_NO_CTW
+      int ce = fb_ctw(b, len, p, &cw, &sc, simd);
+#else
       int ce = fb_line(b, len, p, &sc, simd);
+#endif
       if (FB_LIKELY(ce + 1 < len)) {
         unsigned w2 = (unsigned char)b[ce] | (unsigned)(unsigned char)b[ce + 1] << 8;
         if (FB_LIKELY(w2 == ('\r' | '\n' << 8))) l = ce + 1;
