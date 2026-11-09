@@ -676,6 +676,9 @@ FB_INLINE int fb_core(const char *b, int len, const char **method, size_t *metho
           nl = ne - p;
           vs = ne + 1 + (w >> 8 == ' '); // the usual ": " in one step
           // before e (the line's first ct) a byte <= ' ' can only be SP or HT: one compare, a loop that rarely runs
+          // (b[vs] is read before the bound on purpose: vs <= e and b[e] is the line's CR or LF, so the read is in bounds,
+          // and the common case is then one compare; vs < e first measured +6-8% instructions)
+          // cppcheck-suppress arrayIndexThenCheck
           while (FB_UNLIKELY((unsigned char)b[vs] <= ' ' && vs < e)) vs++;
         }
         p = l + 1;
@@ -708,6 +711,8 @@ FB_INLINE int fb_core(const char *b, int len, const char **method, size_t *metho
     }
     int ve = e;
     // e is the first ct at or after vs (walk and sequential alike): before it, bytes <= ' ' are SP or HT only
+    // (b[ve - 1] before the bound: ve - 1 >= vs - 1, a byte of the head, so in bounds; see the leading trim)
+    // cppcheck-suppress arrayIndexThenCheck
     while (FB_UNLIKELY((unsigned char)b[ve - 1] <= ' ' && ve > vs)) ve--;
     if (mode == 0) {
       h[n].name = name;
