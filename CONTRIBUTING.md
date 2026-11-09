@@ -2,6 +2,7 @@
 
 Bug reports, test cases and pull requests are welcome.
 
+- **Commit messages and PR titles follow [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/):** `type(scope): description`, with type one of `feat fix perf refactor docs test build ci chore style revert` (e.g. `perf(hs256): …`; `!` before the colon marks a breaking change). `make hooks` installs the `commit-msg` check (`scripts/check-commit-msg.sh`).
 - **Tests first.** `make test` must pass on your machine; `make asan` too for anything that touches parsing.
 - **Differential, not self-checking.** A new path or backend is compared against picohttpparser (or the existing
   reference in `tests/testlib.h`) on the shared corpora and fuzzed inputs. A difference is either a bug or an entry,
