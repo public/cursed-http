@@ -197,6 +197,7 @@ test: all gencheck example-check fuzz-replay browser-replay top1k-replay
 	@set -e; for t in $(BP_BINS); do $(RUN) 1 $$t; done
 	@set -e; for t in $(PR_BINS); do $(RUN) 1 $$t $(FBMODE); done
 	@set -e; $(RUN) 1 $(B)/test_chp $(FBMODE)
+	@$(MAKE) --no-print-directory test-resp FBMODE=$(FBMODE)
 	@echo "ALL TESTS PASSED"
 test-quick:
 	$(MAKE) test FBMODE=quick GENVECTORS=50000
@@ -361,3 +362,4 @@ clean:
 .PHONY: all lib mca mca-validate gen gencheck test test-quick asan bench bench-codspeed avx512 avx512-run mutants example-check fetch compare-all compare-go conformance extras-check fuzz fuzz-replay hypothesis mutants-fuzz format lint hooks clean
 include mk/h2h3.mk
 include mk/browser.mk
+include mk/resp.mk

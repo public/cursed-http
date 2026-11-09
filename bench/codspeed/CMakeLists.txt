@@ -36,7 +36,7 @@ else()
   set(CH_MARCH "")
 endif()
 
-add_library(cursed_http_fixtures STATIC fixtures.c ${REPO_ROOT}/vendor/pico/picohttpparser.c)
+add_library(cursed_http_fixtures STATIC fixtures.c resp_fixtures.c ${REPO_ROOT}/vendor/pico/picohttpparser.c)
 target_include_directories(cursed_http_fixtures PRIVATE ${REPO_ROOT}/include ${REPO_ROOT}/tests ${REPO_ROOT}/bench
                                                          ${REPO_ROOT}/vendor/pico ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(cursed_http_fixtures PRIVATE ${CH_MARCH} -Wall -Wextra -Wno-unused-function
