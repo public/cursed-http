@@ -447,7 +447,24 @@ FB_INLINE void fb_ntct64(int simd, const char *p, uint64_t *nt, uint64_t *ct) {
 typedef struct {
   int k[3];
   uint64_t m[3];
+#ifdef FB_FLATTEN // experiment (#20): the ct block mask flattened into positions, simdjson flatten_bits style
+  uint8_t idx[72];
+  int ni, ii;
+#endif
 } fb_scan_t;
+#ifdef FB_FLATTEN
+FB_INLINE void fb_flat(fb_scan_t *s, uint64_t m, int room) { // room: bytes of the block before len
+  if (room < 64) m &= room <= 0 ? 0 : (1ull << room) - 1; // not the padding: zeros are ct
+  int n = __builtin_popcountll(m);
+  for (int i = 0; i < n; i += 8)
+    for (int j = 0; j < 8; j++) {
+      s->idx[i + j] = (uint8_t)_tzcnt_u64(m);
+      m = _blsr_u64(m);
+    }
+  s->ni = n;
+  s->ii = 0;
+}
+#endif
 FB_INLINE int fb_next(const char *b, int len, int p, fb_scan_t *s, const int which, const int pair, const int simd) {
   for (;;) {
     int k = p >> 6;
@@ -472,9 +489,17 @@ FB_INLINE int fb_line(const char *b, int len, int p, fb_scan_t *s, const int sim
     if (p >= len) return p;
     s->m[FB_CT] = fb_cls64(simd, FB_CT, b + 64 * k);
     s->k[FB_CT] = k;
+#ifdef FB_FLATTEN
+    fb_flat(s, s->m[FB_CT], len - 64 * k);
+#endif
   }
+#ifdef FB_FLATTEN
+  for (int q = p & 63; s->ii < s->ni; s->ii++) // lines consume their CR/LF entries in order
+    if (s->idx[s->ii] >= q) return (k << 6) + s->idx[s->ii];
+#else
   uint64_t mc = s->m[FB_CT] >> (p & 63);
   if (FB_LIKELY(mc)) return p + __builtin_ctzll(mc);
+#endif
   // The line runs on into the next block. Most lines end there (short headers crossing a block boundary): classify
   // that block exactly (exact = 0) before trying any skip windows, which only pay on long values.
   for (int exact = 0;; exact++) {
@@ -515,6 +540,9 @@ FB_INLINE int fb_line(const char *b, int len, int p, fb_scan_t *s, const int sim
     if (FB_LIKELY(!ct)) continue;
     s->m[FB_CT] = ct;
     s->k[FB_CT] = k;
+#ifdef FB_FLATTEN
+    fb_flat(s, ct, len - p);
+#endif
     return p + __builtin_ctzll(ct);
   }
 }
@@ -574,6 +602,9 @@ FB_INLINE int fb_core(const char *b, int len, const char **method, size_t *metho
   if (len <= 0) return -2;
   fb_scan_t sc = { { 0, 0, 0 }, { 0, 0, 0 } }; // cached block masks, block 0 for everything
   fb_all64(simd, b, sc.m);
+#ifdef FB_FLATTEN
+  fb_flat(&sc, sc.m[FB_CT], len);
+#endif
   // skip one empty line (pico: "some clients add CRLF after POST content")
   int p = 0;
   if (b[0] == '\r') {
