@@ -1,0 +1,1 @@
+window.ajs = 1;

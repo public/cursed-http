@@ -1,0 +1,13 @@
+# Caddy for the response captures
+{
+  admin off
+  auto_https off
+}
+http://127.0.0.1:@PORT@ {
+  encode gzip
+  respond /204 204
+  @dyn path /chunked /trailers /gzip /304 /close /early /echo /upgrade
+  reverse_proxy @dyn 127.0.0.1:@ORIGIN@
+  root * @DOCROOT@
+  file_server
+}

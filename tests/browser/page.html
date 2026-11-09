@@ -1,0 +1,51 @@
+<!doctype html><html><head><meta charset=utf-8><title>cursed-http browser check</title>
+<link rel=stylesheet href="/s.css"><script src="/a.js"></script></head><body>
+<h1>cursed-http: real-browser requests</h1>
+<!-- tests/browser/page.html: served at / by tests/browser/server.c; drive.py loads it in each browser and waits for
+     /done. Each step makes the browser send one kind of request; the server checks every one. --><pre id=log></pre>
+<img src="/i.png?w=10&amp;q=%E2%9C%93">
+<iframe src="/frame?x=1" width=10 height=10></iframe>
+<form id=f method=POST action="/form-post"><input name=q value="a b&c=d/é"><input name=n value="42"></form>
+<script>
+const L = s => { document.getElementById('log').textContent += s + '\n'; console.log('step: ' + s); };
+const big = n => 'x'.repeat(n);
+(async () => {
+  // cookies: several, one of 1.2 KB: every later request carries them (a long value: past fbparse's skip-window threshold)
+  document.cookie = 'sid=abc123; path=/';
+  document.cookie = 'pref=dark%20mode; path=/';
+  document.cookie = 'blob=' + 'Q'.repeat(1200) + '; path=/';
+  const steps = [
+    ['GET json', () => fetch('/api/items?page=2&sort=-date&q=caf%C3%A9')],
+    ['GET unicode path', () => fetch('/api/naïve/日本/✓?ü=1')],
+    ['POST json + bearer', () => fetch('/api/posts', {method: 'POST', headers: {'Content-Type': 'application/json',
+        'Authorization': 'Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.sig'}, body: JSON.stringify({a: 1, b: big(500)})})],
+    ['HEAD', () => fetch('/api/head', {method: 'HEAD'})],
+    ['PUT', () => fetch('/api/posts/7', {method: 'PUT', body: 'raw text body'})],
+    ['PATCH', () => fetch('/api/posts/7', {method: 'PATCH', headers: {'Content-Type': 'application/merge-patch+json'}, body: '{}'})],
+    ['DELETE', () => fetch('/api/posts/7', {method: 'DELETE'})],
+    ['OPTIONS', () => fetch('/api/posts', {method: 'OPTIONS'})],
+    ['PROPFIND (extension method)', () => fetch('/dav/', {method: 'PROPFIND', headers: {'Depth': '1'}})],
+    ['custom headers: tab inside, latin-1 bytes', () => fetch('/api/h', {headers: {'X-Tab': 'a\tb\tc',
+        'X-Latin1': 'café naïve ÿ', 'X-Empty': '', 'X-Spaces': 'inner   spaces'}})],
+    ['long header 6 KB', () => fetch('/api/long', {headers: {'X-Long': big(6000)}})],
+    ['40 custom headers', () => { const h = {}; for (let i = 0; i < 40; i++) h['X-H' + i] = 'v' + i; return fetch('/api/many40', {headers: h}); }],
+    ['60 custom headers (over the adapter cap of 48)', () => { const h = {}; for (let i = 0; i < 60; i++) h['X-M' + i] = 'v' + i; return fetch('/api/many60', {headers: h}); }],
+    ['long URL 7 KB', () => fetch('/api/u?' + 'k=' + big(7000))],
+    ['urlencoded body', () => fetch('/api/form', {method: 'POST', body: new URLSearchParams({a: '1 2', b: 'é&='})})],
+    ['multipart FormData + file', () => { const fd = new FormData(); fd.append('t', 'hello');
+        fd.append('file', new Blob(['\x00\x01binary\r\n\r\nGET / HTTP/1.1\r\n'], {type: 'application/octet-stream'}), 'a.bin');
+        return fetch('/api/upload', {method: 'POST', body: fd}); }],
+    ['binary body 8 KB', () => fetch('/api/bin', {method: 'POST', body: new Uint8Array(8192).map((_, i) => i * 7)})],
+    ['XHR', () => new Promise(r => { const x = new XMLHttpRequest(); x.open('GET', '/api/xhr?x=1'); x.setRequestHeader('X-Requested-With', 'XMLHttpRequest'); x.onloadend = r; x.send(); })],
+    ['sendBeacon', async () => { navigator.sendBeacon('/api/beacon', 'beacon-data'); await new Promise(r => setTimeout(r, 300)); }],
+    ['keepalive fetch', () => fetch('/api/ka', {method: 'POST', keepalive: true, body: 'ka'})],
+    ['cache: no-cache + Range', () => fetch('/api/range', {cache: 'no-cache', headers: {'Range': 'bytes=0-99'}})],
+    ['credentials omit', () => fetch('/api/nocred', {credentials: 'omit'})],
+    ['WebSocket upgrade', () => new Promise(r => { try { const w = new WebSocket('ws://' + location.host + '/ws?chat=1');
+        w.onerror = w.onclose = r; setTimeout(r, 1000); } catch (e) { r(); } })],
+    ['20 parallel GETs (several connections)', () => Promise.all([...Array(20)].map((_, i) => fetch('/api/par/' + i)))],
+  ];
+  for (const [name, f] of steps) { try { await f(); L('ok   ' + name); } catch (e) { L('ERR  ' + name + ': ' + e); } }
+  document.getElementById('f').submit(); // a form navigation (urlencoded POST), which redirects to /done
+})();
+</script></body></html>

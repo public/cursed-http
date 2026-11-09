@@ -5,6 +5,7 @@
 #include <benchmark/benchmark.h>
 
 #include "fixtures.h"
+#include "resp_fixtures.h"
 
 // load-test traffic the example spec's fast path is built for (k6, gocli), and traffic it has no route for
 enum FastShape { K6 = 0, GOCLI_GZIP = 1, GOCLI = 2, BROWSER = 3, PROXY = 4 };
@@ -88,6 +89,26 @@ BENCHMARK_CAPTURE(BM_server_path, browser, BROWSER);
 BENCHMARK_CAPTURE(BM_server_path, proxy, PROXY);
 
 // ---------------- fbparse.h ----------------
+// perf_one's corpora (testlib shapes as bench/dump_corpus writes them, 512 requests) with one out-of-line call per
+// request, as bench/perf_one makes it: the instructions per request the callgrind profiles of fbparse report
+static void run_perf(benchmark::State &state, long (*fn)(const cb_corpus *), int shape) {
+  run(state, cb_corpus_perf(shape, 512), fn);
+}
+static void BM_perf_fb_parse_request(benchmark::State &state, int shape) {
+  run_perf(state, cb_fb_parse_request_call, shape);
+}
+BENCHMARK_CAPTURE(BM_perf_fb_parse_request, k6, K6);
+BENCHMARK_CAPTURE(BM_perf_fb_parse_request, browser, BROWSER);
+BENCHMARK_CAPTURE(BM_perf_fb_parse_request, proxy, PROXY);
+static void BM_perf_fb_parse_request_scalar(benchmark::State &state, int shape) {
+  run_perf(state, cb_fb_parse_request_scalar_call, shape);
+}
+BENCHMARK_CAPTURE(BM_perf_fb_parse_request_scalar, k6, K6);
+BENCHMARK_CAPTURE(BM_perf_fb_parse_request_scalar, browser, BROWSER);
+BENCHMARK_CAPTURE(BM_perf_fb_parse_request_scalar, proxy, PROXY);
+static void BM_perf_fb_parse_req(benchmark::State &state, int shape) { run_perf(state, cb_fb_parse_req_call, shape); }
+BENCHMARK_CAPTURE(BM_perf_fb_parse_req, browser, BROWSER);
+
 static void BM_fb_parse_request(benchmark::State &state, int shape) { run_fb(state, cb_fb_parse_request, shape); }
 BENCHMARK_CAPTURE(BM_fb_parse_request, curl, CURL);
 BENCHMARK_CAPTURE(BM_fb_parse_request, chrome, CHROME);
@@ -198,5 +219,46 @@ static void BM_hpack_encode(benchmark::State &state, int set) {
 }
 BENCHMARK_CAPTURE(BM_hpack_encode, browser, H_BROWSER);
 BENCHMARK_CAPTURE(BM_hpack_encode, grpc, H_GRPC);
+
+// ---------------- fbresp.h (responses, for clients) ----------------
+// bench/resp_shapes.h shapes, one out-of-line call per head (as bench/bench_resp.c)
+enum RespShape { R_NGINX = 0, R_CDN = 1, R_API = 2, R_304 = 3 };
+static void run_resp(benchmark::State &state, cb_resp *c, long (*fn)(const cb_resp *)) {
+  for (auto _ : state) {
+    long r = fn(c);
+    benchmark::DoNotOptimize(r);
+  }
+  state.SetItemsProcessed(state.iterations() * cb_resp_len(c));
+  state.SetBytesProcessed(state.iterations() * cb_resp_bytes(c));
+  cb_resp_free(c);
+}
+static void BM_fb_parse_response(benchmark::State &state, int shape) {
+  run_resp(state, cb_resp_new(shape, kRequests), cb_fb_parse_response_call);
+}
+BENCHMARK_CAPTURE(BM_fb_parse_response, nginx, R_NGINX);
+BENCHMARK_CAPTURE(BM_fb_parse_response, cdn, R_CDN);
+BENCHMARK_CAPTURE(BM_fb_parse_response, api, R_API);
+BENCHMARK_CAPTURE(BM_fb_parse_response, not_modified, R_304);
+static void BM_fb_parse_response_scalar(benchmark::State &state, int shape) {
+  run_resp(state, cb_resp_new(shape, kRequests), cb_fb_parse_response_scalar_call);
+}
+BENCHMARK_CAPTURE(BM_fb_parse_response_scalar, nginx, R_NGINX);
+BENCHMARK_CAPTURE(BM_fb_parse_response_scalar, cdn, R_CDN);
+static void BM_fbr_parse(benchmark::State &state, int shape) {
+  run_resp(state, cb_resp_new(shape, kRequests), cb_fbr_parse_call);
+}
+BENCHMARK_CAPTURE(BM_fbr_parse, nginx, R_NGINX);
+BENCHMARK_CAPTURE(BM_fbr_parse, cdn, R_CDN);
+BENCHMARK_CAPTURE(BM_fbr_parse, api, R_API);
+static void BM_fbr_chunked(benchmark::State &state, int chunks, int size) {
+  run_resp(state, cb_resp_chunked(chunks, size, 64), cb_fbr_chunked);
+}
+BENCHMARK_CAPTURE(BM_fbr_chunked, 16x32B_trailer, 16, 32);
+BENCHMARK_CAPTURE(BM_fbr_chunked, 4x4KB_trailer, 4, 4096);
+static void BM_fbr_chunked_stream(benchmark::State &state, int chunks, int size) {
+  run_resp(state, cb_resp_chunked(chunks, size, 64), cb_fbr_chunked_stream);
+}
+BENCHMARK_CAPTURE(BM_fbr_chunked_stream, 16x32B_trailer, 16, 32);
+BENCHMARK_CAPTURE(BM_fbr_chunked_stream, 4x4KB_trailer, 4, 4096);
 
 BENCHMARK_MAIN();
