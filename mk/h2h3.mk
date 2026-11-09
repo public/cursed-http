@@ -56,9 +56,10 @@ $(H2B)/test_h3: tests/test_h3.c $(H2HDRS) $(H2B)/libnghttp3.a
 $(H2B)/test_h3_asan: tests/test_h3.c $(H2HDRS) $(H2B)/libnghttp3.a
 	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(N3INC) $< $(H2B)/libnghttp3.a -o $@
 
-H2TESTS := $(H2B)/test_quic $(H2B)/test_quic_interop $(H2B)/test_h3 $(H2B)/test_qpack $(H2B)/test_hpack $(H2B)/test_hpack_scalar $(H2B)/test_h2 $(H2B)/test_h2_scalar $(H2B)/test_h2c $(H2B)/test_h3c $(H2B)/test_h3c_interop
-test-h2h3: $(H2TESTS)
+H2TESTS := $(H2B)/test_quic $(H2B)/test_quic_interop $(H2B)/test_h3 $(H2B)/test_qpack $(H2B)/test_hpack $(H2B)/test_hpack_scalar $(H2B)/test_h2 $(H2B)/test_h2_scalar $(H2B)/test_h2c $(H2B)/test_h3c $(H2B)/test_h3c_interop $(H2B)/test_quic_raw
+test-h2h3: $(H2TESTS) $(H2B)/quic_echo
 	@for t in $(H2TESTS); do echo "== $$t"; $$t || exit 1; done
+	tests/quic_echo_smoke.sh $(H2B)/quic_echo
 .PHONY: test-h2h3
 hfield-check:
 	$(PYTHON) -I gen/gen_hfield.py --check
@@ -115,6 +116,9 @@ $(H2B)/nt/%.o: $(NT)/%.c $(H2B)/gen/ngtcp2/version.h
 NT_SRC := $(wildcard $(NT)/lib/*.c) $(NT)/crypto/shared.c $(NT)/crypto/picotls/picotls.c
 $(H2B)/libngtcp2.a: $(patsubst $(NT)/%.c,$(H2B)/nt/%.o,$(NT_SRC))
 	ar rcs $@ $^
+# raw QUIC (an echo protocol, our own ALPN): ours with ours, and with ngtcp2 as client and as server
+$(H2B)/test_quic_raw: tests/test_quic_raw.c $(H2HDRS) include/qhp.h $(H2B)/libngtcp2.a $(H2B)/libpicotls.a
+	$(H2CC) $(QINC) $(NTINC) $< $(H2B)/libngtcp2.a $(H2B)/libpicotls.a -lcrypto -o $@
 $(H2B)/test_quic_interop: tests/test_quic_interop.c $(H2HDRS) include/qhp.h $(H2B)/libngtcp2.a $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
 	$(H2CC) $(QINC) $(N3INC) $(NTINC) $< $(H2B)/libngtcp2.a $(H2B)/libnghttp3.a $(H2B)/libpicotls.a -lcrypto -o $@
 $(H2B)/test_h3c: tests/test_h3c.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
@@ -137,6 +141,14 @@ mutants-quic: $(H2B)/libngtcp2.a $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
 
 $(H2B)/h3_server: examples/h3_server.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls.a
 	$(CC) -O2 $(WARN) $(MARCH) -Iinclude $(QINC) $< $(H2B)/libpicotls.a -lcrypto -o $@
+
+$(H2B)/quic_echo: examples/quic_echo.c $(H2HDRS) $(H2B)/libpicotls.a
+	$(CC) -O2 $(WARN) $(MARCH) -Iinclude $(QINC) $< $(H2B)/libpicotls.a -lcrypto -o $@
+
+# examples/quic_echo, server and client, over real UDP on 127.0.0.1 (test-h2h3 runs it too)
+quic-echo-smoke: $(H2B)/quic_echo
+	tests/quic_echo_smoke.sh $<
+.PHONY: quic-echo-smoke
 
 $(H2B)/h3_client: examples/h3_client.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls.a
 	$(CC) -O2 $(WARN) $(MARCH) -Iinclude $(QINC) $< $(H2B)/libpicotls.a -lcrypto -o $@

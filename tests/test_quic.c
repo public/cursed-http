@@ -201,7 +201,7 @@ static int64_t eat_all(quic_conn *c, uint64_t sid, uint64_t off, const uint8_t *
   (void)c, (void)sid, (void)off, (void)d, (void)fin, (void)u;
   return (int64_t)len;
 }
-static quic_ctx FX = { NULL, quic__default_alloc, { { NULL }, { 0 } }, { 0 }, { 0 } };
+static quic_ctx FX = { .alloc = quic__default_alloc };
 static void fresh(quic_conn *c) {
   for (int i = 0; i < QUIC_MAX_STREAMS; i++)
     if (c->s[i].used) quic__stream_free(c, &c->s[i]);
@@ -210,6 +210,7 @@ static void fresh(quic_conn *c) {
   c->ctx = &FX, c->cb.on_stream = eat_all;
   c->max_data_local = 1000, c->max_streams_bidi_local = 4, c->max_streams_uni_local = 4;
   c->established = 1, c->sp[QUIC_SP_APP].next_pn = 10, c->peer_bidi_local = 1 << 20;
+  c->stream_win = QUIC_STREAM_WIN, c->conn_win = QUIC_CONN_WIN;
 }
 static uint64_t frames(quic_conn *c, int space, const uint8_t *f, size_t n) {
   int ae;

@@ -11,15 +11,18 @@
  * default realloc) and grow only up to the flow-control windows we advertise. picotls allocates
  * its own handshake state.
  *
- * Scope: QUIC v1 only (other versions get Version Negotiation), no 0-RTT, no Retry, no connection
- * migration (PATH_CHALLENGE is answered on the current path), one connection ID per side, no ECN. Sends are paced.
+ * Scope: QUIC v1 (other versions get Version Negotiation); Retry, 0-RTT and resumption (quic_ctx_resumption),
+ * NEW_TOKEN, stateless resets, the peer's connection IDs (NEW_CONNECTION_ID, retire_prior_to) but one of ours,
+ * pacing, path MTU discovery; no migration (PATH_CHALLENGE is answered on the current path), no ECN.
+ * Any application protocol: quic_ctx.alpn (default "h3"), streams opened by either side, limits and windows in
+ * quic_ctx (examples/quic_echo.c: raw QUIC; include/h3.h: HTTP/3 on top).
  *
  *   quic_ctx_init(&ctx, tls_ctx)                      tls_ctx: a ptls_context_t (a server's with certificates,
  *                                                     a client's with its certificate verifier)
  *   quic_accept(&c, &ctx, dgram, len, now_ms, &cb, user)   server: from a client Initial; 0 or QUIC_E_*
- *   quic_connect(&c, &ctx, server_name, now_ms, &cb, user) client: the ClientHello is queued (ALPN "h3");
+ *   quic_connect(&c, &ctx, server_name, now_ms, &cb, user) client: the ClientHello is queued (ctx's ALPN);
  *                                                     quic_send the first datagram, then as above
- *   quic_open_bidi(&c)                                client: a new request stream (or -1 at the peer's limit)
+ *   quic_open_bidi(&c)                                a new stream (or -1 at the peer's limit); quic_alpn(&c)
  *   quic_recv(&c, dgram, len, now_ms)                 every later datagram for this connection
  *   n = quic_send(&c, out, cap, now_ms)               one datagram to send, 0 when idle (or paced: then
  *                                                     quic_timeout says when to call it again)
@@ -118,8 +121,15 @@ typedef struct {
   ptls_context_t *tls;
   void *(*alloc)(void *p, size_t n); /* realloc-like; n == 0 frees */
   quic__ticket_enc tickets;          /* a server's session tickets (quic_ctx_resumption) */
-  uint8_t token_key[16];             /* a server's Retry tokens (random per quic_ctx_init) */
-  uint8_t reset_key[32];             /* a server's stateless reset tokens: HMAC of the connection ID */
+  /* the application protocol and what we let the peer do (set after quic_ctx_init; 0 / NULL: the defaults,
+   * HTTP/3's): ALPN, offered by a client in this order, chosen by a server by its own; the peer's streams
+   * (max_streams_bidi: a server 100, a client 0, as HTTP/3 servers open none; max_streams_uni 8), and our receive
+   * windows per stream and per connection (256 KiB, 4 MiB) */
+  const char *const *alpn;
+  size_t nalpn;
+  uint64_t max_streams_bidi, max_streams_uni, stream_window, conn_window;
+  uint8_t token_key[16]; /* a server's Retry tokens (random per quic_ctx_init) */
+  uint8_t reset_key[32]; /* a server's stateless reset tokens: HMAC of the connection ID */
 } quic_ctx;
 
 /* --------------------------------------------- varints --------------------------------------------- */
@@ -480,6 +490,8 @@ struct quic_conn {
                                  * implicitly opens all lower ones, which may still arrive later */
   uint64_t peer_max_streams_uni, peer_init_stream_data_uni, peer_bidi_local, peer_max_ack_delay, peer_ack_delay_exp;
   uint64_t next_uni_id, next_bidi_id;
+  uint64_t stream_win, conn_win;                    /* our receive windows (quic_ctx) */
+  ptls_iovec_t alpn_iov[8];                         /* a client's ALPN offer */
   uint64_t peer_bidi_remote, peer_max_streams_bidi; /* a client: limits on the bidi streams it opens */
   /* path */
   uint8_t path_response[8], path_response_pending;
@@ -625,7 +637,7 @@ static inline quic_stream *quic__stream_new(quic_conn *c, uint64_t sid) {
       s->used = 1, s->id = sid;
       quic__rb_init(&s->in);
       int uni = (sid & 2) != 0, ours = QUIC__OURS(c, sid);
-      s->max_recv = ours && uni ? 0 : QUIC_STREAM_WIN;
+      s->max_recv = ours && uni ? 0 : c->stream_win;
       /* our sending limit: the peer's initial_max_stream_data for its uni / its own bidi / our bidi */
       s->max_send = uni ? (ours ? c->peer_init_stream_data_uni : 0) : ours ? c->peer_bidi_remote : c->peer_bidi_local;
       return s;
@@ -1000,13 +1012,36 @@ static inline int quic__decode_tp(quic_conn *c, const uint8_t *p, const uint8_t 
 }
 
 
+/* a connection's limits from its context's settings (0: the defaults) */
+static inline void quic__settings(quic_conn *c, const quic_ctx *x) {
+  c->conn_win = x->conn_window ? x->conn_window : QUIC_CONN_WIN;
+  c->stream_win = x->stream_window ? x->stream_window : QUIC_STREAM_WIN;
+  c->max_streams_bidi_local = x->max_streams_bidi ? x->max_streams_bidi : c->client ? 0 : QUIC_MAX_BIDI;
+  c->max_streams_uni_local = x->max_streams_uni ? x->max_streams_uni : QUIC_MAX_UNI;
+  c->max_data_local = c->conn_win;
+}
+/* the application protocol agreed on (ALPN), once the handshake has got that far; NULL before */
+static inline const char *quic_alpn(quic_conn *c) { return c->tls ? ptls_get_negotiated_protocol(c->tls) : NULL; }
+static inline int quic__alpn_ok(const quic_ctx *x, const char *a) {
+  if (!a) return 0;
+  if (!x->nalpn) return !strcmp(a, "h3");
+  for (size_t i = 0; i < x->nalpn; i++)
+    if (!strcmp(a, x->alpn[i])) return 1;
+  return 0;
+}
 static inline int quic__on_client_hello(ptls_on_client_hello_t *self, ptls_t *tls,
                                         ptls_on_client_hello_parameters_t *params) {
   (void)self;
-  for (size_t i = 0; i < params->negotiated_protocols.count; i++) {
-    ptls_iovec_t p = params->negotiated_protocols.list[i];
-    if (p.len == 2 && !memcmp(p.base, "h3", 2)) return ptls_set_negotiated_protocol(tls, "h3", 2);
-  }
+  quic_conn *c = *ptls_get_data_ptr(tls);
+  static const char *const h3[1] = { "h3" };
+  const char *const *ours = c->ctx->nalpn ? c->ctx->alpn : h3;
+  size_t n = c->ctx->nalpn ? c->ctx->nalpn : 1;
+  for (size_t k = 0; k < n; k++) /* our preference first */
+    for (size_t i = 0; i < params->negotiated_protocols.count; i++) {
+      ptls_iovec_t p = params->negotiated_protocols.list[i];
+      if (p.len == strlen(ours[k]) && !memcmp(p.base, ours[k], p.len))
+        return ptls_set_negotiated_protocol(tls, ours[k], p.len);
+    }
   return PTLS_ALERT_NO_APPLICATION_PROTOCOL;
 }
 static ptls_on_client_hello_t quic__och = { quic__on_client_hello };
@@ -1029,11 +1064,12 @@ static inline int quic__collected_ext(ptls_t *tls, ptls_handshake_properties_t *
   p = quic__put_vi(p, 0x00), p = quic__put_vi(p, c->odcid_len), memcpy(p, c->odcid, c->odcid_len), p += c->odcid_len;
   p = quic__tp_int(p, 0x01, QUIC_IDLE_MS);
   p = quic__tp_int(p, 0x03, QUIC_MAX_UDP);
-  p = quic__tp_int(p, 0x04, QUIC_CONN_WIN);
-  p = quic__tp_int(p, 0x06, QUIC_STREAM_WIN);
-  p = quic__tp_int(p, 0x07, QUIC_STREAM_WIN);
-  p = quic__tp_int(p, 0x08, QUIC_MAX_BIDI);
-  p = quic__tp_int(p, 0x09, QUIC_MAX_UNI);
+  p = quic__tp_int(p, 0x04, c->conn_win);
+  p = quic__tp_int(p, 0x05, c->stream_win); /* bidi_local: the peer's side of the streams we open */
+  p = quic__tp_int(p, 0x06, c->stream_win);
+  p = quic__tp_int(p, 0x07, c->stream_win);
+  p = quic__tp_int(p, 0x08, c->max_streams_bidi_local);
+  p = quic__tp_int(p, 0x09, c->max_streams_uni_local);
   p = quic__put_vi(p, 0x0c), p = quic__put_vi(p, 0); /* disable_active_migration */
   p = quic__put_vi(p, 0x0f), p = quic__put_vi(p, QUIC_SCID_LEN), memcpy(p, c->scid, QUIC_SCID_LEN), p += QUIC_SCID_LEN;
   p = quic__tp_int(p, 0x0e, QUIC_PEER_CIDS);          /* active_connection_id_limit */
@@ -1099,8 +1135,7 @@ static inline void quic__crypto_feed(quic_conn *c, int space) {
   }
   if (r == 0 && !c->established && ptls_handshake_is_complete(c->tls)) { /* 0 also means "flight sent, waiting" */
     if (c->client) { /* "h3" or nothing; confirmed later, by HANDSHAKE_DONE (RFC 9001 §4.1.2) */
-      const char *alpn = ptls_get_negotiated_protocol(c->tls);
-      if (!alpn || strcmp(alpn, "h3")) {
+      if (!quic__alpn_ok(c->ctx, ptls_get_negotiated_protocol(c->tls))) { /* one we offered, or nothing */
         quic__error(c, 0x100 | PTLS_ALERT_NO_APPLICATION_PROTOCOL, 0x06);
         return;
       }
@@ -1144,10 +1179,10 @@ static inline int quic__stream_deliver(quic_conn *c, quic_stream *s) {
     c->data_consumed += (uint64_t)used;
     if (fin && (size_t)used == avail) s->recv_done = 1;
     /* reopen windows once half is used */
-    if (!s->recv_done && s->max_recv - s->in.base < QUIC_STREAM_WIN / 2)
-      s->max_recv = s->in.base + QUIC_STREAM_WIN, s->send_max_stream_data = 1;
-    if (c->max_data_local - c->data_consumed < QUIC_CONN_WIN / 2)
-      c->max_data_local = c->data_consumed + QUIC_CONN_WIN, c->send_max_data = 1;
+    if (!s->recv_done && s->max_recv - s->in.base < c->stream_win / 2)
+      s->max_recv = s->in.base + c->stream_win, s->send_max_stream_data = 1;
+    if (c->max_data_local - c->data_consumed < c->conn_win / 2)
+      c->max_data_local = c->data_consumed + c->conn_win, c->send_max_data = 1;
     if (!used || s->recv_done) return 0;
   }
 }
@@ -1873,9 +1908,9 @@ static inline int quic_accept_from(quic_conn *c, quic_ctx *x, uint8_t *d, size_t
   *ptls_get_data_ptr(c->tls) = c;
   c->props.collect_extension = quic__collect_ext;
   c->props.collected_extensions = quic__collected_ext;
-  c->max_data_local = QUIC_CONN_WIN, c->max_streams_bidi_local = QUIC_MAX_BIDI, c->max_streams_uni_local = QUIC_MAX_UNI;
+  quic__settings(c, x);
   c->peer_max_ack_delay = 25, c->peer_ack_delay_exp = 3;
-  c->next_uni_id = 3;
+  c->next_uni_id = 3, c->next_bidi_id = 1;
   c->cwnd = 10 * QUIC_SEND_MAX, c->ssthresh = UINT64_MAX, c->recovery_start = INT64_MIN;
   c->mtu = QUIC_SEND_MAX, c->peer_max_udp = 65527;
   c->pkt_thresh = 3, c->time_thresh_8 = 9; /* RFC 9002 §6.1: 3 packets, 9/8 RTT, adapted on spurious losses */
@@ -1899,6 +1934,7 @@ static inline int quic_connect_resume(quic_conn *c, quic_ctx *x, const char *ser
   memset(c, 0, sizeof *c);
   c->ctx = x, c->cb = *cb, c->user = user;
   c->client = 1, c->addr_validated = 1; /* a client has no anti-amplification limit */
+  quic__settings(c, x);
   c->odcid_len = 16, x->tls->random_bytes(c->odcid, 16);
   memcpy(c->dcid, c->odcid, 16), c->dcid_len = 16;
   x->tls->random_bytes(c->scid, QUIC_SCID_LEN);
@@ -1918,11 +1954,12 @@ static inline int quic_connect_resume(quic_conn *c, quic_ctx *x, const char *ser
   uint8_t tp[96], *p = tp;
   p = quic__tp_int(p, 0x01, QUIC_IDLE_MS);
   p = quic__tp_int(p, 0x03, QUIC_MAX_UDP);
-  p = quic__tp_int(p, 0x04, QUIC_CONN_WIN);
-  p = quic__tp_int(p, 0x05, QUIC_STREAM_WIN); /* bidi_local: the response side of our request streams */
-  p = quic__tp_int(p, 0x07, QUIC_STREAM_WIN);
-  p = quic__tp_int(p, 0x08, 0); /* the server opens no bidi streams to us */
-  p = quic__tp_int(p, 0x09, QUIC_MAX_UNI);
+  p = quic__tp_int(p, 0x04, c->conn_win);
+  p = quic__tp_int(p, 0x05, c->stream_win); /* bidi_local: the response side of our request streams */
+  p = quic__tp_int(p, 0x06, c->stream_win); /* bidi_remote: streams the server opens */
+  p = quic__tp_int(p, 0x07, c->stream_win);
+  p = quic__tp_int(p, 0x08, c->max_streams_bidi_local); /* (HTTP/3: 0, its servers open none) */
+  p = quic__tp_int(p, 0x09, c->max_streams_uni_local);
   p = quic__put_vi(p, 0x0c), p = quic__put_vi(p, 0); /* disable_active_migration */
   p = quic__put_vi(p, 0x0f), p = quic__put_vi(p, QUIC_SCID_LEN), memcpy(p, c->scid, QUIC_SCID_LEN), p += QUIC_SCID_LEN;
   p = quic__tp_int(p, 0x0e, QUIC_PEER_CIDS); /* active_connection_id_limit */
@@ -1931,8 +1968,12 @@ static inline int quic_connect_resume(quic_conn *c, quic_ctx *x, const char *ser
   memcpy(c->tpbuf.base, tp, (size_t)(p - tp)), c->tpbuf.off = (size_t)(p - tp);
   c->tpext[0] = (ptls_raw_extension_t){ 0x39, { c->tpbuf.base, c->tpbuf.off } };
   c->tpext[1] = (ptls_raw_extension_t){ UINT16_MAX, { NULL, 0 } };
-  static const ptls_iovec_t h3 = { (uint8_t *)"h3", 2 };
-  c->props.client.negotiated_protocols.list = &h3, c->props.client.negotiated_protocols.count = 1;
+  size_t na = x->nalpn ? (x->nalpn < 8 ? x->nalpn : 8) : 1;
+  for (size_t i = 0; i < na; i++) {
+    const char *a = x->nalpn ? x->alpn[i] : "h3";
+    c->alpn_iov[i] = ptls_iovec_init(a, strlen(a));
+  }
+  c->props.client.negotiated_protocols.list = c->alpn_iov, c->props.client.negotiated_protocols.count = na;
   if (res && res->ticket_len) { /* resume: the ticket, maybe 0-RTT, with the limits the server gave last time */
     c->props.client.session_ticket = ptls_iovec_init(res->ticket, res->ticket_len);
     if (res->early) c->props.client.max_early_data_size = &c->early_max;
@@ -1942,7 +1983,6 @@ static inline int quic_connect_resume(quic_conn *c, quic_ctx *x, const char *ser
   c->props.additional_extensions = c->tpext;
   c->props.collect_extension = quic__collect_ext;
   c->props.collected_extensions = quic__collected_ext;
-  c->max_data_local = QUIC_CONN_WIN, c->max_streams_bidi_local = 0, c->max_streams_uni_local = QUIC_MAX_UNI;
   c->peer_max_ack_delay = 25, c->peer_ack_delay_exp = 3;
   c->next_uni_id = 2, c->next_bidi_id = 0;
   c->cwnd = 10 * QUIC_SEND_MAX, c->ssthresh = UINT64_MAX, c->recovery_start = INT64_MIN;
@@ -1979,9 +2019,10 @@ static inline int quic_connect(quic_conn *c, quic_ctx *x, const char *server_nam
   return quic_connect_resume(c, x, server_name, now, cb, user, NULL);
 }
 
-/* client: a new bidirectional (request) stream, or -1 at the server's initial_max_streams_bidi / MAX_STREAMS */
+/* a new bidirectional stream (a client's request; a server's too, if the client allows them), or -1 at the peer's
+ * initial_max_streams_bidi / MAX_STREAMS */
 static inline int64_t quic_open_bidi(quic_conn *c) {
-  if (!c->client || !(c->established || c->early_open) || c->closing || c->draining) return -1; /* (or in 0-RTT) */
+  if (!(c->established || c->early_open) || c->closing || c->draining) return -1; /* (a client's in 0-RTT too) */
   if ((c->next_bidi_id >> 2) >= c->peer_max_streams_bidi) return -1;
   quic_stream *s = quic__stream_new(c, c->next_bidi_id);
   if (!s) return -1;
