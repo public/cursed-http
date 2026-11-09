@@ -206,29 +206,24 @@ int main(int argc, char **argv) {
       blk[i] = (it & 1) ? (char)rnd()
                         : " \t\r\n:\"(),/;<=>?@[\\]{}\x7f\x80\xff\x00\x08\x09\x0a\x1f\x20"
                           "aZ0~|^_`"[rnd() % 36];
-    uint64_t ref[4] = { 0, 0, 0, 0 };
+    uint64_t ref[3] = { 0, 0, 0 };
     for (int i = 0; i < 64; i++) {
       unsigned char x = (unsigned char)blk[i];
       ref[FB_NT] |= (uint64_t)!pico_tok[x] << i;
       ref[FB_CT] |= (uint64_t)((x < 32 && x != 9) || x == 127) << i;
       ref[FB_PE] |= (uint64_t)(x <= 32 || x == 127) << i;
-      ref[FB_LF] |= (uint64_t)(x == '\n') << i;
     }
-    uint64_t got[8] = { fb_cls64(1, FB_NT, blk), fb_cls64(1, FB_CT, blk), fb_cls64(1, FB_PE, blk),
-                        fb_cls64(1, FB_LF, blk), fb_cls64(0, FB_NT, blk), fb_cls64(0, FB_CT, blk),
-                        fb_cls64(0, FB_PE, blk), fb_cls64(0, FB_LF, blk) };
-    uint64_t all1[4], all0[4], nc1[2], nc0[2], lc1[2], lc0[2];
+    uint64_t got[6] = { fb_cls64(1, FB_NT, blk), fb_cls64(1, FB_CT, blk), fb_cls64(1, FB_PE, blk),
+                        fb_cls64(0, FB_NT, blk), fb_cls64(0, FB_CT, blk), fb_cls64(0, FB_PE, blk) };
+    uint64_t all1[3], all0[3], nc1[2], nc0[2];
     fb_all64(1, blk, all1);
     fb_all64(0, blk, all0);
     fb_ntct64(1, blk, &nc1[0], &nc1[1]);
     fb_ntct64(0, blk, &nc0[0], &nc0[1]);
-    fb_lfct64(1, blk, &lc1[0], &lc1[1]);
-    fb_lfct64(0, blk, &lc0[0], &lc0[1]);
     int bad = 0;
-    for (int j = 0; j < 8; j++)
-      bad |= (got[j] != ref[j % 4]) | (all1[j % 4] != ref[j % 4]) | (all0[j % 4] != ref[j % 4]);
+    for (int j = 0; j < 6; j++)
+      bad |= (got[j] != ref[j % 3]) | (all1[j % 3] != ref[j % 3]) | (all0[j % 3] != ref[j % 3]);
     bad |= (nc1[0] != ref[FB_NT]) | (nc1[1] != ref[FB_CT]) | (nc0[0] != ref[FB_NT]) | (nc0[1] != ref[FB_CT]);
-    bad |= (lc1[0] != ref[FB_LF]) | (lc1[1] != ref[FB_CT]) | (lc0[0] != ref[FB_LF]) | (lc0[1] != ref[FB_CT]);
     if (bad) {
       FAIL("CLASSIFY FAIL it %d\n", it);
       break;

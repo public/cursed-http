@@ -15,6 +15,9 @@ typedef struct cb_corpus cb_corpus;
 cb_corpus *cb_corpus_fast(int shape, int n);
 // shapes of tests/shapes.h gen_fb(): 0 curl, 1 chrome, 2 firefox, 3 http/1.0, 4 long headers, 5 chunked POST, 6 odd
 cb_corpus *cb_corpus_fb(int shape, int n);
+// perf_one's corpora: tests/testlib.h gen() shapes exactly as `bench/dump_corpus FILE SHAPE N` writes them (a fresh
+// PRNG, the tokens, then the requests), the bytes bench/perf_one parses
+cb_corpus *cb_corpus_perf(int shape, int n);
 // chunked bodies: `chunks` chunks of `size` bytes, with chunk extensions when ext != 0
 cb_corpus *cb_corpus_chunked(int chunks, int size, int ext, int n);
 int cb_corpus_len(const cb_corpus *c);
@@ -30,6 +33,11 @@ long cb_fast_parse_many(const cb_corpus *c);               // pipelined: the who
 long cb_fb_parse_request(const cb_corpus *c);
 long cb_fb_parse_request_scalar(const cb_corpus *c);
 long cb_fb_parse_req(const cb_corpus *c);
+// the same three, with one out-of-line call per request (as perf_one calls the parser): the per-call setup is
+// counted rather than hoisted out of the loop
+long cb_fb_parse_request_call(const cb_corpus *c);
+long cb_fb_parse_request_scalar_call(const cb_corpus *c);
+long cb_fb_parse_req_call(const cb_corpus *c);
 long cb_server_path(const cb_corpus *c); // fast_parse, then fb_parse_req on FP_FALLBACK
 long cb_bp_parse(const cb_corpus *c, int batch);
 long cb_fb_decode_chunked(const cb_corpus *c);
