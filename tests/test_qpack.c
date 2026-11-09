@@ -422,11 +422,32 @@ static void test_enc_table(void) {
          fails == before ? "ok" : "FAILED", sections, dyn, cancelled, waited, 100.0 * (double)bytes / (double)raw);
 }
 
+/* a peer's QPACK_MAX_TABLE_CAPACITY is a 62-bit setting: 2^36 made 2 * MaxEntries wrap to 0 in 32 bits, and the
+ * first section using the dynamic table divided by it */
+static void test_enc_huge_capacity(void) {
+  static const uint64_t caps[] = { 1ull << 36, (1ull << 36) + 31, (1ull << 37), (1ull << 62) - 1 };
+  for (int c = 0; c < 4; c++) {
+    static qp_enc E;
+    qp_enc_init(&E);
+    qp_enc_settings(&E, caps[c], 100);
+    static uint8_t blk[512];
+    qp_esec st;
+    qp_enc_begin(&E, &st, 0);
+    uint8_t *p = blk + 8;
+    p += qp_enc_ifield(&E, &st, p, (const uint8_t *)"user-agent", 10, (const uint8_t *)"cursed", 6, 0);
+    size_t n = qp_enc_end(&E, &st, blk + 8, p, blk);
+    CHECK(n > 0 && st.ric == 1 && blk[0] == 2,
+          "capacity 0x%llx: the encoded Required Insert Count is 1 %% (2 * %llu) + 1", (unsigned long long)caps[c],
+          (unsigned long long)(caps[c] / 32));
+  }
+}
+
 int main(void) {
   test_rfc();
   test_live();
   test_encoder();
   test_enc_table();
+  test_enc_huge_capacity();
   printf("%s: %ld failures / %ld checks\n", fails ? "FAILED" : "PASS", fails, checks);
   return fails != 0;
 }

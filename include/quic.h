@@ -767,7 +767,7 @@ static inline uint64_t quic__new_cid(quic_conn *c, uint64_t seq, uint64_t rpt, c
 static inline int quic__is_reset(quic_conn *c, const uint8_t *d, size_t len) {
   if (len < 21 || (d[0] & 0x80)) return 0;
   for (int i = 0; i < c->npcid; i++)
-    if (c->pcid[i].has_token && !memcmp(d + len - 16, c->pcid[i].token, 16)) return 1;
+    if (c->pcid[i].has_token && ptls_mem_equal(d + len - 16, c->pcid[i].token, 16)) return 1; /* (constant time) */
   return 0;
 }
 
@@ -1622,6 +1622,7 @@ static inline size_t quic__on_retry(quic_conn *c, const uint8_t *p, const uint8_
   size_t tl = (size_t)(end - 16 - tok);
   uint8_t *t = c->ctx->alloc(NULL, tl);
   if (!t) return n;
+  if (c->token) c->ctx->alloc(c->token, 0); /* a NEW_TOKEN one from a resumption, replaced */
   c->token = t, c->token_len = (uint16_t)tl, memcpy(t, tok, tl);
   c->retried = 1, memcpy(c->rscid, scid, sl), c->rscid_len = (uint8_t)sl;
   memcpy(c->dcid, scid, sl), c->dcid_len = (uint8_t)sl;
@@ -1842,7 +1843,8 @@ static inline int quic__token_open(quic_ctx *x, const uint8_t *tok, size_t tl, c
  * a token through quic_accept_from (same addr), which checks it */
 static inline size_t quic_retry(quic_ctx *x, const uint8_t *d, size_t len, const void *addr, size_t alen, int64_t now,
                                 uint8_t *out, size_t cap) {
-  if (len < 7 || !(d[0] & 0x80) || quic__be32(d + 1) != QUIC_V1 || ((d[0] >> 4) & 3) != 0) return 0;
+  /* (an Initial in a datagram under 1200 bytes is dropped, RFC 9000 §14.1: else a Retry is a reflection amplifier) */
+  if (len < QUIC_MIN_INITIAL || !(d[0] & 0x80) || quic__be32(d + 1) != QUIC_V1 || ((d[0] >> 4) & 3) != 0) return 0;
   uint8_t dl = d[5];
   if (dl < 8 || dl > 20 || len < 7u + dl) return 0;
   uint8_t sl = d[6 + dl];
