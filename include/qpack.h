@@ -30,7 +30,13 @@
 #define QP_TABLE_MAX 4096
 #endif
 #define QP_ENT_MAX (QP_TABLE_MAX / 32)
-enum { QP_E_DECOMPRESSION = -1, QP_E_CALM = -2, QP_E_ENCODER = -3, QP_E_TRUNC = -4 /* internal: need more bytes */ };
+enum {
+  QP_E_DECOMPRESSION = -1,
+  QP_E_CALM = -2,
+  QP_E_ENCODER = -3,
+  QP_E_TRUNC = -4,  /* internal: need more bytes */
+  QP_E_BLOCKED = -5 /* the section needs inserts not yet received (Required Insert Count in blocked_ric) */
+};
 
 typedef struct {
   const char *n, *v;
@@ -155,7 +161,8 @@ typedef struct {
   uint32_t first, n; /* ring of the n newest entries; absolute index of ent[first] = inserted - n */
   uint32_t used;
   uint32_t fb_len;
-  uint8_t fb[256]; /* pending decoder-stream bytes */
+  uint64_t blocked_ric; /* QP_E_BLOCKED: the Insert Count the section waits for */
+  uint8_t fb[256];      /* pending decoder-stream bytes */
   qp_ent ent[QP_ENT_MAX];
   uint8_t store[2 * QP_TABLE_MAX];
 } qp_dec;
@@ -358,7 +365,10 @@ static inline int qp_decode_section(qp_dec *d, uint64_t stream_id, const uint8_t
     }
     if (ric == 0) return QP_E_DECOMPRESSION;
   }
-  if (ric > d->inserted) return QP_E_DECOMPRESSION; /* would block: we allow 0 blocked streams */
+  if (ric > d->inserted) { /* the caller holds it (within the blocked streams it allows) until the inserts come */
+    d->blocked_ric = ric;
+    return QP_E_BLOCKED;
+  }
   uint64_t base;
   if (!sign) base = ric + delta;
   else {

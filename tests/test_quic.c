@@ -201,7 +201,7 @@ static int64_t eat_all(quic_conn *c, uint64_t sid, uint64_t off, const uint8_t *
   (void)c, (void)sid, (void)off, (void)d, (void)fin, (void)u;
   return (int64_t)len;
 }
-static quic_ctx FX = { NULL, quic__default_alloc };
+static quic_ctx FX = { NULL, quic__default_alloc, { { NULL }, { 0 } }, { 0 }, { 0 } };
 static void fresh(quic_conn *c) {
   for (int i = 0; i < QUIC_MAX_STREAMS; i++)
     if (c->s[i].used) quic__stream_free(c, &c->s[i]);
@@ -318,10 +318,68 @@ static void test_accept_rfc(void) {
   printf("A.2 through quic_accept: %s\n", fails == before ? "ok" : "FAILED");
 }
 
+/* the peer's connection IDs: NEW_CONNECTION_ID stores them (to active_connection_id_limit), retire_prior_to retires
+ * the older ones (RETIRE_CONNECTION_ID queued, and the one in use replaced by the oldest left); a stateless reset
+ * ends the connection only with a token we were given */
+static size_t ncid(uint8_t *f, uint64_t seq, uint64_t rpt, uint8_t idbyte, uint8_t tokbyte) {
+  uint8_t *p = f;
+  *p++ = 0x18, p = quic__put_vi(p, seq), p = quic__put_vi(p, rpt), *p++ = 8;
+  memset(p, idbyte, 8), p += 8, memset(p, tokbyte, 16), p += 16;
+  return (size_t)(p - f);
+}
+static void test_cids(void) {
+  long before = fails;
+  static quic_conn C;
+  uint8_t f[64];
+  fresh(&C);
+  memset(C.dcid, 0xa0, 8), C.dcid_len = 8;
+  quic__pcid_first(&C);
+  CHECK(frames(&C, QUIC_SP_APP, f, ncid(f, 1, 0, 0xa1, 0x11)) == 0 && C.npcid == 2 && C.nretire == 0,
+        "NEW_CONNECTION_ID 1 stored (%d)", C.npcid);
+  CHECK(frames(&C, QUIC_SP_APP, f, ncid(f, 1, 0, 0xa1, 0x11)) == 0 && C.npcid == 2, "a repeat is fine");
+  CHECK(frames(&C, QUIC_SP_APP, f, ncid(f, 2, 2, 0xa2, 0x22)) == 0 && C.npcid == 1 && C.nretire == 2,
+        "retire_prior_to 2: 0 and 1 retired (%d left, %d to retire)", C.npcid, C.nretire);
+  CHECK(C.pcid_seq == 2 && C.dcid[0] == 0xa2 && C.dcid_len == 8, "the DCID in use moved to seq 2");
+  CHECK(frames(&C, QUIC_SP_APP, f, ncid(f, 1, 0, 0xa1, 0x11)) == 0 && C.npcid == 1 && C.nretire == 2,
+        "a late seq 1 is retired again, once");
+  for (int k = 3; k <= 5; k++) frames(&C, QUIC_SP_APP, f, ncid(f, (uint64_t)k, 2, (uint8_t)(0xa0 + k), 0x30));
+  CHECK(C.npcid == QUIC_PEER_CIDS && !C.closing, "%d stored", C.npcid);
+  CHECK(frames(&C, QUIC_SP_APP, f, ncid(f, 6, 2, 0xa6, 0x66)) == QUIC_CONNECTION_ID_LIMIT_ERROR,
+        "one over active_connection_id_limit");
+  fresh(&C), memset(C.dcid, 0xa0, 8), C.dcid_len = 8, quic__pcid_first(&C);
+  frames(&C, QUIC_SP_APP, f, ncid(f, 1, 0, 0xa1, 0x11));
+  CHECK(frames(&C, QUIC_SP_APP, f, ncid(f, 1, 0, 0xb1, 0x11)) == QUIC_PROTOCOL_VIOLATION,
+        "the same sequence number for another ID");
+  /* RETIRE_CONNECTION_ID goes out, and comes back if lost */
+  fresh(&C), memset(C.dcid, 0xa0, 8), C.dcid_len = 8, quic__pcid_first(&C);
+  frames(&C, QUIC_SP_APP, f, ncid(f, 1, 1, 0xa1, 0x11));
+  CHECK(C.nretire == 1, "seq 0 to retire");
+  quic_sent r = { 0 };
+  uint8_t out[64], *e = quic__app_frames(&C, out, out + sizeof out, &r, 1);
+  CHECK(e - out >= 2 && out[0] == 0x19 && out[1] == 0 && C.nretire == 0 && r.nf == 1 && r.f[0].type == QF_RETIRE_CID,
+        "RETIRE_CONNECTION_ID 0 sent");
+  quic__frame_lost(&C, &C.sp[QUIC_SP_APP], &r.f[0]);
+  CHECK(C.nretire == 1 && C.retire_q[0] == 0, "and queued again when lost");
+  /* stateless reset: the token of a stored ID; a random one is not */
+  uint8_t d[43];
+  memset(d, 0x55, sizeof d), d[0] = 0x45, memset(d + sizeof d - 16, 0x11, 16);
+  C.closing = C.draining = 0;
+  quic_recv(&C, d, sizeof d, 1000);
+  CHECK(C.draining && C.reset && !C.closing, "a stateless reset closes, quietly");
+  fresh(&C), memset(C.dcid, 0xa0, 8), C.dcid_len = 8, quic__pcid_first(&C);
+  frames(&C, QUIC_SP_APP, f, ncid(f, 1, 0, 0xa1, 0x11));
+  memset(d + sizeof d - 16, 0x12, 16);
+  quic_recv(&C, d, sizeof d, 1000);
+  CHECK(!C.draining && !C.reset, "an unknown token is just an undecryptable datagram");
+  fresh(&C);
+  printf("connection IDs and stateless reset: %s\n", fails == before ? "ok" : "FAILED");
+}
+
 int main(void) {
   test_rfc9001();
   test_accept_rfc();
   test_frames();
+  test_cids();
   test_blocks();
   printf("%s: %ld failures / %ld checks\n", fails ? "FAILED" : "PASS", fails, checks);
   return fails != 0;

@@ -83,7 +83,7 @@ $(H2B)/h2_server: examples/h2_server.c $(H2HDRS)
 
 $(H2B)/h2_client: examples/h2_client.c $(H2HDRS)
 	@mkdir -p $(H2B)
-	$(CC) -O2 $(WARN) -Iinclude $< -o $@
+	$(CC) -O2 $(WARN) -Iinclude $< -lssl -lcrypto -o $@
 $(H2B)/h2spec:
 	cd $(TP)/h2spec && CGO_ENABLED=0 go build -o $(abspath $@) ./cmd/h2spec
 h2spec: $(H2B)/h2_server $(H2B)/h2spec

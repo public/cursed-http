@@ -145,7 +145,8 @@ typedef struct {
   uint32_t id;
   uint8_t state, flags;
   uint16_t trailer_len;
-  uint8_t cflags; /* H2_CS_* */
+  uint8_t cflags;               /* H2_CS_* */
+  uint8_t urgency, incremental; /* RFC 9218: lower urgency is served first; incremental ones are interleaved */
   int32_t send_win;
   uint32_t recv_unacked;
   int64_t content_length, data_seen;
@@ -279,12 +280,13 @@ static inline void h2_init(h2_conn *c, const h2_callbacks *cb, void *user) {
   hp_dec_init(&c->dec, 4096);
   hp_enc_init(&c->enc, 4096), hp_enc_resize(&c->enc, 0); /* responses never index */
   /* server preface: SETTINGS, then the connection window raised once */
-  uint8_t st[18];
-  const uint16_t id[3] = { 0x3 /* MAX_CONCURRENT_STREAMS */, 0x6 /* MAX_HEADER_LIST_SIZE */, 0x2 /* ENABLE_PUSH */ };
-  const uint32_t v[3] = { H2_MAX_STREAMS, H2_MAX_LIST, 0 };
-  for (int i = 0; i < 3; i++)
+  uint8_t st[24];
+  const uint16_t id[4] = { 0x3 /* MAX_CONCURRENT_STREAMS */, 0x6 /* MAX_HEADER_LIST_SIZE */, 0x2 /* ENABLE_PUSH */,
+                           0x9 /* NO_RFC7540_PRIORITIES: RFC 9218's instead */ };
+  const uint32_t v[4] = { H2_MAX_STREAMS, H2_MAX_LIST, 0, 1 };
+  for (int i = 0; i < 4; i++)
     st[6 * i] = (uint8_t)(id[i] >> 8), st[6 * i + 1] = (uint8_t)id[i], h2__put32(st + 6 * i + 2, v[i]);
-  h2__ctrl(c, H2F_SETTINGS, 0, 0, st, 18);
+  h2__ctrl(c, H2F_SETTINGS, 0, 0, st, 24);
   h2__window_update(c, 0, H2_CONN_WINDOW - 65535);
 }
 
@@ -305,12 +307,13 @@ static inline void h2_init_client(h2_conn *c, const h2_callbacks *cb, void *user
   hp_enc_init(&c->enc, 4096); /* the peer's default SETTINGS_HEADER_TABLE_SIZE */
   uint8_t *p = h2__stage(c, 24);
   memcpy(p, "PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n", 24);
-  uint8_t st[18];
-  const uint16_t id[3] = { 0x2 /* ENABLE_PUSH */, 0x4 /* INITIAL_WINDOW_SIZE */, 0x6 /* MAX_HEADER_LIST_SIZE */ };
-  const uint32_t v[3] = { 0, H2_CLIENT_WINDOW, H2_CLIENT_MAX_LIST };
-  for (int i = 0; i < 3; i++)
+  uint8_t st[24];
+  const uint16_t id[4] = { 0x2 /* ENABLE_PUSH */, 0x4 /* INITIAL_WINDOW_SIZE */, 0x6 /* MAX_HEADER_LIST_SIZE */,
+                           0x9 /* NO_RFC7540_PRIORITIES */ };
+  const uint32_t v[4] = { 0, H2_CLIENT_WINDOW, H2_CLIENT_MAX_LIST, 1 };
+  for (int i = 0; i < 4; i++)
     st[6 * i] = (uint8_t)(id[i] >> 8), st[6 * i + 1] = (uint8_t)id[i], h2__put32(st + 6 * i + 2, v[i]);
-  h2__ctrl(c, H2F_SETTINGS, 0, 0, st, 18);
+  h2__ctrl(c, H2F_SETTINGS, 0, 0, st, 24);
   h2__window_update(c, 0, H2_CONN_WINDOW - 65535);
 }
 
@@ -424,7 +427,7 @@ static inline int h2__header_block(h2_conn *c, h2_scratch *sc, uint32_t sid, uin
     }
   if (!s) return h2__fail(c, H2_INTERNAL_ERROR); /* cannot happen while nactive < H2_MAX_STREAMS */
   memset(s, 0, offsetof(h2_stream, trailer));
-  s->id = sid, s->state = H2S_ACTIVE;
+  s->id = sid, s->state = H2S_ACTIVE, s->urgency = H_URGENCY_DEFAULT;
   s->send_win = (int32_t)c->peer_initial_window;
   c->nactive++;
   h2_request rq;
@@ -450,6 +453,9 @@ static inline int h2__header_block(h2_conn *c, h2_scratch *sc, uint32_t sid, uin
     else h2_reset(c, sid, H2_NO_ERROR); /* §8.1: done with the request body too */
     return 0;
   }
+  for (int i = 0; i < rq.nfields; i++) /* the priority field (RFC 9218 §5) */
+    if (h_eq(rq.fields[i].name, rq.fields[i].nlen, "priority"))
+      h_priority_parse(rq.fields[i].value, rq.fields[i].vlen, &s->urgency, &s->incremental);
   if (c->cb.on_request && c->cb.on_request(c, sid, &rq, end, c->user) && h2__find(c, sid))
     h2_reset(c, sid, H2_INTERNAL_ERROR);
   return 0;
@@ -655,7 +661,15 @@ static inline int h2__frame(h2_conn *c, h2_scratch *sc, const uint8_t *p, size_t
       return 13;
     }
     case H2F_CONTINUATION: return h2__fail(c, H2_PROTOCOL_ERROR); /* without a HEADERS before it */
-    default: return (int)(9 + len);                               /* unknown types are ignored (§4.1) */
+    case 0x10: { /* PRIORITY_UPDATE (RFC 9218 §7.1): a client's, on stream 0, for a request stream */
+      if (c->client || sid || len < 4) return h2__fail(c, H2_PROTOCOL_ERROR);
+      uint32_t ps = h2__be32(pl) & 0x7fffffff;
+      if (!ps || !(ps & 1)) return h2__fail(c, H2_PROTOCOL_ERROR);
+      h2_stream *s = h2__find(c, ps); /* (one not open yet, or gone: nothing to do) */
+      if (s) h_priority_parse(pl + 4, len - 4, &s->urgency, &s->incremental);
+      return (int)(9 + len);
+    }
+    default: return (int)(9 + len); /* unknown types are ignored (§4.1) */
   }
 }
 
@@ -774,7 +788,7 @@ static inline int h2_submit(h2_conn *c, const h2_request *rq, const uint8_t *bod
   int r = h2__stage_block(c, sid, blk, (size_t)(p - blk), headers_end ? H2_FL_END_STREAM : 0);
   if (r) return r;
   memset(s, 0, offsetof(h2_stream, trailer));
-  s->id = sid, s->state = H2S_ACTIVE, s->flags = H2_ST_RESPONDED; /* our header section is out */
+  s->id = sid, s->state = H2S_ACTIVE, s->flags = H2_ST_RESPONDED, s->urgency = H_URGENCY_DEFAULT; /* headers out */
   s->send_win = (int32_t)c->peer_initial_window, s->content_length = -1;
   if (h_eq(rq->method, rq->method_len, "HEAD")) s->cflags |= H2_CS_HEAD;
   c->nactive++, c->last_sid = sid, c->next_sid += 2;
@@ -785,6 +799,16 @@ static inline int h2_submit(h2_conn *c, const h2_request *rq, const uint8_t *bod
     h2__enqueue(c, s);
   }
   return (int)sid;
+}
+/* client: change a request's priority (RFC 9218 PRIORITY_UPDATE); 0, or H2_E_STATE / H2_E_AGAIN */
+static inline int h2_priority_update(h2_conn *c, uint32_t sid, int urgency, int incremental) {
+  if (!c->client || c->closed || !(sid & 1)) return H2_E_STATE;
+  uint8_t pl[12];
+  h2__put32(pl, sid);
+  size_t n = 4 + h_priority_value((char *)pl + 4, urgency, incremental);
+  if (!h2__stage_room(c, 9 + n)) return H2_E_AGAIN;
+  h2__ctrl(c, 0x10, 0, 0, pl, (uint32_t)n);
+  return 0;
 }
 static inline int h2_data(h2_conn *c, uint32_t sid, const uint8_t *body, size_t len, int end) {
   h2_stream *s = h2__find(c, sid);
@@ -833,6 +857,21 @@ static inline size_t h2_send(h2_conn *c, uint8_t *out, size_t cap) {
   /* DATA from the send queue, round-robin, within the flow-control windows: each stream gets one
    * frame per turn and goes to the back while it has more */
   for (uint32_t idle = 0; c->qn && idle < c->qn && w + 9 < cap;) {
+    /* the most urgent queued stream to the head (RFC 9218 §10): lowest urgency; at the same urgency the
+     * non-incremental in stream order, one at a time, then the incremental round-robin (ring order). idle > 0
+     * means the head was blocked: then plain ring order, so every stream gets its turn to be found blocked */
+    if (!idle && c->qn > 1) {
+      uint32_t best = 0;
+      uint64_t bk = UINT64_MAX;
+      for (uint32_t k = 0; k < c->qn; k++) {
+        const h2_stream *t = &c->s[c->q[(c->qh + k) % H2_MAX_STREAMS]];
+        uint64_t key = (uint64_t)t->urgency << 40 | (uint64_t)t->incremental << 39 | (t->incremental ? k : t->id);
+        if (key < bk) bk = key, best = k;
+      }
+      uint32_t hi = c->qh, bi = (c->qh + best) % H2_MAX_STREAMS;
+      uint16_t tmp = c->q[hi];
+      c->q[hi] = c->q[bi], c->q[bi] = tmp;
+    }
     h2_stream *s = &c->s[c->q[c->qh]];
     c->qh = (c->qh + 1) % H2_MAX_STREAMS, c->qn--;
     s->flags &= (uint8_t)~H2_ST_QUEUED;

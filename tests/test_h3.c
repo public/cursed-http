@@ -136,13 +136,23 @@ static sbuf *inbuf(int64_t id) {
   IN[nin] = (sbuf){ id, NULL, 0, 0, 0, 0 };
   return &IN[nin++];
 }
+static int deliver(h3_conn *s, sbuf *b);
+/* streams whose QPACK inserts just arrived: their bytes again, as a transport would offer them */
+static int redeliver(h3_conn *s) {
+  uint64_t ub[H3_QPACK_BLOCKED];
+  for (int n; (n = h3_unblocked(s, ub, H3_QPACK_BLOCKED)) > 0;)
+    for (int i = 0; i < n; i++)
+      if (deliver(s, inbuf((int64_t)ub[i])) < 0) return -1;
+  return 0;
+}
 static int deliver(h3_conn *s, sbuf *b) {
+  if (redeliver(s)) return -1;
   for (;;) {
     size_t lim = b->n;
     int fin = b->fin;
     if (lim > 1 && rnd() % 3 == 0) lim = 1 + rnd() % lim, fin = 0;
     int r = h3_recv(s, &SC, (uint64_t)b->id, b->off, b->p, lim, fin && lim == b->n);
-    if (r < 0) return r;
+    if (r < 0 || redeliver(s)) return r < 0 ? r : -1;
     memmove(b->p, b->p + r, b->n - (size_t)r), b->n -= (size_t)r, b->off += (uint64_t)r;
     if (fin && !b->n) b->fin = 2; /* fin delivered */
     if (!r && lim == b->n) return 0;

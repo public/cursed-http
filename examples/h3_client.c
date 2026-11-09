@@ -1,9 +1,10 @@
 /* examples/h3_client.c: a minimal HTTP/3 client on include/quic.h + include/h3.h over UDP.
- *   ./h3_client host port [-n COUNT] [-b BODY_BYTES] [-H] [-k] path...
+ *   ./h3_client host port [-n COUNT] [-b BODY_BYTES] [-H] [-k] [-r FILE] path...
  * Sends every path COUNT times on one connection (up to the server's stream limit at a time), then prints one
  * line per response: "<status> <body bytes> <trailers>", and exits 0 if every stream ended without an error.
  * -H: HEAD. -b: a POST body of that many bytes. -k: do not verify the server's certificate (else it must chain to
- * the system's trust store and match host). Not a production client: one connection, no 0-RTT, poll(). */
+ * the system's trust store and match host). -r: resume from FILE (session ticket, 0-RTT, address token) if it
+ * holds one, and save what the next run resumes with there. Not a production client: one connection, poll(). */
 #include <netdb.h>
 #include <poll.h>
 #include <stdio.h>
@@ -95,6 +96,9 @@ static int64_t q_on_stream(quic_conn *q, uint64_t sid, uint64_t off, const uint8
   (void)q, (void)u;
   if (!ready) return 0;
   int r = h3_recv(&H, &SC, sid, off, d, len, fin);
+  uint64_t ub[H3_QPACK_BLOCKED]; /* streams whose QPACK inserts just arrived: their bytes again */
+  for (int n; r >= 0 && (n = h3_unblocked(&H, ub, H3_QPACK_BLOCKED)) > 0;)
+    for (int i = 0; i < n; i++) quic_stream_redeliver(q, ub[i]);
   return r < 0 ? -(int64_t)h3_error(&H) : r;
 }
 static size_t q_send(quic_conn *q, uint64_t sid, uint8_t *out, size_t cap, int *fin, void *u) {
@@ -120,21 +124,23 @@ static void q_established(quic_conn *q, void *u) {
   ready = 1;
   submit_more();
 }
-static const quic_callbacks QCB = { q_on_stream, q_send, q_wants, q_reset, q_established };
+static const quic_callbacks QCB = { q_on_stream, q_send, q_wants, q_reset, q_established, NULL };
 
 int main(int argc, char **argv) {
   if (argc < 4) {
-    fprintf(stderr, "usage: %s host port [-n COUNT] [-b BODY_BYTES] [-H] [-k] path...\n", argv[0]);
+    fprintf(stderr, "usage: %s host port [-n COUNT] [-b BODY_BYTES] [-H] [-k] [-r FILE] path...\n", argv[0]);
     return 2;
   }
   HOST = argv[1];
   const char *port = argv[2];
   int count = 1, ai = 3, insecure = 0;
+  const char *resume_file = NULL;
   for (; ai < argc && argv[ai][0] == '-'; ai++) {
     if (!strcmp(argv[ai], "-n") && ai + 1 < argc) count = atoi(argv[++ai]);
     else if (!strcmp(argv[ai], "-b") && ai + 1 < argc) upload = atol(argv[++ai]), METHOD = "POST";
     else if (!strcmp(argv[ai], "-H")) METHOD = "HEAD";
     else if (!strcmp(argv[ai], "-k")) insecure = 1;
+    else if (!strcmp(argv[ai], "-r") && ai + 1 < argc) resume_file = argv[++ai];
   }
   npaths = argc - ai, PATHS = argv + ai, total = npaths * count;
   if (npaths <= 0 || total > MAXR) return 2;
@@ -158,10 +164,16 @@ int main(int argc, char **argv) {
   }
   static quic_ctx qx;
   quic_ctx_init(&qx, &tls);
-  if (quic_connect(&Q, &qx, HOST, now_ms(), &QCB, NULL)) {
+  quic_ctx_resumption(&qx);
+  static quic_resume from, next; /* (a POST must not go in 0-RTT: it could be replayed, RFC 8470) */
+  FILE *rf = resume_file ? fopen(resume_file, "rb") : NULL;
+  int have = rf && fread(&from, sizeof from, 1, rf) == 1 && !upload;
+  if (rf) fclose(rf);
+  if (quic_connect_resume(&Q, &qx, HOST, now_ms(), &QCB, NULL, have ? &from : NULL)) {
     fprintf(stderr, "quic_connect failed\n");
     return 1;
   }
+  Q.resume_out = &next;
   uint8_t buf[2048];
   while (ndone < total && !quic_is_closed(&Q, now_ms())) {
     submit_more();
@@ -183,6 +195,12 @@ int main(int argc, char **argv) {
   for (int i = 0; i < total; i++)
     R[i].err ? printf("%d %ld %d (reset 0x%llx)\n", R[i].status, R[i].body, R[i].trailers, (unsigned long long)R[i].err)
              : printf("%d %ld %d\n", R[i].status, R[i].body, R[i].trailers);
+  if (resume_file && next.ticket_len) { /* the server's resumption state, for the next run */
+    if (!next.token_len && have) memcpy(next.token, from.token, from.token_len), next.token_len = from.token_len;
+    FILE *wf = fopen(resume_file, "wb");
+    if (wf) fwrite(&next, sizeof next, 1, wf), fclose(wf);
+  }
+  if (Q.zrtt_sent) fprintf(stderr, "0-RTT: %d packets\n", Q.zrtt_sent);
   quic_close(&Q, H3_NO_ERROR);
   size_t n = quic_send(&Q, buf, sizeof buf, now_ms());
   if (n) send(fd, buf, n, 0);

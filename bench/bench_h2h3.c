@@ -627,6 +627,10 @@ static int h3o_feed(h3_conn *c, sbuf *b) {
   while (b->n || b->fin == 1) {
     int r = h3_recv(c, &H3SC, (uint64_t)b->id, b->off, b->p, b->n, b->fin == 1);
     if (r < 0) return -1;
+    uint64_t ub[H3_QPACK_BLOCKED]; /* streams whose QPACK inserts just arrived: their bytes again */
+    for (int n; (n = h3_unblocked(c, ub, H3_QPACK_BLOCKED)) > 0;)
+      for (int i = 0; i < n; i++)
+        if (h3o_feed(c, sb_get((int64_t)ub[i]))) return -1;
     memmove(b->p, b->p + r, b->n - (size_t)r), b->n -= (size_t)r, b->off += (uint64_t)r;
     if (b->fin == 1 && !b->n) b->fin = 2;
     if (!r) break;

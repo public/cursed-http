@@ -204,11 +204,14 @@ static cb_sbuf *sb_of(cb_h3c *x, int side, int64_t sid) {
 static void h3_in(cb_h3c *x, h3_conn *c, int side, int64_t sid, const uint8_t *d, size_t n, int fin) {
   cb_sbuf *b = sb_of(x, side, sid);
   if (b->n + n > b->cap) b->cap = (b->n + n) * 2 + 4096, b->p = (uint8_t *)realloc(b->p, b->cap);
-  memcpy(b->p + b->n, d, n), b->n += n;
+  if (n) memcpy(b->p + b->n, d, n), b->n += n;
   if (fin) b->fin = 1;
   while (b->n || b->fin == 1) {
     int r = h3_recv(c, &x->sc, (uint64_t)sid, b->off, b->p, b->n, b->fin == 1);
     if (r < 0) abort();
+    uint64_t ub[H3_QPACK_BLOCKED]; /* streams whose QPACK inserts just arrived: their bytes again */
+    for (int n; (n = h3_unblocked(c, ub, H3_QPACK_BLOCKED)) > 0;)
+      for (int i = 0; i < n; i++) h3_in(x, c, side, (int64_t)ub[i], NULL, 0, 0);
     memmove(b->p, b->p + r, b->n - (size_t)r), b->n -= (size_t)r, b->off += (uint64_t)r;
     if (b->fin == 1 && !b->n) b->fin = 2;
     if (!r) break;

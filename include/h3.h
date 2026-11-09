@@ -52,8 +52,11 @@
 #ifndef H3_MAX_SECTION
 #define H3_MAX_SECTION 65536 /* largest HEADERS frame payload accepted */
 #endif
-#define H3_MAX_LIST   16384 /* SETTINGS_MAX_FIELD_SECTION_SIZE we advertise */
-#define H3_QPACK_CAP  4096  /* SETTINGS_QPACK_MAX_TABLE_CAPACITY we advertise */
+#define H3_MAX_LIST  16384 /* SETTINGS_MAX_FIELD_SECTION_SIZE we advertise */
+#define H3_QPACK_CAP 4096  /* SETTINGS_QPACK_MAX_TABLE_CAPACITY we advertise */
+#ifndef H3_QPACK_BLOCKED
+#define H3_QPACK_BLOCKED 16 /* SETTINGS_QPACK_BLOCKED_STREAMS we advertise */
+#endif
 #define H3_MAX_FIELDS 256
 
 enum { H3_E_CLOSED = -1, H3_E_AGAIN = -2, H3_E_STATE = -3, H3_E_TOO_BIG = -4 };
@@ -122,7 +125,9 @@ typedef struct {
   uint64_t data_left, skip_left; /* rest of the DATA / unknown frame being received */
   int64_t content_length, data_seen;
   uint16_t hdr_len, hdr_off, trl_len, trl_off;
-  uint8_t spill; /* the header frame is in the connection's spill area, at spill_at */
+  uint8_t spill;                /* the header frame is in the connection's spill area, at spill_at */
+  uint64_t blocked_ric;         /* its header section waits for this many QPACK inserts (0: not blocked) */
+  uint8_t urgency, incremental; /* RFC 9218 (h3_stream_priority) */
   uint32_t spill_at;
   const uint8_t *body;
   size_t body_len, body_off;
@@ -147,6 +152,9 @@ struct h3_conn {
    * h3_pending when it finds nothing): h3_pending visits these instead of every slot */
   uint64_t outq[(H3_MAX_STREAMS + 63) / 64];
   uint32_t spill_used, spill_users; /* bytes allocated in spill (reset once no stream holds any), holders */
+  uint32_t nblocked, nunblocked;    /* streams blocked on QPACK inserts; unblocked, for h3_unblocked */
+  uint64_t blocked_total;           /* header sections that had to wait for inserts (a statistic) */
+  uint64_t unblocked[H3_QPACK_BLOCKED];
   qp_dec qd;
   h3_stream s[H3_MAX_STREAMS];
   qp_enc qe; /* a client's request encoder (a server's has no table: responses use the static table) */
@@ -156,6 +164,13 @@ struct h3_conn {
 };
 
 static inline uint64_t h3_error(const h3_conn *c) { return c->error; }
+/* request streams whose header section was waiting for QPACK inserts that have now arrived: the transport must
+ * offer their bytes again (quic_stream_redeliver). Returns how many it wrote to sids (at most max) */
+static inline int h3_unblocked(h3_conn *c, uint64_t *sids, int max) {
+  int n = 0;
+  while (c->nunblocked && n < max) sids[n++] = c->unblocked[--c->nunblocked];
+  return n;
+}
 
 /* QUIC varint encode */
 static inline uint8_t *h3__put_vi(uint8_t *p, uint64_t v) {
@@ -194,6 +209,7 @@ static inline void h3__unspill(h3_conn *c, h3_stream *s) {
 static inline void h3__close(h3_conn *c, h3_stream *s, uint64_t err) {
   uint64_t id = s->id;
   h3__unspill(c, s);
+  if (s->blocked_ric) s->blocked_ric = 0, c->nblocked--, qp_dec_cancel(&c->qd, id); /* Stream Cancellation */
   s->active = 0, s->body = NULL;
   if (c->cb.on_close) c->cb.on_close(c, id, err, c->user);
 }
@@ -218,9 +234,9 @@ static inline void h3_init(h3_conn *c, const h3_callbacks *cb, void *user, uint6
   for (int i = 0; i < H3_MAX_STREAMS; i++) c->s[i].active = 0;
   /* control stream: type 0x00, then SETTINGS */
   uint8_t st[32], *q = st;
-  q = h3__put_vi(q, 0x01), q = h3__put_vi(q, H3_QPACK_CAP); /* QPACK_MAX_TABLE_CAPACITY */
-  q = h3__put_vi(q, 0x07), q = h3__put_vi(q, 0);            /* QPACK_BLOCKED_STREAMS */
-  q = h3__put_vi(q, 0x06), q = h3__put_vi(q, H3_MAX_LIST);  /* MAX_FIELD_SECTION_SIZE */
+  q = h3__put_vi(q, 0x01), q = h3__put_vi(q, H3_QPACK_CAP);     /* QPACK_MAX_TABLE_CAPACITY */
+  q = h3__put_vi(q, 0x07), q = h3__put_vi(q, H3_QPACK_BLOCKED); /* QPACK_BLOCKED_STREAMS */
+  q = h3__put_vi(q, 0x06), q = h3__put_vi(q, H3_MAX_LIST);      /* MAX_FIELD_SECTION_SIZE */
   uint8_t *p = c->ctrl;
   *p++ = 0x00;
   p = h3__put_vi(p, H3F_SETTINGS), p = h3__put_vi(p, (uint64_t)(q - st));
@@ -277,11 +293,21 @@ static inline int h3__response(h3_conn *c, h3_scratch *sc, h3_stream *s, uint64_
   return 0;
 }
 
+#define H3__BLOCKED 1 /* h3__headers: the section is blocked */
 static inline int h3__headers(h3_conn *c, h3_scratch *sc, h3_stream *s, uint64_t sid, const uint8_t *pl, size_t n,
                               int end) {
   int hfl;
   int k =
       qp_decode_section(&c->qd, sid, pl, n, sc->f, H3_MAX_FIELDS / 2, sc->arena, sizeof sc->arena, H3_MAX_LIST, &hfl);
+  if (k == QP_E_BLOCKED) { /* held (its bytes stay with the transport) until the encoder stream catches up */
+    if (!s->blocked_ric) {
+      if (c->nblocked >= H3_QPACK_BLOCKED) return h3__fail(c, QPACK_DECOMPRESSION_FAILED); /* over our limit */
+      c->nblocked++, c->blocked_total++;
+    }
+    s->blocked_ric = c->qd.blocked_ric;
+    return H3__BLOCKED;
+  }
+  if (s->blocked_ric) s->blocked_ric = 0, c->nblocked--;
   if (k == QP_E_DECOMPRESSION) return h3__fail(c, QPACK_DECOMPRESSION_FAILED);
   if (k < 0) return h3__fail(c, H3_EXCESSIVE_LOAD);
   if (c->client) return h3__response(c, sc, s, sid, k, hfl, end);
@@ -308,6 +334,9 @@ static inline int h3__headers(h3_conn *c, h3_scratch *sc, h3_stream *s, uint64_t
     return 0;
   }
   if (end) s->flags |= H3_ST_REMOTE_END;
+  for (int i = 0; i < rq.nfields; i++) /* the priority field (RFC 9218 §5) */
+    if (h_eq(rq.fields[i].name, rq.fields[i].nlen, "priority"))
+      h_priority_parse(rq.fields[i].value, rq.fields[i].vlen, &s->urgency, &s->incremental);
   if (c->cb.on_request && c->cb.on_request(c, sid, &rq, end, c->user) && h3__find(c, sid))
     h3__reset(c, s, sid, H3_INTERNAL_ERROR);
   return 0;
@@ -357,7 +386,7 @@ static inline int h3__request_stream(h3_conn *c, h3_scratch *sc, uint64_t sid, u
       return (int)len;
     }
     memset(s, 0, offsetof(h3_stream, hdr));
-    s->id = sid, s->active = 1, s->content_length = -1;
+    s->id = sid, s->active = 1, s->content_length = -1, s->urgency = H_URGENCY_DEFAULT;
   }
   size_t pos = 0;
   while (pos < len) {
@@ -404,6 +433,7 @@ static inline int h3__request_stream(h3_conn *c, h3_scratch *sc, uint64_t sid, u
       if (len - pos - hl < flen) break; /* wait for the whole frame */
       int end = fin && pos + hl + flen == len;
       int r = h3__headers(c, sc, s, sid, buf + pos + hl, (size_t)flen, end && !(s->flags & H3_ST_GOT_HEADERS));
+      if (r == H3__BLOCKED) return (int)pos; /* the frame and what follows: offered again (h3_unblocked) */
       if (r < 0) return r;
       pos += hl + (size_t)flen;
       if (!(s = h3__find(c, sid))) return (int)len; /* reset, or (a client's) ended */
@@ -447,6 +477,22 @@ static inline int h3__control(h3_conn *c, const uint8_t *buf, size_t len) {
     if (!c->got_settings && type != H3F_SETTINGS) return h3__fail(c, H3_MISSING_SETTINGS);
     if (type == H3F_DATA || type == H3F_HEADERS || type == H3F_PUSH_PROMISE || h3__reserved_h2(type))
       return h3__fail(c, H3_FRAME_UNEXPECTED);
+    if (type == 0xf0700 || type == 0xf0701) { /* PRIORITY_UPDATE (RFC 9218 §7.2): a client's, for a request */
+      if (c->client) return h3__fail(c, H3_FRAME_UNEXPECTED);
+      if (flen > 4096) return h3__fail(c, H3_EXCESSIVE_LOAD);
+      if (len - pos - hl < flen) break;
+      const uint8_t *p = buf + pos + hl, *e = p + flen;
+      uint64_t id;
+      int x = h3__vi(p, e, &id);
+      if (!x) return h3__fail(c, H3_FRAME_ERROR);
+      if (type == 0xf0700) { /* (a push's: we never push) */
+        if ((id & 3) != 0) return h3__fail(c, H3_ID_ERROR);
+        h3_stream *s = h3__find(c, id); /* (one not open yet, or gone: nothing to do) */
+        if (s) h_priority_parse(p + x, (size_t)(e - p - x), &s->urgency, &s->incremental);
+      }
+      pos += hl + (size_t)flen;
+      continue;
+    }
     if (type == H3F_SETTINGS || type == H3F_GOAWAY || type == H3F_MAX_PUSH_ID || type == H3F_CANCEL_PUSH) {
       if (flen > 4096) return h3__fail(c, H3_EXCESSIVE_LOAD);
       if (len - pos - hl < flen) break;
@@ -529,6 +575,14 @@ static inline int h3_recv(h3_conn *c, h3_scratch *sc, uint64_t sid, uint64_t off
   else if (which == 1) {
     r = qp_dec_encoder(&c->qd, buf + pos, len - pos);
     if (r < 0) return h3__fail(c, QPACK_ENCODER_STREAM_ERROR);
+    if (c->nblocked) /* the streams whose sections can now be decoded: for h3_unblocked */
+      for (int i = 0; i < H3_MAX_STREAMS; i++) {
+        h3_stream *s = &c->s[i];
+        if (!s->active || !s->blocked_ric || s->blocked_ric > c->qd.inserted) continue;
+        int dup = 0;
+        for (uint32_t k = 0; k < c->nunblocked; k++) dup |= c->unblocked[k] == s->id;
+        if (!dup && c->nunblocked < H3_QPACK_BLOCKED) c->unblocked[c->nunblocked++] = s->id;
+      }
   } else r = h3__decoder_stream(c, buf + pos, len - pos);
   if (r < 0) return r;
   if (fin) return h3__fail(c, H3_CLOSED_CRITICAL_STREAM); /* critical streams never end */
@@ -621,7 +675,7 @@ static inline int h3_submit(h3_conn *c, uint64_t sid, const h_request *rq, const
   size_t hl = (size_t)(q - hdr);
   if (blk == small && hl + bl > sizeof s->hdr) return H3_E_TOO_BIG; /* (need bounds it: not reached) */
   memset(s, 0, offsetof(h3_stream, hdr));
-  s->id = sid, s->active = 1, s->content_length = -1;
+  s->id = sid, s->active = 1, s->content_length = -1, s->urgency = H_URGENCY_DEFAULT;
   memcpy(blk + 16 - hl, hdr, hl);
   if (blk == small) memcpy(s->hdr, blk + 16 - hl, hl + bl);
 #if H3_CLIENT_SPILL
@@ -632,6 +686,24 @@ static inline int h3_submit(h3_conn *c, uint64_t sid, const h_request *rq, const
   s->body = body ? body : (const uint8_t *)"", s->body_len = body ? len : 0, s->body_off = 0;
   if (end) s->flags |= H3_ST_BODY_END;
   h3__want(c, s);
+  return 0;
+}
+/* a request stream's priority for the transport's scheduler (quic_callbacks.stream_priority): urgency << 1 |
+ * incremental, from its priority field or a PRIORITY_UPDATE; the default (3, not incremental) for others */
+static inline int h3_stream_priority(h3_conn *c, uint64_t sid) {
+  h3_stream *s = (sid & 3) == 0 ? h3__find(c, sid) : NULL;
+  return s ? s->urgency << 1 | s->incremental : H_URGENCY_DEFAULT << 1;
+}
+/* client: change a request's priority (RFC 9218 PRIORITY_UPDATE, on our control stream); 0, or H3_E_STATE /
+ * H3_E_AGAIN (the control stream's buffer is full: send, then again) */
+static inline int h3_priority_update(h3_conn *c, uint64_t sid, int urgency, int incremental) {
+  if (!c->client || c->error || (sid & 3) != 0) return H3_E_STATE;
+  if (c->ctrl_off == c->ctrl_len) c->ctrl_off = c->ctrl_len = 0; /* all sent: the buffer is free again */
+  uint8_t f[32], *q = h3__put_vi(f, 0xf0700), *ln = q++, *v = h3__put_vi(q, sid);
+  v += h_priority_value((char *)v, urgency, incremental);
+  *ln = (uint8_t)(v - q); /* (under 64: one byte) */
+  if ((size_t)c->ctrl_len + (size_t)(v - f) > sizeof c->ctrl) return H3_E_AGAIN;
+  memcpy(c->ctrl + c->ctrl_len, f, (size_t)(v - f)), c->ctrl_len = (uint16_t)(c->ctrl_len + (v - f));
   return 0;
 }
 static inline int h3_data(h3_conn *c, uint64_t sid, const uint8_t *body, size_t len, int end) {

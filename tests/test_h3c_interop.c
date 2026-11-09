@@ -316,10 +316,37 @@ static void ng_server_tls_init(void) {
   NG_TLS.on_client_hello = &OCH;
   ngtcp2_crypto_picotls_configure_server_context(&NG_TLS);
 }
-/* the first datagram: accept, then read it */
-static int ng_accept(ngsrv *s, const uint8_t *d, size_t n) {
+/* NG_RETRY: ngtcp2's server answers the first Initial with a Retry (ngtcp2_crypto_write_retry, its own tokens) */
+static int NG_RETRY, NG_RETRIES;
+static const uint8_t NG_SECRET[32] = "cursed-http interop retry secret";
+static struct sockaddr_in NG_LA, NG_RA;
+/* the first datagram: accept, then read it; 1 when a Retry went out instead (in *retry, *rn bytes) */
+static int ng_accept(ngsrv *s, const uint8_t *d, size_t n, uint8_t *retry, size_t *rn) {
   ngtcp2_pkt_hd hd;
   if (ngtcp2_accept(&hd, d, n)) return -1;
+  NG_LA.sin_family = NG_RA.sin_family = AF_INET, NG_LA.sin_port = htons(443), NG_RA.sin_port = htons(5555);
+  ngtcp2_cid odcid = hd.dcid;
+  int retried = 0;
+  if (NG_RETRY && !hd.tokenlen) {
+    ngtcp2_cid rscid;
+    rscid.datalen = 8, ng_rand(rscid.data, 8, NULL);
+    uint8_t tok[256];
+    ngtcp2_ssize tl =
+        ngtcp2_crypto_generate_retry_token(tok, NG_SECRET, sizeof NG_SECRET, hd.version, (struct sockaddr *)&NG_RA,
+                                           sizeof NG_RA, &rscid, &hd.dcid, NOW_NS);
+    ngtcp2_ssize w =
+        tl < 0 ? -1 : ngtcp2_crypto_write_retry(retry, 1500, hd.version, &hd.scid, &rscid, &hd.dcid, tok, (size_t)tl);
+    if (w < 0) return -1;
+    *rn = (size_t)w, NG_RETRIES++;
+    return 1;
+  }
+  if (NG_RETRY) {
+    if (ngtcp2_crypto_verify_retry_token(&odcid, hd.token, hd.tokenlen, NG_SECRET, sizeof NG_SECRET, hd.version,
+                                         (struct sockaddr *)&NG_RA, sizeof NG_RA, &hd.dcid, 10 * NGTCP2_SECONDS,
+                                         NOW_NS))
+      return -1;
+    retried = 1;
+  }
   ngtcp2_callbacks cb = { 0 };
   cb.recv_client_initial = ngtcp2_crypto_recv_client_initial_cb,
   cb.recv_crypto_data = ngtcp2_crypto_recv_crypto_data_cb;
@@ -340,12 +367,11 @@ static int ng_accept(ngsrv *s, const uint8_t *d, size_t n) {
   tp.initial_max_streams_bidi = 100, tp.initial_max_streams_uni = 3;
   tp.initial_max_stream_data_bidi_local = tp.initial_max_stream_data_bidi_remote = 256 * 1024;
   tp.initial_max_stream_data_uni = 256 * 1024, tp.initial_max_data = 4 * 1024 * 1024;
-  tp.original_dcid = hd.dcid, tp.original_dcid_present = 1;
+  tp.original_dcid = odcid, tp.original_dcid_present = 1;
+  if (retried) tp.retry_scid = hd.dcid, tp.retry_scid_present = 1;
   ngtcp2_cid scid;
   scid.datalen = 8, ng_rand(scid.data, 8, NULL);
-  static struct sockaddr_in la, ra;
-  la.sin_family = ra.sin_family = AF_INET, la.sin_port = htons(443), ra.sin_port = htons(5555);
-  ngtcp2_path path = { { (struct sockaddr *)&la, sizeof la }, { (struct sockaddr *)&ra, sizeof ra }, NULL };
+  ngtcp2_path path = { { (struct sockaddr *)&NG_LA, sizeof NG_LA }, { (struct sockaddr *)&NG_RA, sizeof NG_RA }, NULL };
   if (ngtcp2_conn_server_new(&s->conn, &hd.scid, &scid, &path, hd.version, &cb, &st, &tp, NULL, s)) return -1;
   ngtcp2_path_storage_init(&s->ps, path.local.addr, path.local.addrlen, path.remote.addr, path.remote.addrlen, NULL);
   s->ref.get_conn = ng_get_conn, s->ref.user_data = s;
@@ -392,7 +418,10 @@ static int ng_write(ngsrv *s) {
       return -1;
     }
     if (ndata >= 0 && s->h3) nghttp3_conn_add_write_offset(s->h3, sid, (size_t)ndata);
-    if (!w) return 0;
+    if (!w) { /* done for now; ngtcp2 paces from here (its expiry says when it may write again) */
+      ngtcp2_conn_update_pkt_tx_time(s->conn, NOW_NS);
+      return 0;
+    }
     put(&TO_CLI, buf, (size_t)w);
   }
   return 0;
@@ -491,6 +520,9 @@ static int64_t cq_on_stream(quic_conn *q, uint64_t sid, uint64_t off, const uint
   client *cl = u;
   if (!cl->ready) return 0;
   int r = h3_recv(&cl->h, &H3C, sid, off, d, len, fin);
+  uint64_t ub[H3_QPACK_BLOCKED]; /* streams whose QPACK inserts just arrived: their bytes again */
+  for (int n; r >= 0 && (n = h3_unblocked(&cl->h, ub, H3_QPACK_BLOCKED)) > 0;)
+    for (int i = 0; i < n; i++) quic_stream_redeliver(q, ub[i]);
   if (r < 0) return -(int64_t)h3_error(&cl->h);
   return r;
 }
@@ -514,7 +546,7 @@ static void cq_established(quic_conn *q, void *u) {
   cl->ready = 1;
   submit_more(cl);
 }
-static const quic_callbacks CQCB = { cq_on_stream, cq_send, cq_wants, cq_reset, cq_established };
+static const quic_callbacks CQCB = { cq_on_stream, cq_send, cq_wants, cq_reset, cq_established, NULL };
 static void client_tls_init(void) {
   memset(&CLI_TLS, 0, sizeof CLI_TLS);
   CLI_TLS.random_bytes = ptls_openssl_random_bytes;
@@ -546,7 +578,11 @@ static int run(int nreq, int loss, int reorder) {
     dgram g;
     while (take(&TO_SRV, &g)) {
       if (!accepted) {
-        if (ng_accept(&sv, g.d, g.n) == 0) accepted = 1;
+        uint8_t rt[1500];
+        size_t rn = 0;
+        int a = ng_accept(&sv, g.d, g.n, rt, &rn);
+        if (a == 1) put(&TO_CLI, rt, rn);
+        if (a == 0) accepted = 1;
         continue;
       }
       ngtcp2_pkt_info pi = { 0 };
@@ -557,7 +593,12 @@ static int run(int nreq, int loss, int reorder) {
       }
     }
     if (accepted && ng_write(&sv)) srv_failed = 1;
-    while (take(&TO_CLI, &g)) quic_recv(&cl.q, g.d, g.n, now_ms());
+    int got = 0;
+    while (take(&TO_CLI, &g)) quic_recv(&cl.q, g.d, g.n, now_ms()), got = 1;
+    if (got) { /* what that lets the client send (ACKs open its window) goes before time moves on, as a real loop does */
+      if (cl.ready) submit_more(&cl);
+      while ((n = quic_send(&cl.q, out, sizeof out, now_ms())) > 0) put(&TO_SRV, out, n);
+    }
     if (srv_failed || cl.failed || cl.q.closing || cl.q.draining) break;
     if (cl.done == nreq && cl.submitted == nreq) break;
     if ((!TO_SRV.n && !TO_CLI.n) || next_arrival() > NOW_NS) {
@@ -581,6 +622,7 @@ static int run(int nreq, int loss, int reorder) {
   CHECK(accepted && cl.ready && !srv_failed,
         "handshake with ngtcp2 (loss %d%%): accepted %d client h3 %d server failed %d", loss, accepted, cl.ready,
         srv_failed);
+  CHECK(!NG_RETRY || cl.q.retried, "the client followed ngtcp2's Retry");
   CHECK(cl.q.confirmed && cl.q.sp[QUIC_SP_INITIAL].discarded && cl.q.sp[QUIC_SP_HANDSHAKE].discarded,
         "client handshake confirmed by ngtcp2's HANDSHAKE_DONE");
   CHECK(!cl.failed && cl.done == nreq && cl.ok == nreq && !cl.statuses_bad,
@@ -626,6 +668,9 @@ int main(int argc, char **argv) {
       run(100, 0, 1);
       run(100, 2, 1);
       run(60, 10, 1);
+      /* address validation first: ngtcp2's Retry, its token, retry_source_connection_id */
+      NG_RETRY = 1, NG_RETRIES = 0, run(50, 0, 0), run(100, 2, 1), NG_RETRY = 0;
+      CHECK(NG_RETRIES >= 2, "ngtcp2 sent %d Retry packets", NG_RETRIES);
     }
   printf("%s: %ld failures / %ld checks\n", fails ? "FAIL" : "PASS", fails, checks);
   return fails != 0;

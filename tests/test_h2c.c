@@ -672,11 +672,82 @@ static void test_traffic(void) {
   printf("traffic vs nghttp2's server and our own: %s\n", fails == before ? "ok" : "FAILED");
 }
 
+/* RFC 9218: the priority field's parser, then our server's scheduling: big responses, one urgent (by its
+ * priority field, or raised by a PRIORITY_UPDATE midway) finishes before the others; the rest in stream order */
+static uint8_t PBIG[1 << 19];
+static int pr_order[16], pr_n;
+static int pr_req(h2_conn *c, uint32_t sid, const h2_request *rq, int end, void *u) {
+  (void)rq, (void)end, (void)u;
+  return h2_respond(c, sid, 200, NULL, 0, PBIG, sizeof PBIG, 1) < 0;
+}
+static void pr_close(h2_conn *c, uint32_t sid, uint32_t err, void *u) {
+  (void)c, (void)u;
+  if (!err && pr_n < 16) pr_order[pr_n++] = (int)sid;
+}
+static const h2_callbacks PR_S = { pr_req, NULL, NULL, NULL, NULL, NULL },
+                          PR_C = { NULL, NULL, NULL, NULL, pr_close, NULL };
+static void pr_pump(h2_conn *cl, h2_conn *sv, int rounds, int server_frames) {
+  static uint8_t buf[1 << 16], c2s[1 << 20], s2c[1 << 22];
+  static h2_scratch sc;
+  size_t w, c2n = 0, s2n = 0;
+  for (int r = 0; r < rounds; r++) {
+    while ((w = h2_send(cl, buf, sizeof buf)) > 0) memcpy(c2s + c2n, buf, w), c2n += w;
+    while (c2n) {
+      int u = h2_recv(sv, &sc, c2s, c2n);
+      if (u <= 0) break;
+      memmove(c2s, c2s + u, c2n - (size_t)u), c2n -= (size_t)u;
+    }
+    for (int k = 0; k < server_frames && (w = h2_send(sv, buf, 16384 + 9)) > 0; k++)
+      memcpy(s2c + s2n, buf, w), s2n += w;
+    while (s2n) {
+      int u = h2_recv(cl, &sc, s2c, s2n);
+      if (u <= 0) break;
+      memmove(s2c, s2c + u, s2n - (size_t)u), s2n -= (size_t)u;
+    }
+  }
+}
+static void test_priorities(void) {
+  long before = fails;
+  uint8_t u, i;
+  struct {
+    const char *v;
+    int u, i;
+  } pv[] = { { "u=1", 1, 0 }, { "u=5, i", 5, 1 },  { "i, u=0", 0, 1 },         { "i=?0, u=7", 7, 0 },
+             { "u=8", 3, 0 }, { "u=x", 3, 0 },     { "foo=1, u=2;bar", 2, 0 }, { "i=?1", 3, 1 },
+             { "", 3, 0 },    { "u=4, u=6", 6, 0 } };
+  for (size_t k = 0; k < sizeof pv / sizeof pv[0]; k++) {
+    u = H_URGENCY_DEFAULT, i = 0;
+    h_priority_parse((const uint8_t *)pv[k].v, strlen(pv[k].v), &u, &i);
+    CHECK(u == pv[k].u && i == pv[k].i, "priority \"%s\": u=%d i=%d", pv[k].v, u, i);
+  }
+  for (int upd = 0; upd < 2; upd++) {
+    static h2_conn cl, sv;
+    h2_init_client(&cl, &PR_C, NULL), h2_init(&sv, &PR_S, NULL);
+    pr_n = 0;
+    hp_field f = { (const uint8_t *)"priority", (const uint8_t *)"u=5", 8, 3, 0, 0, 0, 0 },
+             urgent = { (const uint8_t *)"priority", (const uint8_t *)"u=1", 8, 3, 0, 0, 0, 0 };
+    h_request rq = {
+      (const uint8_t *)"GET", (const uint8_t *)"http", (const uint8_t *)"x", (const uint8_t *)"/", 3, 4, 1, 1, &f, 1, -1
+    };
+    for (int k = 0; k < 4; k++) h2_submit(&cl, &rq, NULL, 0, 1); /* streams 1, 3, 5, 7: u=5 */
+    if (!upd) rq.fields = &urgent;
+    h2_submit(&cl, &rq, NULL, 0, 1); /* 9: u=1 by its field, or (upd) u=5 raised to u=0 midway */
+    pr_pump(&cl, &sv, 4, 2);         /* some DATA of 1 has gone */
+    if (upd) CHECK(h2_priority_update(&cl, 9, 0, 0) == 0, "PRIORITY_UPDATE");
+    pr_pump(&cl, &sv, 4000, 4);
+    CHECK(pr_n == 5 && pr_order[0] == 9 && pr_order[1] == 1 && pr_order[2] == 3 && pr_order[3] == 5 && pr_order[4] == 7,
+          "%s: responses finished in the order %d %d %d %d %d (want 9 1 3 5 7)",
+          upd ? "PRIORITY_UPDATE" : "priority field", pr_order[0], pr_order[1], pr_order[2], pr_order[3], pr_order[4]);
+  }
+  printf("priorities (RFC 9218): %s\n", fails == before ? "ok" : "FAILED");
+}
+
 int main(void) {
   memset(BIGV, '"', sizeof BIGV); /* a 10-bit Huffman code: sent raw, the block exceeds one frame */
   for (size_t i = 0; i < sizeof UPLOAD; i++) UPLOAD[i] = (uint8_t)i;
   printf("sizeof(h2_conn) = %zu\n", sizeof(h2_conn));
   test_bad();
+  test_priorities();
   test_traffic();
   printf("%s: %ld failures / %ld checks\n", fails ? "FAIL" : "PASS", fails, checks);
   return fails != 0;
