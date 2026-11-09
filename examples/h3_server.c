@@ -47,8 +47,9 @@ static int on_request(h3_conn *h, uint64_t sid, const h_request *rq, int end, vo
   (void)u;
   static const hp_field ct = { (const uint8_t *)"content-type", (const uint8_t *)"text/plain", 12, 10, 0, 0, 0, 0 };
   size_t big = big_len(rq->path, rq->path_len);
-  if (end && big != SIZE_MAX) return h3_respond(h, sid, 200, &ct, 1, BIG, big, 1) < 0;
-  return end ? h3_respond(h, sid, 200, &ct, 1, (const uint8_t *)"hello, world\n", 13, 1) < 0 : 0;
+  int head = rq->method_len == 4 && !memcmp(rq->method, "HEAD", 4); /* a response to HEAD has no content */
+  if (end && big != SIZE_MAX) return h3_respond(h, sid, 200, &ct, 1, BIG, head ? 0 : big, 1) < 0;
+  return end ? h3_respond(h, sid, 200, &ct, 1, (const uint8_t *)"hello, world\n", head ? 0 : 13, 1) < 0 : 0;
 }
 static int on_data(h3_conn *h, uint64_t sid, const uint8_t *d, size_t n, int end, void *u) {
   (void)d, (void)n, (void)u;
@@ -61,13 +62,16 @@ static void h3_reset_cb(h3_conn *h, uint64_t sid, uint64_t code, void *u) {
   (void)h;
   quic_reset_stream(&((conn *)u)->q, sid, code);
 }
-static const h3_callbacks H3CB = { on_request, on_data, NULL, NULL, NULL, h3_reset_cb };
+static const h3_callbacks H3CB = { on_request, on_data, NULL, NULL, NULL, h3_reset_cb, NULL };
 
 static int64_t q_stream(quic_conn *q, uint64_t sid, uint64_t off, const uint8_t *d, size_t len, int fin, void *u) {
   (void)q;
   conn *c = u;
   if (!c->ready) return 0;
   int r = h3_recv(&c->h, &SC, sid, off, d, len, fin);
+  uint64_t ub[H3_QPACK_BLOCKED]; /* streams whose QPACK inserts just arrived: their bytes again */
+  for (int n; r >= 0 && (n = h3_unblocked(&c->h, ub, H3_QPACK_BLOCKED)) > 0;)
+    for (int i = 0; i < n; i++) quic_stream_redeliver(q, ub[i]);
   return r < 0 ? -(int64_t)h3_error(&c->h) : r;
 }
 static size_t q_send(quic_conn *q, uint64_t sid, uint8_t *out, size_t cap, int *fin, void *u) {
@@ -92,7 +96,12 @@ static void q_established(quic_conn *q, void *u) {
   h3_init(&c->h, &H3CB, c, (uint64_t)a, (uint64_t)b, (uint64_t)d);
   c->ready = 1;
 }
-static const quic_callbacks QCB = { q_stream, q_send, q_wants, q_reset, q_established };
+static int q_prio(quic_conn *q, uint64_t sid, void *u) { /* RFC 9218: the request's priority orders its data */
+  conn *c = u;
+  (void)q;
+  return c->ready ? h3_stream_priority(&c->h, sid) : H_URGENCY_DEFAULT << 1;
+}
+static const quic_callbacks QCB = { q_stream, q_send, q_wants, q_reset, q_established, q_prio };
 
 /* the connection a datagram belongs to: our connection ID is at a fixed place in either header */
 static int find(const uint8_t *d, size_t n) {
@@ -100,8 +109,8 @@ static int find(const uint8_t *d, size_t n) {
     if (!C[i]) continue;
     if (d[0] & 0x80) {
       if (n > 6 + QUIC_SCID_LEN && d[5] == QUIC_SCID_LEN && !memcmp(d + 6, C[i]->q.scid, QUIC_SCID_LEN)) return i;
-      if (n > 6u + d[5] && d[5] == C[i]->q.odcid_len && !memcmp(d + 6, C[i]->q.odcid, d[5]))
-        return i; /* client Initial retransmits */
+      if (n > 6u + d[5] && d[5] == C[i]->q.idcid_len && !memcmp(d + 6, C[i]->q.idcid, d[5]))
+        return i; /* the client's Initials and 0-RTT, before it has our ID */
     } else if (n > 1 + QUIC_SCID_LEN && !memcmp(d + 1, C[i]->q.scid, QUIC_SCID_LEN)) {
       return i;
     }
@@ -111,10 +120,10 @@ static int find(const uint8_t *d, size_t n) {
 
 int main(int argc, char **argv) {
   if (argc < 3) {
-    fprintf(stderr, "usage: %s cert.pem key.pem [port]\n", argv[0]);
+    fprintf(stderr, "usage: %s cert.pem key.pem [port] [-r]   (-r: validate addresses with a Retry first)\n", argv[0]);
     return 1;
   }
-  int port = argc > 3 ? atoi(argv[3]) : 4433;
+  int port = argc > 3 ? atoi(argv[3]) : 4433, retry = argc > 4 && !strcmp(argv[4], "-r");
   memset(BIG, 'x', sizeof BIG);
   static ptls_context_t tls;
   static ptls_openssl_sign_certificate_t sign;
@@ -134,11 +143,12 @@ int main(int argc, char **argv) {
   tls.sign_certificate = &sign.super;
   static quic_ctx qx;
   quic_ctx_init(&qx, &tls);
+  quic_ctx_resumption(&qx); /* session tickets, 0-RTT (only GETs go in it from our clients), NEW_TOKEN */
 
   int fd = socket(AF_INET, SOCK_DGRAM, 0);
   struct sockaddr_in a = { .sin_family = AF_INET,
                            .sin_port = htons((uint16_t)port),
-                           .sin_addr.s_addr = htonl(INADDR_ANY) };
+                           .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
   if (fd < 0 || bind(fd, (struct sockaddr *)&a, sizeof a)) {
     perror("bind");
     return 1;
@@ -162,11 +172,22 @@ int main(int argc, char **argv) {
       if (n > 0) {
         int i = find(buf, (size_t)n);
         if (i >= 0) quic_recv(&C[i]->q, buf, (size_t)n, now);
-        else {
+        else if (!(buf[0] & 0x80)) { /* a short header for a connection we do not have (a restart?): reset it */
+          size_t rl = quic_stateless_reset(&qx, buf, (size_t)n, out, sizeof out);
+          if (rl) sendto(fd, out, rl, 0, (struct sockaddr *)&from, fl);
+        } else {
           for (i = 0; i < MAXC && C[i]; i++) {}
           if (i < MAXC) {
+            /* -r: an Initial without a token gets a Retry (bound to the client's address); one with a token is
+             * accepted only if the token checks out */
+            size_t tl = n > 7 && buf[5] <= 20 && buf[6 + buf[5]] <= 20 ? buf[7 + buf[5] + buf[6 + buf[5]]] : 0;
+            if (retry && !tl) {
+              size_t rl = quic_retry(&qx, buf, (size_t)n, &from, fl, now, out, sizeof out);
+              if (rl) sendto(fd, out, rl, 0, (struct sockaddr *)&from, fl);
+              continue;
+            }
             conn *c = calloc(1, sizeof *c);
-            int r = c ? quic_accept(&c->q, &qx, buf, (size_t)n, now, &QCB, c) : QUIC_E_NOMEM;
+            int r = c ? quic_accept_from(&c->q, &qx, buf, (size_t)n, &from, fl, now, &QCB, c) : QUIC_E_NOMEM;
             if (r == QUIC_E_VN) {
               size_t vl = quic_version_negotiation(out, sizeof out, buf, (size_t)n);
               if (vl) sendto(fd, out, vl, 0, (struct sockaddr *)&from, fl);

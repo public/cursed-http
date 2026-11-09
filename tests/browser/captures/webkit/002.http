@@ -1,0 +1,12 @@
+GET /s.css HTTP/1.1
+Accept: text/css,*/*;q=0.1
+Referer: http://127.0.0.1:58415/
+User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/27.2 Safari/605.1.15
+Accept-Encoding: gzip, deflate
+Accept-Language: en-US
+Connection: Keep-Alive
+Host: 127.0.0.1:58415
+Sec-Fetch-Dest: style
+Sec-Fetch-Mode: no-cors
+Sec-Fetch-Site: same-origin
+

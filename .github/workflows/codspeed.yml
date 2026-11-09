@@ -1,0 +1,26 @@
+name: codspeed
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # lets CodSpeed trigger backtest runs to build the initial history
+  workflow_dispatch:
+
+jobs:
+  benchmarks:
+    name: Run benchmarks
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # actions/checkout
+      id-token: write # OIDC authentication with CodSpeed
+    steps:
+      - uses: actions/checkout@v7
+      - name: Build the benchmarks
+        run: |
+          cmake -S bench/codspeed -B build/codspeed -DCODSPEED_MODE=simulation
+          cmake --build build/codspeed -j
+      - name: Run the benchmarks
+        uses: CodSpeedHQ/action@v5
+        with:
+          mode: simulation
+          run: ./build/codspeed/cursed_http_bench

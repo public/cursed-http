@@ -89,7 +89,7 @@ static void srv_on_close(h2_conn *c, uint32_t sid, uint32_t err, void *u) {
   SS.closes++;
   if (err) SS.close_errors++, SS.last_reset = err;
 }
-static const h2_callbacks SRV_CB = { srv_on_request, srv_on_data, NULL, NULL, srv_on_close };
+static const h2_callbacks SRV_CB = { srv_on_request, srv_on_data, NULL, NULL, srv_on_close, NULL };
 
 /* -------------------------------------- nghttp2 client -------------------------------------- */
 typedef struct {

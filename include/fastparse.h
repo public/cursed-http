@@ -85,7 +85,14 @@
 
 enum { FP_NEED_MORE = 0, FP_FALLBACK = -1, FP_FULL = 1 }; // FP_FULL: fast_parse_many status only
 #define FP_MAXHDR 8192
-#define FP_NCH    (FP_MAXHDR / 64)
+// req_t: the most header lines a request may have under the req_t contract. fb_parse_req (fbparse.h) and the test
+// reference (tests/testlib.h ref_parse) answer -2 (400) above it; fast_parse doesn't count lines (README: "Not
+// validated"). 100, as h2o's H2O_MAX_HEADERS: browsers send 12-20 of their own, and real pages' requests reach 65
+// (tests/top1k). Override with -DFP_REQ_MAXHDR=n before including.
+#ifndef FP_REQ_MAXHDR
+#define FP_REQ_MAXHDR 100
+#endif
+#define FP_NCH (FP_MAXHDR / 64)
 
 // clang-format off
 // ==== BEGIN API SPEC FIELDS ====

@@ -41,6 +41,11 @@ $(H2B)/test_h2_scalar: tests/test_h2.c $(H2HDRS) $(H2B)/libnghttp2.a
 $(H2B)/test_h2_asan: tests/test_h2.c $(H2HDRS) $(H2B)/libnghttp2.a
 	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(N2INC) $< $(H2B)/libnghttp2.a -o $@
 
+$(H2B)/test_h2c: tests/test_h2c.c $(H2HDRS) $(H2B)/libnghttp2.a
+	$(H2CC) $(N2INC) $< $(H2B)/libnghttp2.a -o $@
+$(H2B)/test_h2c_asan: tests/test_h2c.c $(H2HDRS) $(H2B)/libnghttp2.a
+	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(N2INC) $< $(H2B)/libnghttp2.a -o $@
+
 $(H2B)/test_qpack: tests/test_qpack.c $(H2HDRS) $(H2B)/libnghttp3.a
 	$(H2CC) $(N3INC) $< $(H2B)/libnghttp3.a -o $@
 $(H2B)/test_qpack_asan: tests/test_qpack.c $(H2HDRS) $(H2B)/libnghttp3.a
@@ -51,9 +56,10 @@ $(H2B)/test_h3: tests/test_h3.c $(H2HDRS) $(H2B)/libnghttp3.a
 $(H2B)/test_h3_asan: tests/test_h3.c $(H2HDRS) $(H2B)/libnghttp3.a
 	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(N3INC) $< $(H2B)/libnghttp3.a -o $@
 
-H2TESTS := $(H2B)/test_quic $(H2B)/test_quic_interop $(H2B)/test_h3 $(H2B)/test_qpack $(H2B)/test_hpack $(H2B)/test_hpack_scalar $(H2B)/test_h2 $(H2B)/test_h2_scalar
-test-h2h3: $(H2TESTS)
+H2TESTS := $(H2B)/test_quic $(H2B)/test_quic_interop $(H2B)/test_h3 $(H2B)/test_qpack $(H2B)/test_hpack $(H2B)/test_hpack_scalar $(H2B)/test_h2 $(H2B)/test_h2_scalar $(H2B)/test_h2c $(H2B)/test_h3c $(H2B)/test_h3c_interop $(H2B)/test_quic_raw
+test-h2h3: $(H2TESTS) $(H2B)/quic_echo
 	@for t in $(H2TESTS); do echo "== $$t"; $$t || exit 1; done
+	tests/quic_echo_smoke.sh $(H2B)/quic_echo
 .PHONY: test-h2h3
 hfield-check:
 	$(PYTHON) -I gen/gen_hfield.py --check
@@ -75,6 +81,10 @@ mutants-h2: $(H2B)/libnghttp2.a $(H2B)/libnghttp3.a
 $(H2B)/h2_server: examples/h2_server.c $(H2HDRS)
 	@mkdir -p $(H2B)
 	$(CC) -O2 $(WARN) -Iinclude $< -o $@
+
+$(H2B)/h2_client: examples/h2_client.c $(H2HDRS)
+	@mkdir -p $(H2B)
+	$(CC) -O2 $(WARN) -Iinclude $< -lssl -lcrypto -o $@
 $(H2B)/h2spec:
 	cd $(TP)/h2spec && CGO_ENABLED=0 go build -o $(abspath $@) ./cmd/h2spec
 h2spec: $(H2B)/h2_server $(H2B)/h2spec
@@ -106,7 +116,16 @@ $(H2B)/nt/%.o: $(NT)/%.c $(H2B)/gen/ngtcp2/version.h
 NT_SRC := $(wildcard $(NT)/lib/*.c) $(NT)/crypto/shared.c $(NT)/crypto/picotls/picotls.c
 $(H2B)/libngtcp2.a: $(patsubst $(NT)/%.c,$(H2B)/nt/%.o,$(NT_SRC))
 	ar rcs $@ $^
+# raw QUIC (an echo protocol, our own ALPN): ours with ours, and with ngtcp2 as client and as server
+$(H2B)/test_quic_raw: tests/test_quic_raw.c $(H2HDRS) include/qhp.h $(H2B)/libngtcp2.a $(H2B)/libpicotls.a
+	$(H2CC) $(QINC) $(NTINC) $< $(H2B)/libngtcp2.a $(H2B)/libpicotls.a -lcrypto -o $@
 $(H2B)/test_quic_interop: tests/test_quic_interop.c $(H2HDRS) include/qhp.h $(H2B)/libngtcp2.a $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
+	$(H2CC) $(QINC) $(N3INC) $(NTINC) $< $(H2B)/libngtcp2.a $(H2B)/libnghttp3.a $(H2B)/libpicotls.a -lcrypto -o $@
+$(H2B)/test_h3c: tests/test_h3c.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
+	$(H2CC) $(QINC) $(N3INC) $< $(H2B)/libpicotls.a -lcrypto -o $@
+$(H2B)/test_h3c_asan: tests/test_h3c.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls.a
+	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(QINC) $(N3INC) $< $(H2B)/libpicotls.a -lcrypto -o $@
+$(H2B)/test_h3c_interop: tests/test_h3c_interop.c $(H2HDRS) include/qhp.h $(H2B)/libngtcp2.a $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
 	$(H2CC) $(QINC) $(N3INC) $(NTINC) $< $(H2B)/libngtcp2.a $(H2B)/libnghttp3.a $(H2B)/libpicotls.a -lcrypto -o $@
 $(H2B)/test_quic_interop_asan: tests/test_quic_interop.c $(H2HDRS) include/qhp.h $(H2B)/libngtcp2.a $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
 	$(CC) $(SAN) $(WARN) $(MARCH) -Iinclude -Itests $(QINC) $(N3INC) $(NTINC) $< $(H2B)/libngtcp2.a $(H2B)/libnghttp3.a $(H2B)/libpicotls.a -lcrypto -o $@
@@ -122,6 +141,23 @@ mutants-quic: $(H2B)/libngtcp2.a $(H2B)/libpicotls.a $(H2B)/libnghttp3.a
 
 $(H2B)/h3_server: examples/h3_server.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls.a
 	$(CC) -O2 $(WARN) $(MARCH) -Iinclude $(QINC) $< $(H2B)/libpicotls.a -lcrypto -o $@
+
+$(H2B)/quic_echo: examples/quic_echo.c $(H2HDRS) $(H2B)/libpicotls.a
+	$(CC) -O2 $(WARN) $(MARCH) -Iinclude $(QINC) $< $(H2B)/libpicotls.a -lcrypto -o $@
+
+# examples/quic_echo, server and client, over real UDP on 127.0.0.1 (test-h2h3 runs it too)
+quic-echo-smoke: $(H2B)/quic_echo
+	tests/quic_echo_smoke.sh $<
+.PHONY: quic-echo-smoke
+
+$(H2B)/h3_client: examples/h3_client.c $(H2HDRS) include/qhp.h $(H2B)/libpicotls.a
+	$(CC) -O2 $(WARN) $(MARCH) -Iinclude $(QINC) $< $(H2B)/libpicotls.a -lcrypto -o $@
+
+# the example clients against nginx, Apache, h2o, HAProxy, Caddy, Node (h2c) and Caddy, aioquic (h3) on
+# 127.0.0.1: SRV=<unpacked server packages> AIOQUIC_PY=<python with aioquic>, see tests/servers/run.sh
+servers-interop: $(H2B)/h2_client $(H2B)/h3_client
+	tests/servers/run.sh
+.PHONY: servers-interop
 
 $(H2B)/bench_h2h3: bench/bench_h2h3.c bench/h2_headers.h $(H2HDRS) $(H2B)/libnghttp2.a $(H2B)/libnghttp3.a
 	$(H2CC) -Ibench -DH2_MAX_STREAMS=1000 $(N2INC) $(N3INC) $< $(H2B)/libnghttp2.a $(H2B)/libnghttp3.a -o $@
