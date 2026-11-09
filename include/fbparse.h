@@ -154,20 +154,10 @@ FB_INLINE uint64_t fb_pe64_scalar(const char *p) {
   }
   return c;
 }
-FB_INLINE uint64_t fb_lf64_scalar(const char *p) {
-  uint64_t c = 0;
-  for (int i = 0; i < 8; i++) c |= fb_swar_mm(fb_swar_eq(fb_ld64(p + 8 * i), '\n' * FB_ONES)) << (8 * i);
-  return c;
-}
-FB_INLINE void fb_lfct64_scalar(const char *p, uint64_t *lf, uint64_t *ct) {
-  *lf = fb_lf64_scalar(p);
-  *ct = fb_ct64_scalar(p);
-}
 FB_INLINE void fb_all64_scalar(const char *p, uint64_t *m) {
   m[0] = fb_nt64_scalar(p);
   m[1] = fb_ct64_scalar(p);
   m[2] = fb_pe64_scalar(p);
-  m[3] = fb_lf64_scalar(p);
 }
 
 // The SIMD classify, written once over a small per-backend vector layer. A backend supplies:
@@ -319,7 +309,6 @@ FB_INLINE uint64_t fb_mm4(__m128i a, __m128i b, __m128i c, __m128i d) {
 // the predicates on one vector (nt is the backend's fb_ntv), then on a block
 FB_INLINE fb_m_t fb_ctv(fb_v_t x) { return FB_OR(FB_ANDN(FB_LE(x, 0x1f), FB_EQ(x, '\t')), FB_EQ(x, 0x7f)); }
 FB_INLINE fb_m_t fb_pev(fb_v_t x) { return FB_OR(FB_LE(x, 0x20), FB_EQ(x, 0x7f)); }
-FB_INLINE fb_m_t fb_lfv(fb_v_t x) { return FB_EQ(x, '\n'); }
 #ifndef FB_PACK
 #define FB_PACK(P, p)                                                                                                  \
   __extension__({                                                                                                      \
@@ -330,15 +319,9 @@ FB_INLINE fb_m_t fb_lfv(fb_v_t x) { return FB_EQ(x, '\n'); }
 FB_INLINE uint64_t fb_nt64_simd(const char *p) { return FB_PACK(fb_ntv, p); }
 FB_INLINE uint64_t fb_ct64_simd(const char *p) { return FB_PACK(fb_ctv, p); }
 FB_INLINE uint64_t fb_pe64_simd(const char *p) { return FB_PACK(fb_pev, p); }
-FB_INLINE uint64_t fb_lf64_simd(const char *p) { return FB_PACK(fb_lfv, p); }
 FB_INLINE void fb_ntct64_simd(const char *p, uint64_t *nt, uint64_t *ct) {
   FB_BLK(p);
   *nt = FB_BPACK(fb_ntv);
-  *ct = FB_BPACK(fb_ctv);
-}
-FB_INLINE void fb_lfct64_simd(const char *p, uint64_t *lf, uint64_t *ct) {
-  FB_BLK(p);
-  *lf = FB_BPACK(fb_lfv);
   *ct = FB_BPACK(fb_ctv);
 }
 FB_INLINE void fb_all64_simd(const char *p, uint64_t *m) { // block 0: all four
@@ -346,7 +329,6 @@ FB_INLINE void fb_all64_simd(const char *p, uint64_t *m) { // block 0: all four
   m[0] = FB_BPACK(fb_ntv);
   m[1] = FB_BPACK(fb_ctv);
   m[2] = FB_BPACK(fb_pev);
-  m[3] = FB_BPACK(fb_lfv);
 }
 #undef FB_EQ
 #undef FB_LE
@@ -425,22 +407,15 @@ FB_INLINE uint32_t fb_nt32_at(const char *p) {
 #endif
 
 // simd is a compile-time constant at every call site
-enum { FB_NT, FB_CT, FB_PE, FB_LF };
+enum { FB_NT, FB_CT, FB_PE };
 FB_INLINE uint64_t fb_cls64(int simd, const int which, const char *p) {
 #if FB_BACKEND != 0
-  if (simd)
-    return which == FB_NT   ? fb_nt64_simd(p)
-           : which == FB_CT ? fb_ct64_simd(p)
-           : which == FB_PE ? fb_pe64_simd(p)
-                            : fb_lf64_simd(p);
+  if (simd) return which == FB_NT ? fb_nt64_simd(p) : which == FB_CT ? fb_ct64_simd(p) : fb_pe64_simd(p);
 #endif
   (void)simd;
-  return which == FB_NT   ? fb_nt64_scalar(p)
-         : which == FB_CT ? fb_ct64_scalar(p)
-         : which == FB_PE ? fb_pe64_scalar(p)
-                          : fb_lf64_scalar(p);
+  return which == FB_NT ? fb_nt64_scalar(p) : which == FB_CT ? fb_ct64_scalar(p) : fb_pe64_scalar(p);
 }
-FB_INLINE void fb_all64(int simd, const char *p, uint64_t *m) { // m[FB_NT..FB_LF]
+FB_INLINE void fb_all64(int simd, const char *p, uint64_t *m) { // m[FB_NT..FB_PE]
 #if FB_BACKEND != 0
   if (simd) {
     fb_all64_simd(p, m);
@@ -461,28 +436,17 @@ FB_INLINE void fb_ntct64(int simd, const char *p, uint64_t *nt, uint64_t *ct) {
   (void)simd;
   fb_ntct64_scalar(p, nt, ct);
 }
-FB_INLINE void fb_lfct64(int simd, const char *p, uint64_t *lf, uint64_t *ct) {
-#if FB_BACKEND != 0
-  if (simd) {
-    fb_lfct64_simd(p, lf, ct);
-    return;
-  }
-#endif
-  (void)simd;
-  fb_lfct64_scalar(p, lf, ct);
-}
 
 // ---------------- the scan: per predicate one cached block mask; searches only move forward ----------------
 // First position >= p whose byte is in class `which`, if there is one before len; else some position >= len.
 // Blocks are only classified when they start before len, so reads stay within buf[len + 63]. Padding bytes
 // are classified like any others: whatever a search finds there is >= len, and callers read that as -2.
-// Block 0 is classified for all four predicates at once (request line + first headers). Later blocks only
-// for the predicate whose search reaches them; with pair = 1 an nt search classifies ct with it (the
-// sequential loop's value search follows in the same block). fb_line() (the walk) classifies lf and ct
-// together, and inside a long value only ct (a block without control bytes has no LF either).
+// Block 0 is classified for nt, ct and pe at once (request line + first headers). Later blocks only for
+// the predicate whose search reaches them; with pair = 1 an nt search classifies ct with it (the
+// sequential loop's value search follows in the same block). fb_line() (the walk) needs only ct.
 typedef struct {
-  int k[4];
-  uint64_t m[4];
+  int k[3];
+  uint64_t m[3];
 } fb_scan_t;
 FB_INLINE int fb_next(const char *b, int len, int p, fb_scan_t *s, const int which, const int pair, const int simd) {
   for (;;) {
@@ -500,59 +464,35 @@ FB_INLINE int fb_next(const char *b, int len, int p, fb_scan_t *s, const int whi
     p = (k + 1) << 6;
   }
 }
-// The walk's line scan: returns the first LF >= p and sets *ce to the first ct >= p (both: or some position
-// >= len). Classifies lf and ct together; both caches end on the LF's block.
-FB_INLINE int fb_line(const char *b, int len, int p, fb_scan_t *s, int *ce, const int simd) {
+// The walk's line scan: the first ct >= p (or some position >= len). An LF is a ct, so this is where the line ends
+// or goes wrong: CR LF or LF ends it, any other ct (or a CR not followed by LF) makes it invalid. One mask per block.
+FB_INLINE int fb_line(const char *b, int len, int p, fb_scan_t *s, const int simd) {
   int k = p >> 6;
-  if (FB_UNLIKELY(k != s->k[FB_LF] || k != s->k[FB_CT])) {
-    if (p >= len) {
-      *ce = p;
-      return p;
-    }
-    fb_lfct64(simd, b + 64 * k, &s->m[FB_LF], &s->m[FB_CT]);
-    s->k[FB_LF] = s->k[FB_CT] = k;
+  if (FB_UNLIKELY(k != s->k[FB_CT])) {
+    if (p >= len) return p;
+    s->m[FB_CT] = fb_cls64(simd, FB_CT, b + 64 * k);
+    s->k[FB_CT] = k;
   }
-  uint64_t ml = s->m[FB_LF] >> (p & 63), mc = s->m[FB_CT] >> (p & 63);
-  if (FB_LIKELY(ml)) {
-    *ce = p + __builtin_ctzll(mc);
-    return p + __builtin_ctzll(ml);
-  } // mc != 0: an LF is a ct
-  int c = mc ? p + __builtin_ctzll(mc) : -1;
+  uint64_t mc = s->m[FB_CT] >> (p & 63);
+  if (FB_LIKELY(mc)) return p + __builtin_ctzll(mc);
   // The line runs on into the next block. Most lines end there (short headers crossing a block boundary): classify
-  // that block exactly (lf and ct in one pass) before trying any skip windows, which only pay on long values.
-  p = ++k << 6;
-  if (p >= len) {
-    *ce = c >= 0 ? c : p;
-    return p;
-  }
-  fb_lfct64(simd, b + p, &s->m[FB_LF], &s->m[FB_CT]);
-  s->k[FB_LF] = s->k[FB_CT] = k;
-  if (s->m[FB_CT]) {
-    if (c < 0) c = p + __builtin_ctzll(s->m[FB_CT]);
-    if (s->m[FB_LF]) {
-      *ce = c;
-      return p + __builtin_ctzll(s->m[FB_LF]);
-    }
-  }
-  for (int exact = 1;; exact++) { // a long value: ct first, lf only where ct != 0 (LF is a ct)
+  // that block exactly (exact = 0) before trying any skip windows, which only pay on long values.
+  for (int exact = 0;; exact++) {
     p = ++k << 6;
-    if (p >= len) {
-      *ce = c >= 0 ? c : p;
-      return p;
-    }
+    if (p >= len) return p;
 #ifndef FB_HAVE_CTANY
     (void)exact;
 #else
     // Skip control-free stretches with fb_ctany_simd over windows aligned to the address (no cache-line-split loads,
-    // as memchr does), growing 256 -> 512 bytes; then find the line's end with exact masks over the same aligned
+    // as memchr does), growing 256 -> 512 bytes; then find the first ct with exact masks over the same aligned
     // 64-byte lines, in one loop, and return from here. Only for lines already FB_CTANY_AFTER blocks past the
     // crossing: on medium lines (100-300 bytes: user agents, accept lists, small cookies) a window almost always
     // hits and only costs (measured: ~10% on browser requests on x86).
     // Bounds: a window or line starts at most 63 bytes before p (bytes of this same line; masked off below) and never
     // before buf; windows are tested only while their last 64 bytes start before buf + len, lines only while they start
     // before it, so reads stay within buf[len + 63]. Positions found in the padding are >= len, which callers read as
-    // "incomplete", exactly as for the block path below. The lf/ct block caches are left as they were (an earlier
-    // block of this line): the next fb_line() classifies its own block again.
+    // "incomplete", exactly as for the block path below. The ct block cache is left as it was (an earlier block of
+    // this line): the next fb_line() classifies its own block again.
     if (simd && exact > FB_CTANY_AFTER) {
       const char *a = (const char *)((uintptr_t)(b + p) & ~(uintptr_t)63), *end = b + len;
       for (int nb = 4;;) {
@@ -566,28 +506,16 @@ FB_INLINE int fb_line(const char *b, int len, int p, fb_scan_t *s, int *ce, cons
       }
       for (; a < end; a += 64) {
         uint64_t keep = a < b + p ? ~0ull << ((b + p) - a) : ~0ull, ctm = fb_cls64(simd, FB_CT, a) & keep;
-        if (FB_LIKELY(!ctm)) continue;
-        if (c < 0) c = (int)(a - b) + __builtin_ctzll(ctm);
-        uint64_t lfm = fb_cls64(simd, FB_LF, a) & keep;
-        if (lfm) {
-          *ce = c;
-          return (int)(a - b) + __builtin_ctzll(lfm);
-        }
+        if (ctm) return (int)(a - b) + __builtin_ctzll(ctm);
       }
-      *ce = c >= 0 ? c : (int)(a - b);
       return (int)(a - b);
     }
 #endif
     uint64_t ct = fb_cls64(simd, FB_CT, b + p);
     if (FB_LIKELY(!ct)) continue;
-    if (c < 0) c = p + __builtin_ctzll(ct);
     s->m[FB_CT] = ct;
-    s->m[FB_LF] = fb_cls64(simd, FB_LF, b + p);
-    s->k[FB_LF] = s->k[FB_CT] = k;
-    if (s->m[FB_LF]) {
-      *ce = c;
-      return p + __builtin_ctzll(s->m[FB_LF]);
-    }
+    s->k[FB_CT] = k;
+    return p + __builtin_ctzll(ct);
   }
 }
 
@@ -644,7 +572,7 @@ FB_INLINE int fb_core(const char *b, int len, const char **method, size_t *metho
     if (c) return c;
   }
   if (len <= 0) return -2;
-  fb_scan_t sc = { { 0, 0, 0, 0 }, { 0, 0, 0, 0 } }; // cached block masks, block 0 for everything
+  fb_scan_t sc = { { 0, 0, 0 }, { 0, 0, 0 } }; // cached block masks, block 0 for everything
   fb_all64(simd, b, sc.m);
   // skip one empty line (pico: "some clients add CRLF after POST content")
   int p = 0;
@@ -706,17 +634,17 @@ FB_INLINE int fb_core(const char *b, int len, const char **method, size_t *metho
     int nl, vs;
     int l = len;
     if (walk) {
-      // walk: the next line start comes off the LF mask, so lines don't wait on each other's name/value scans.
-      // A line [p, l] is valid only if its first control byte is its end (the CR before the LF, or the LF):
-      // anything else is an error pico reports before reaching the LF (-1, never -2). A line without an LF
-      // before len goes to the sequential code below, which finds pico's exact -1 or -2.
-      int ce;
-      l = fb_line(b, len, p, &sc, &ce, simd);
-      if (FB_LIKELY(l < len)) {
-        // l - 1 >= p: b[p] is not LF, and not CR here. Valid: the first ct is the CR before the LF, or the LF itself.
-        if (FB_LIKELY(ce == l - 1 && b[l - 1] == '\r')) e = l - 1;
-        else if (ce == l && b[l - 1] != '\r') e = l;
+      // walk: the next line start comes off the ct mask, so lines don't wait on each other's name/value scans.
+      // The line's first ct (>= p + 1: b[p] is not CR or LF here) decides it: CR LF or LF ends it; anything else is
+      // invalid (pico's get_token_to_eol; a ct in the name fails its ':' check first, also -1). Decided here only if
+      // the byte after it is before len; otherwise the sequential code finds pico's exact -1 or -2.
+      int ce = fb_line(b, len, p, &sc, simd);
+      if (FB_LIKELY(ce + 1 < len)) {
+        unsigned w2 = (unsigned char)b[ce] | (unsigned)(unsigned char)b[ce + 1] << 8;
+        if (FB_LIKELY(w2 == ('\r' | '\n' << 8))) l = ce + 1;
+        else if ((w2 & 0xff) == '\n') l = ce;
         else return -1;
+        e = ce;
         if (FB_UNLIKELY(n != 0 && (c == ' ' || c == '\t'))) {
           name = NULL;
           nl = 0;
@@ -726,7 +654,7 @@ FB_INLINE int fb_core(const char *b, int len, const char **method, size_t *metho
 #if (FB_BACKEND == 2 || FB_BACKEND == 3) && !defined(FP_AVX512_EMU)
           // x86: classify the 32 bytes at the line start directly (one load, one LUT pass, tzcnt) instead of a
           // per-block nt mask whose cache misses depend on where lines cross blocks (unpredictable branches).
-          // The bytes are readable: the line's LF is < len and the 64-byte padding follows. Names of 32+ bytes
+          // The bytes are readable: the line's end is < len and the 64-byte padding follows. Names of 32+ bytes
           // fall back to the block masks.
           if (simd) {
             uint32_t ntm = fb_nt32_at(b + p);
