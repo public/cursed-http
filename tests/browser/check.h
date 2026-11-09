@@ -75,6 +75,19 @@ static void bc_fast(const char *what, const char *tag, size_t k, size_t n, int a
   } else bc_fail(what, tag, k, n, a, b);
 }
 
+// BC_FOCUS: only the lengths where a decision can change: 0, n, next to a CR, LF, ':' or SP, and at 64-byte block edges
+// (and one padding, the 48-header array only at full length)
+// (for large corpora in make test; the full sweep checks every length)
+static int BC_FOCUS;
+// BC_FOCUS 2 (light): only next to a CR or LF (where the walk decides a line), and 0 and n
+static int bc_focus_skip(const char *b, size_t k, size_t n) {
+  if (!BC_FOCUS || k == 0 || k == n) return 0;
+  if (BC_FOCUS == 1 && (k % 64 <= 1 || k % 64 == 63)) return 0;
+  for (size_t j = k - 1; j <= k + 1 && j < n; j++)
+    if (b[j] == '\r' || b[j] == '\n' || (BC_FOCUS == 1 && (b[j] == ':' || b[j] == ' '))) return 0;
+  return 1;
+}
+
 static fp_tmpl_t BC_X; // learned templates across the whole session, as one server thread would keep them
 // returns the number of new mismatches
 static long bc_check(const char *raw, size_t n, const char *tag) {
@@ -90,16 +103,17 @@ static long bc_check(const char *raw, size_t n, const char *tag) {
     int r = phr_parse_request(raw, n, &m, &ml, &p, &pl, &mv, h, &nh, 0);
     if (r > 0) hl = (size_t)r;
   }
-  for (int pad = 0; pad < 2; pad++) {
+  for (int pad = 0; pad < (BC_FOCUS ? 1 : 2); pad++) { // focused: the zero padding only
     memcpy(buf, raw, n);
     memset(buf + n, pad ? 0xff : 0, 64);
     for (size_t k = 0; k <= n; k++) {
       static bc_res_t A, B;
       // inside a body nothing is decided until it is complete: there, every 61st length and the last 64 only
       if (k > hl + 64 && k + 64 < n && k % 61) continue;
+      if (bc_focus_skip(raw, k, n)) continue;
       BC.lengths++;
       const size_t caps[2] = { BC_NH, 48 };
-      for (int ci = 0; ci < 2; ci++) {
+      for (int ci = 0; ci < (BC_FOCUS && k < n ? 1 : 2); ci++) { // focused: 48 at full length only
         bc_run(BC_PICO, buf, k, caps[ci], 0, &A);
         bc_run(BC_FB, buf, k, caps[ci], 0, &B);
         if (!bc_same(&A, &B)) bc_fail("fb_parse_request", tag, k, n, A.ret, B.ret);

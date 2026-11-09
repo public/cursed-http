@@ -11,6 +11,8 @@
 #   make conformance  third-party conformance suites (fetched at pinned commits)
 #   make real-browsers Chromium, Firefox and WebKit (Playwright) against the HTTP/1.1 parsers; make browser-replay
 #                     replays their saved requests (tests/browser/captures/) under every backend (part of make test)
+#   make top1k-full   the Tranco top-1k sites' real requests (tests/top1k/) at every length, every backend;
+#                     make top1k-replay (part of make test) checks them at the lengths next to line ends
 #   make fuzz         libFuzzer: fbparse / fastparse / batchparse differential targets (clang with libFuzzer;
 #                     FUZZ_TIME=s per target, default 30)
 #   make hypothesis   Hypothesis properties on grammar-built requests (venv in build/; HYP_EXAMPLES, default 300)
@@ -188,7 +190,7 @@ example-check: $(B)/read_loop
 GENVECTORS ?= 200000
 FBMODE ?=
 RUN := ./scripts/run_test.sh
-test: all gencheck example-check fuzz-replay browser-replay
+test: all gencheck example-check fuzz-replay browser-replay top1k-replay
 	@set -e; for t in $(FP_BINS); do $(RUN) 1 $$t nobench; done
 	@set -e; $(RUN) 2 $(B)/test_fbparse $(FBMODE); \
 	  for t in $(notdir $(filter-out $(B)/test_fbparse,$(FB_BINS))); do $(RUN) 1 $(B)/$$t quick; done
