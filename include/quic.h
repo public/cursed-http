@@ -46,6 +46,7 @@
 #define QUIC_MAX_STREAMS 128 /* stream slots: client bidi + uni + our uni */
 #endif
 #define QUIC_MAX_BIDI      100          /* initial_max_streams_bidi we advertise */
+#define QUIC_OWN_STREAMS   8            /* stream slots always left for our own streams */
 #define QUIC_MAX_UNI       8            /* initial_max_streams_uni */
 #define QUIC_STREAM_WIN    (256u << 10) /* initial_max_stream_data_bidi_remote / _uni */
 #define QUIC_CONN_WIN      (4u << 20)   /* initial_max_data */
@@ -124,7 +125,9 @@ typedef struct {
   /* the application protocol and what we let the peer do (set after quic_ctx_init; 0 / NULL: the defaults,
    * HTTP/3's): ALPN, offered by a client in this order, chosen by a server by its own; the peer's streams
    * (max_streams_bidi: a server 100, a client 0, as HTTP/3 servers open none; max_streams_uni 8), and our receive
-   * windows per stream and per connection (256 KiB, 4 MiB) */
+   * windows per stream and per connection (256 KiB, 4 MiB). The peer's two stream limits are capped together at
+   * QUIC_MAX_STREAMS - QUIC_OWN_STREAMS (the stream table holds both sides' streams; raise QUIC_MAX_STREAMS for
+   * more), and our own streams use only the slots those leave. ALPN: at most 8 protocols */
   const char *const *alpn;
   size_t nalpn;
   uint64_t max_streams_bidi, max_streams_uni, stream_window, conn_window;
@@ -486,6 +489,7 @@ struct quic_conn {
   uint64_t max_data_local, data_recv, data_consumed, max_data_peer, data_sent;
   uint8_t send_max_data, send_max_streams_bidi, send_max_streams_uni;
   uint64_t max_streams_bidi_local, max_streams_uni_local, opened_bidi, opened_uni;
+  uint32_t peer_slots; /* stream slots kept for the peer's streams: its two initial limits together */
   quic_rset closed[2]; /* indices of finished client streams (bidi, uni): opening stream N
                                  * implicitly opens all lower ones, which may still arrive later */
   uint64_t peer_max_streams_uni, peer_init_stream_data_uni, peer_bidi_local, peer_max_ack_delay, peer_ack_delay_exp;
@@ -1018,6 +1022,13 @@ static inline void quic__settings(quic_conn *c, const quic_ctx *x) {
   c->stream_win = x->stream_window ? x->stream_window : QUIC_STREAM_WIN;
   c->max_streams_bidi_local = x->max_streams_bidi ? x->max_streams_bidi : c->client ? 0 : QUIC_MAX_BIDI;
   c->max_streams_uni_local = x->max_streams_uni ? x->max_streams_uni : QUIC_MAX_UNI;
+  /* the peer can only ever have its initial limits' worth open at once (each MAX_STREAMS credit follows one of its
+   * streams being freed), so keeping that many slots free for it means a stream within its limit always fits */
+  uint64_t room = QUIC_MAX_STREAMS - QUIC_OWN_STREAMS;
+  if (c->max_streams_uni_local > room) c->max_streams_uni_local = room;
+  if (c->max_streams_bidi_local > room - c->max_streams_uni_local)
+    c->max_streams_bidi_local = room - c->max_streams_uni_local;
+  c->peer_slots = (uint32_t)(c->max_streams_bidi_local + c->max_streams_uni_local);
   c->max_data_local = c->conn_win;
 }
 /* the application protocol agreed on (ALPN), once the handshake has got that far; NULL before */
@@ -1025,7 +1036,7 @@ static inline const char *quic_alpn(quic_conn *c) { return c->tls ? ptls_get_neg
 static inline int quic__alpn_ok(const quic_ctx *x, const char *a) {
   if (!a) return 0;
   if (!x->nalpn) return !strcmp(a, "h3");
-  for (size_t i = 0; i < x->nalpn; i++)
+  for (size_t i = 0; i < x->nalpn && i < 8; i++) /* (what a client offered: the first 8) */
     if (!strcmp(a, x->alpn[i])) return 1;
   return 0;
 }
@@ -2021,11 +2032,17 @@ static inline int quic_connect(quic_conn *c, quic_ctx *x, const char *server_nam
   return quic_connect_resume(c, x, server_name, now, cb, user, NULL);
 }
 
+/* a slot for one more stream of ours, past those kept for the peer's */
+static inline int quic__own_room(const quic_conn *c) {
+  uint32_t own = 0;
+  for (int i = 0; i < QUIC_MAX_STREAMS; i++) own += c->s[i].used && QUIC__OURS(c, c->s[i].id);
+  return own + c->peer_slots < QUIC_MAX_STREAMS;
+}
 /* a new bidirectional stream (a client's request; a server's too, if the client allows them), or -1 at the peer's
  * initial_max_streams_bidi / MAX_STREAMS */
 static inline int64_t quic_open_bidi(quic_conn *c) {
   if (!(c->established || c->early_open) || c->closing || c->draining) return -1; /* (a client's in 0-RTT too) */
-  if ((c->next_bidi_id >> 2) >= c->peer_max_streams_bidi) return -1;
+  if ((c->next_bidi_id >> 2) >= c->peer_max_streams_bidi || !quic__own_room(c)) return -1;
   quic_stream *s = quic__stream_new(c, c->next_bidi_id);
   if (!s) return -1;
   c->next_bidi_id += 4;
@@ -2060,7 +2077,7 @@ static inline int quic_stream_redeliver(quic_conn *c, uint64_t sid) {
 }
 static inline int64_t quic_open_uni(quic_conn *c) {
   uint64_t idx = c->next_uni_id >> 2;
-  if (idx >= c->peer_max_streams_uni) return -1;
+  if (idx >= c->peer_max_streams_uni || !quic__own_room(c)) return -1;
   quic_stream *s = quic__stream_new(c, c->next_uni_id);
   if (!s) return -1;
   s->recv_done = 1, s->max_send = c->peer_init_stream_data_uni;

@@ -84,6 +84,7 @@ static uint64_t next_arrival(void) {
 /* -------------------------------------- the echo protocol -------------------------------------- */
 /* a stream's payload, byte by byte, from its id and offset */
 static uint8_t pay(int64_t sid, uint64_t off) { return (uint8_t)(sid * 131 + off * 7 + (off >> 8)); }
+#define NEST 160 /* streams per side in one run */
 typedef struct {
   int64_t sid;
   int used, ours;      /* ours: we opened it, sent a payload, and check the echo */
@@ -94,15 +95,17 @@ typedef struct {
   size_t cap;
 } est;
 typedef struct {
-  est s[64];
-  int opened, open_target; /* streams we open */
-  int done, bad;           /* ours echoed back correctly; byte or framing errors */
+  est s[NEST];
+  int opened, open_target;  /* streams we open */
+  int done, bad;            /* ours echoed back correctly; byte or framing errors */
+  int peer_fins;            /* the peer's streams whose fin has arrived */
+  int hold_fins, hold_done; /* echoes' fins wait for that many peer fins / for all of ours to be done */
 } echo;
 static est *e_find(echo *e, int64_t sid, int create) {
-  for (int i = 0; i < 64; i++)
+  for (int i = 0; i < NEST; i++)
     if (e->s[i].used && e->s[i].sid == sid) return &e->s[i];
   if (!create) return NULL;
-  for (int i = 0; i < 64; i++)
+  for (int i = 0; i < NEST; i++)
     if (!e->s[i].used) {
       memset(&e->s[i], 0, sizeof e->s[i]), e->s[i].used = 1, e->s[i].sid = sid;
       return &e->s[i];
@@ -129,6 +132,7 @@ static int e_in(echo *e, int64_t sid, uint64_t off, const uint8_t *d, size_t n, 
   s->recv += n;
   if (fin) {
     s->fin_in = 1;
+    if (!s->ours) e->peer_fins++;
     if (s->ours) {
       if (s->recv != s->len) return e->bad++, -1;
       e->done++;
@@ -137,9 +141,12 @@ static int e_in(echo *e, int64_t sid, uint64_t off, const uint8_t *d, size_t n, 
   return 0;
 }
 /* what is still to send on s: [sent, len), and whether the fin is due after it */
-static int e_fin_due(const est *s) { return !s->fin_out && (s->ours || s->fin_in); }
+static int e_fin_due(const echo *e, const est *s) {
+  if (s->fin_out || !(s->ours || s->fin_in)) return 0;
+  return s->ours || ((!e->hold_fins || e->peer_fins >= e->hold_fins) && (!e->hold_done || e->done >= e->open_target));
+}
 static void e_free(echo *e) {
-  for (int i = 0; i < 64; i++) free(e->s[i].buf);
+  for (int i = 0; i < NEST; i++) free(e->s[i].buf);
   memset(e, 0, sizeof *e);
 }
 
@@ -189,13 +196,13 @@ static size_t o_send(quic_conn *q, uint64_t sid, uint8_t *out, size_t cap, int *
   if (!s) return 0;
   size_t m = s->len - s->sent < cap ? s->len - s->sent : cap;
   memcpy(out, s->buf + s->sent, m), s->sent += m;
-  if (s->sent == s->len && e_fin_due(s)) *fin = 1, s->fin_out = 1;
+  if (s->sent == s->len && e_fin_due(&o->e, s)) *fin = 1, s->fin_out = 1;
   return m;
 }
 static int o_wants(quic_conn *q, uint64_t sid, void *u) {
   (void)q;
   est *s = e_find(&((ours *)u)->e, (int64_t)sid, 0);
-  return s && (s->sent < s->len || (s->sent == s->len && e_fin_due(s)));
+  return s && (s->sent < s->len || (s->sent == s->len && e_fin_due(&((ours *)u)->e, s)));
 }
 static void o_reset(quic_conn *q, uint64_t sid, uint64_t code, void *u) {
   (void)q, (void)sid, (void)code;
@@ -374,12 +381,12 @@ static void ng_pump(ng *g, wire *to) {
   ng_open_more(g);
   for (int guard = 0; guard < 20000; guard++) {
     est *s = NULL;
-    for (int i = 0; i < 64 && !s; i++)
+    for (int i = 0; i < NEST && !s; i++)
       if (g->e.s[i].used &&
-          (g->e.s[i].sent < g->e.s[i].len || (g->e.s[i].sent == g->e.s[i].len && e_fin_due(&g->e.s[i]))))
+          (g->e.s[i].sent < g->e.s[i].len || (g->e.s[i].sent == g->e.s[i].len && e_fin_due(&g->e, &g->e.s[i]))))
         s = &g->e.s[i];
     ngtcp2_vec v = { s ? s->buf + s->sent : NULL, s ? s->len - s->sent : 0 };
-    int fin = s && e_fin_due(s);
+    int fin = s && e_fin_due(&g->e, s);
     ngtcp2_ssize ndata = -1;
     ngtcp2_pkt_info pi;
     ngtcp2_ssize w = ngtcp2_conn_writev_stream(g->conn, &g->ps.path, &pi, out, 1252, &ndata,
@@ -420,6 +427,7 @@ static void ng_free(ng *g) {
 /* ------------------------------------------ one run ------------------------------------------ */
 enum { OURS_OURS, NG_CLIENT, NG_SERVER };
 static const char *KIND[3] = { "ours <-> ours", "ngtcp2 client -> our server", "our client -> ngtcp2 server" };
+static int HOLD; /* OURS_OURS: both sides' streams all open at once (see main) */
 static void run(int kind, int ncli, int nsrv, int loss, int reorder) {
   LOSS = loss, REORDER = reorder, TO_SRV.n = TO_CLI.n = 0;
   static ours oc, os;
@@ -432,7 +440,7 @@ static void run(int kind, int ncli, int nsrv, int loss, int reorder) {
     CHECK(quic_connect(&oc.q, &CQX, "localhost", now_ms(), &OCB, &oc) == 0, "quic_connect");
     ce = &oc.e;
   }
-  ce->open_target = ncli;
+  ce->open_target = ncli, ce->hold_done = HOLD != 0;
   se = kind == NG_SERVER ? &gs.e : &os.e;
   uint64_t start = NOW_NS;
   for (int guard = 0; guard < 3000000; guard++) {
@@ -443,7 +451,7 @@ static void run(int kind, int ncli, int nsrv, int loss, int reorder) {
       if (!accepted) {
         if (kind == NG_SERVER) accepted = ng_server_new(&gs, g.d, g.n) == 0;
         else accepted = quic_accept(&os.q, &SQX, g.d, g.n, now_ms(), &OCB, &os) == 0;
-        if (accepted) se->open_target = nsrv;
+        if (accepted) se->open_target = nsrv, se->hold_fins = HOLD;
         continue;
       }
       if (kind == NG_SERVER) ng_read(&gs, &g);
@@ -545,6 +553,26 @@ int main(void) {
       run(kind, 30, 10, 2, 1);
     }
   test_alpn_mismatch();
+  /* the stream table holds both sides' streams: the peer's limits are capped to fit it, with room for ours */
+  {
+    static quic_ctx x;
+    x = SQX, x.max_streams_bidi = 200;
+    static ours o;
+    memset(&o, 0, sizeof o);
+    quic__settings(&o.q, &x);
+    CHECK(o.q.max_streams_bidi_local + o.q.max_streams_uni_local == QUIC_MAX_STREAMS - QUIC_OWN_STREAMS,
+          "max_streams_bidi 200 is capped to the stream table: %llu bidi + %llu uni",
+          (unsigned long long)o.q.max_streams_bidi_local, (unsigned long long)o.q.max_streams_uni_local);
+  }
+  /* both sides near their limits at once: our server lets the client have 100 bidi streams and opens 30 of its own
+   * (130 at once would not fit in 128 slots); the client has 100 open while allowing the server 30 */
+  /* The client allows the server 30 bidi streams (+ 8 uni), so it keeps 128 - 38 = 90 slots for its own and opens 90
+   * at once. The server's echoes' fins wait until 90 of the client's streams have arrived, and the client's until all
+   * of its own are done, so the server holds 90 of the client's streams and its own at once; its own are capped at
+   * the 20 slots its limits leave. Without those two caps: 100 + 30 streams, over the 128 slots. */
+  CQX.max_streams_bidi = 30, HOLD = 90;
+  run(OURS_OURS, 100, 30, 0, 0);
+  run(OURS_OURS, 100, 30, 2, 1);
   printf("%s: %ld failures / %ld checks\n", fails ? "FAIL" : "PASS", fails, checks);
   return fails != 0;
 }
