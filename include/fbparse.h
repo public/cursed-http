@@ -897,6 +897,67 @@ static inline int fb_decode_chunked(const char *b, int len, char *out, int max_b
 FB_INLINE int fb_name_is(const char *n, const char *lc, int k) { // k in 8..16: compare n[0..k) with lc
   return (((fb_ld64(n) | FB_LC) ^ fb_ld64(lc)) | ((fb_ld64(n + k - 8) | FB_LC) ^ fb_ld64(lc + k - 8))) == 0;
 }
+#ifdef FB_HDRSW // experiment (#21): h2o-style dispatch, one switch on the name length, a first-byte test, then the compare
+FB_INLINE void fb_ax_cl(fb_ax_t *a, const char *v, int vl) {
+  if (a->have_cl || vl < 1 || vl > 9 || (vl > 1 && v[0] == '0')) {
+    a->flags |= FB_BADCL;
+    return;
+  }
+  int x = 0;
+  for (int i = 0; i < vl; i++) {
+    unsigned d = (unsigned char)v[i] - '0';
+    if (d > 9) {
+      a->flags |= FB_BADCL;
+      return;
+    }
+    x = x * 10 + (int)d;
+  }
+  a->cl = x;
+  a->have_cl = 1;
+}
+FB_INLINE void fb_ax_header(fb_ax_t *a, const char *n, int nl, const char *v, int vl) {
+  unsigned c0 = (unsigned char)n[0] | 0x20;
+  switch (nl) {
+  case 10:
+    if (c0 == 'c' && fb_name_is(n, "connection", 10)) // a "close" token in the list (RFC 9112 9.6)
+      for (int i = 0; i < vl;) {
+        while (i < vl && (v[i] == ' ' || v[i] == '\t' || v[i] == ',')) i++;
+        int t = i;
+        while (i < vl && v[i] != ',' && v[i] != ' ' && v[i] != '\t') i++;
+        if (i - t == 5 && (v[t] | 0x20) == 'c' && (v[t + 1] | 0x20) == 'l' && (v[t + 2] | 0x20) == 'o' &&
+            (v[t + 3] | 0x20) == 's' && (v[t + 4] | 0x20) == 'e')
+          a->close = 1;
+      }
+    break;
+  case 13:
+    if (c0 == 'a' && !a->have_auth && fb_name_is(n, "authorization", 13)) {
+      a->have_auth = 1;
+      if (vl >= 7 && (fb_ld64(v) << 8) == (fb_ld64("Bearer  ") << 8)) {
+        a->auth = 1;
+        a->tok = v + 7;
+        a->tok_len = vl - 7;
+      }
+    }
+    break;
+  case 14:
+    if (c0 == 'c' && fb_name_is(n, "content-length", 14)) fb_ax_cl(a, v, vl);
+    break;
+  default:
+    if (nl >= 16 && c0 == 't' && fb_name_is(n, "transfer-encodin", 16)) a->flags |= FB_TE;
+  }
+#if FP_NHDR > 0
+  if (a->hdrs) {
+    int i = fp_hdr_index(n, nl);
+    if (i >= 0 && (a->hdrs >> i & 1)) {
+      req_t *r = (req_t *)a->req;
+      r->hdr[i] = v;
+      r->hdr_len[i] = vl;
+      a->hdrs &= ~(1u << i);
+    }
+  }
+#endif
+}
+#else
 FB_INLINE void fb_ax_header(fb_ax_t *a, const char *n, int nl, const char *v, int vl) {
   if (nl == 13) {
     if (!a->have_auth && fb_name_is(n, "authorization", 13)) {
@@ -948,6 +1009,7 @@ FB_INLINE void fb_ax_header(fb_ax_t *a, const char *n, int nl, const char *v, in
     }
   }
 }
+#endif
 FB_INLINE void fb_ax_reqline(fb_ax_t *a, const char *m, int ml, const char *p, int pl) {
   if (a->lite && a->minor != 1) {
     a->skip = 1;
