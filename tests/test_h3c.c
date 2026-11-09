@@ -445,6 +445,9 @@ static int run(int nreq, int loss, int reorder) {
           uint8_t rt[256];
           size_t rn = quic_retry(&QX, g.d, g.n, addr, sizeof addr, now_ms(), rt, sizeof rt);
           CHECK(rn > 0, "quic_retry");
+          CHECK(quic_retry(&QX, g.d, 1199, addr, sizeof addr, now_ms(), rt, sizeof rt) == 0 &&
+                    quic_retry(&QX, g.d, 64, addr, sizeof addr, now_ms(), rt, sizeof rt) == 0,
+                "no Retry for a datagram under 1200 bytes (it would amplify a spoofed one)");
           if (!retries++) { rt[rn - 1] ^= 1, put(&TO_CLI, rt, rn), rt[rn - 1] ^= 1; /* a bad integrity tag */ }
           put(&TO_CLI, rt, rn);
           continue;
